@@ -10,7 +10,6 @@ import { CH32H417Device } from '../drivers/ch32h417/index.js';
 import { serializeSR } from './sr.js';
 import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
 import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
-import { PlanarSampleStore } from './data/planarStore.js';
 import { AnalogSampleStore } from './data/analogStore.js';
 import { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
@@ -273,7 +272,7 @@ export class AnalyzerApp {
           addStageTiming(capture.diagnostics!.ui.decodeScheduling, performance.now() - stageStarted);
         },
       });
-      if (token !== this.version) return;
+      if (token !== this.version) { this.releaseCapture(capture); return; }
       this.captureAbort = null; this.captureStop = null; this.acquisitionMemory = null;
       if (hasMessage(`device.name.${device.descriptor.id}`)) capture.nameKey = `device.name.${device.descriptor.id}` as MessageKey;
       if (!this.capture) this.setCapture(capture, false, true, initialView(capture));
@@ -290,7 +289,9 @@ export class AnalyzerApp {
     }
   }
   setCapture(capture: Capture, cancel = true, live = false, viewport?: readonly [bigint, bigint]): void {
-    if (cancel) this.cancelTask(false); this.capture = capture; const count = capture.logicChannelCount ?? capture.store.channelCount;
+    if (cancel) this.cancelTask(false);
+    if (this.capture && this.capture !== capture) this.releaseCapture(this.capture);
+    this.capture = capture; const count = capture.logicChannelCount ?? capture.store.channelCount;
     for (const protocol of this.protocols) { this.clearProtocol(protocol); for (const [key, value] of Object.entries(protocol.mapping)) if (value >= count) delete protocol.mapping[key as keyof ProtocolSettings['mapping']]; }
     if (capture.workspace) { this.protocols = capture.workspace.protocols.map(p => this.createProtocol(p)); this.selectedId = capture.workspace.selectedId; this.nextId += this.protocols.length; }
     this.syncTraces(); this.renderer.setCapture(capture, viewport); this.updateCaptureLabels();
@@ -322,9 +323,13 @@ export class AnalyzerApp {
   }
   private clearCaptureForAcquisition(): void {
     const previous = this.capture;
-    if (previous?.store instanceof PlanarSampleStore) previous.store.dispose();
-    for (const channel of previous?.analogChannels ?? []) if (channel.store instanceof AnalogSampleStore) channel.store.dispose();
+    this.releaseCapture(previous);
     this.clearCaptureView();
+  }
+  private releaseCapture(capture: Capture | null): void {
+    if (!capture) return;
+    if ('dispose' in capture.store && typeof capture.store.dispose === 'function') capture.store.dispose();
+    for (const channel of capture.analogChannels ?? []) if (channel.store instanceof AnalogSampleStore) channel.store.dispose();
   }
   private clearCaptureView(): void {
     this.capture = null; this.renderer.clearCapture();
@@ -337,7 +342,8 @@ export class AnalyzerApp {
     this.commitForm(); this.cancelTask(false); const token = ++this.version; this.importAbort = new AbortController(); this.setStatus('loading', 'status.loading'); this.showMessage('');
     try {
       const capture = await importCapture(file, Number(element<HTMLInputElement>('import-sample-rate').value), Number(element<HTMLSelectElement>('import-channel-count').value), undefined, this.importAbort.signal);
-      if (token !== this.version) return; this.importAbort = null; this.setCapture(capture); await this.decodeAll();
+      if (token !== this.version) { this.releaseCapture(capture); return; }
+      this.importAbort = null; this.setCapture(capture); await this.decodeAll();
     } catch (error) { if (token === this.version) { this.importAbort = null; this.setStatus('error', 'status.importError'); this.showMessage(error instanceof UIError ? error : errorLabel(error), true); } }
   }
   private hasInput(protocol: ProtocolSettings): boolean {

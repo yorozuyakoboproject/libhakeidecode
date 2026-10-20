@@ -62,6 +62,7 @@ export class SharedWorkerSampleStore implements SampleStore {
   private viewTerminal: Extract<ViewResponse, { type: 'done' }> | null = null;
   private failure: Error | null = null;
   private viewFailure: Error | null = null;
+  private disposed = false;
 
   constructor(source: SharedCaptureConsumerSource, channelCount: number, samplerate: number) {
     this.channelCount = channelCount; this.samplerate = samplerate;
@@ -206,10 +207,13 @@ export class SharedWorkerSampleStore implements SampleStore {
     return stored;
   }
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.worker.terminate(); this.viewWorker.terminate();
     const error = new DOMException('Shared capture store disposed', 'AbortError');
     for (const item of this.pending.values()) item.reject(error); this.pending.clear();
     for (const item of this.viewPending.values()) item.reject(error); this.viewPending.clear();
+    this.views.clear(); this.pendingViews.clear();
     this.doneReject(error); this.viewDoneReject(error);
   }
   private failStorage(error: Error): void {

@@ -167,7 +167,7 @@ export async function deviceCapture(device: SampleDevice, configuration: DeviceC
     capture.sharedSource = sharedSource;
     if (capture.store.samplerate !== configuration.sampleRate || capture.logicChannelCount !== configuration.logicChannels || capture.analogChannels!.length !== configuration.analogChannels
       || (capture.acquisition!.stopReason === 'complete' && capture.store.length !== sampleIndex(configuration.sampleCount))) {
-      capture.store instanceof PlanarSampleStore && capture.store.dispose();
+      if ('dispose' in capture.store && typeof capture.store.dispose === 'function') capture.store.dispose();
       for (const channel of capture.analogChannels ?? []) if (channel.store instanceof AnalogSampleStore) channel.store.dispose();
       throw new Error('Device capture does not match the requested configuration');
     }
