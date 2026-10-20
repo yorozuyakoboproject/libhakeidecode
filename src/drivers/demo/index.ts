@@ -1,6 +1,6 @@
-import { sampleIndex, minSample, samplePhase, type SampleInput } from './sample-index.js';
-import { createSampleChunk, type SampleChunk, type SampleChunkInput, type SampleSource } from './index.js';
-import { validateDeviceConfiguration, validateNumericValue, type DeviceConfiguration, type DeviceDescriptor, type SampleDevice, type SampleSourceContext } from './device.js';
+import { sampleIndex, minSample, samplePhase, type SampleInput } from '../../libhakei/sample-index.js';
+import { createSampleChunk, type SampleChunk, type SampleChunkInput, type SampleSource } from '../../libhakei/index.js';
+import { validateDeviceConfiguration, validateNumericValue, type DeviceConfiguration, type DeviceDescriptor, type SampleDevice, type SampleSourceContext } from '../../libhakei/device.js';
 
 export type DemoPattern = 'sine' | 'square' | 'triangle' | 'sawtooth' | 'random' | 'constant' |
   'clock' | 'incremental' | 'walking-one' | 'walking-zero';

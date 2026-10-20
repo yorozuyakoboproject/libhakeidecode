@@ -29,6 +29,11 @@
       "import": "./dist/src/drivers/index.js",
       "default": "./dist/src/drivers/index.js"
     },
+    "./drivers/demo": {
+      "types": "./dist/src/drivers/demo/index.d.ts",
+      "import": "./dist/src/drivers/demo/index.js",
+      "default": "./dist/src/drivers/demo/index.js"
+    },
     "./decoders/pwm": {
       "types": "./dist/src/decoders/pwm/index.d.ts",
       "import": "./dist/src/decoders/pwm/index.js",

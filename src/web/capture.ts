@@ -1,15 +1,13 @@
 import { sampleIndex, type SampleInput } from '../libhakei/sample-index.js';
 import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore, type RleChannelData } from './data/rleStore.js';
-import { ProceduralSampleStore } from './data/proceduralStore.js';
 import { splitAroundGaps } from './data/gaps.js';
 import type { GapSpan } from './data/types.js';
 import { channelWidthForProbes, type ChannelCount } from './data/channel-count.js';
 import { UIError, type MessageKey } from './i18n.js';
 import type { WorkspaceSettings } from './workspace.js';
 import { Transpose32Pipeline, type Pipeline32Backend } from './transpose32-pipeline.js';
-import { AnalogSampleStore, ProceduralAnalogSampleStore, type AnalogStore } from './data/analogStore.js';
-import { DemoDevice, type DemoPattern } from '../libhakei/demo.js';
+import { AnalogSampleStore, type AnalogStore } from './data/analogStore.js';
 import { createSampleChunk } from '../libhakei/index.js';
 import { validateDeviceConfiguration, type AcquisitionChunk, type AcquisitionDescription, type DeviceConfiguration, type SampleDevice } from '../libhakei/device.js';
 
@@ -17,7 +15,6 @@ import { MemoryBudget, MemoryBudgetError, SampleAllocationError, DEFAULT_CAPTURE
 import { WorkerSampleSource } from './acquisition-source.js';
 import { SharedWorkerSampleStore } from './shared-sample-store.js';
 export interface SharedCaptureConsumerSource { readonly allocatedBytes: number; readonly publishedSamples: bigint; readonly publisherMetrics?: { calls: number; bytes: number; totalMs: number; maxMs: number }; readonly h417TransportMetrics?: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number }; readonly h417WorkerMetrics?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number }; connectConsumer(port: MessagePort): void }
-const VIRTUAL_DEMO_MIN_SAMPLES = 4_000_000;
 export interface StageTiming { calls: number; totalMs: number; maxMs: number }
 export interface CaptureDiagnostics {
   mainThreadAppend: StageTiming;
@@ -39,8 +36,8 @@ export interface AcquisitionResult {
   memory: BudgetSnapshot;
   worker: boolean; buffers: number; maxQueued: number;
 }
-export type Store = PlanarSampleStore | RleSampleStore | ProceduralSampleStore | SharedWorkerSampleStore;
-export interface AnalogCaptureChannel { name: string; store: AnalogStore; pattern?: DemoPattern }
+export type Store = PlanarSampleStore | RleSampleStore | SharedWorkerSampleStore;
+export interface AnalogCaptureChannel { name: string; store: AnalogStore }
 export interface Capture { diagnostics?: CaptureDiagnostics; acquisition?: AcquisitionResult; sharedSource?: SharedCaptureConsumerSource; name: string; nameKey?: MessageKey; store: Store; labels: string[]; triggerSample: bigint; loadedMs: number; logicChannelCount?: number; analogChannels?: AnalogCaptureChannel[]; workspace?: WorkspaceSettings }
 
 const PACK_RANGE_LIMIT = 2 ** 26;
@@ -118,13 +115,6 @@ export function captureMemory(capture: Capture): { digitalBytes: number; analogB
 }
 export async function deviceCapture(device: SampleDevice, configuration: DeviceConfiguration, signal?: AbortSignal, options: CaptureOptions = {}): Promise<Capture> {
   signal?.throwIfAborted(); options.stopSignal?.throwIfAborted();
-  const virtual = virtualDemoCapture(device, configuration, options);
-  if (virtual) {
-    options.onProgress?.(sampleIndex(configuration.sampleCount), virtual.acquisition!.memory);
-    options.onCapture?.(virtual);
-    signal?.throwIfAborted(); options.stopSignal?.throwIfAborted();
-    return virtual;
-  }
   const sourceSignal = signal && options.stopSignal ? AbortSignal.any([signal, options.stopSignal]) : signal ?? options.stopSignal;
   const plan = capturePlan(device, configuration, options);
   const budget = new MemoryBudget(options.budgetBytes ?? DEFAULT_CAPTURE_BUDGET_BYTES, options.allocateBuffer);
@@ -242,45 +232,6 @@ async function captureSharedWorkerSource(source: WorkerSampleSource, name: strin
     store.dispose();
     throw error;
   } finally { source.onSharedProgress = null; store.onProgress = null; }
-}
-
-function virtualDemoCapture(device: SampleDevice, configuration: DeviceConfiguration, options: CaptureOptions): Capture | null {
-  const started = performance.now();
-  if (!(device instanceof DemoDevice) || configuration.sampleCount < VIRTUAL_DEMO_MIN_SAMPLES || options.worker === 'on' || options.allocateBuffer) return null;
-  validateDeviceConfiguration(device, configuration);
-  const logicPattern = configuration.options.logicPattern;
-  const analogPattern = configuration.options.analogPattern;
-  if (logicPattern !== 'square' && logicPattern !== 'clock') return null;
-  if (configuration.analogChannels && analogPattern !== 'sine' && analogPattern !== 'square' && analogPattern !== 'triangle'
-    && analogPattern !== 'sawtooth' && analogPattern !== 'constant') return null;
-  const frequencyHz = Number(configuration.options.frequencyHz ?? 1_000);
-  if (!(frequencyHz > 0) || !Number.isFinite(frequencyHz)) return null;
-  const count = validWidth(configuration.logicChannels);
-  const store = new ProceduralSampleStore({ channelCount: count, samplerate: configuration.sampleRate, length: configuration.sampleCount, frequencyHz });
-  const analogChannels: AnalogCaptureChannel[] = Array.from({ length: configuration.analogChannels }, (_, index) => ({
-    name: `A${index}`,
-    pattern: analogPattern as DemoPattern,
-    store: new ProceduralAnalogSampleStore({ samplerate: configuration.sampleRate, length: configuration.sampleCount,
-      pattern: analogPattern as 'sine' | 'square' | 'triangle' | 'sawtooth' | 'constant', frequencyHz,
-      amplitude: Number(configuration.options.amplitude ?? 1), offset: Number(configuration.options.offset ?? 0) }),
-  }));
-  const memory = captureMemory({ name: device.descriptor.name, store, labels: [], triggerSample: 0n, loadedMs: 0, logicChannelCount: configuration.logicChannels, analogChannels });
-  const reserved = (options.retainedBytes ?? 0) + (options.decodeReserveBytes ?? 0) + (options.displayReserveBytes ?? 0);
-  const limit = options.budgetBytes ?? DEFAULT_CAPTURE_BUDGET_BYTES;
-  if (reserved + memory.totalBytes > limit) throw new MemoryBudgetError(reserved + memory.totalBytes, limit, 'procedural capture metadata');
-  const capture: Capture = {
-    name: device.descriptor.name,
-    store,
-    labels: Array.from({ length: configuration.logicChannels }, (_, index) => `D${index}`),
-    triggerSample: 0n,
-    loadedMs: performance.now() - started,
-    logicChannelCount: configuration.logicChannels,
-    analogChannels,
-    acquisition: { targetSamples: sampleIndex(configuration.sampleCount), actualSamples: sampleIndex(configuration.sampleCount), stopReason: 'complete',
-      memory: { limitBytes: limit, usedBytes: memory.totalBytes, peakBytes: reserved + memory.totalBytes, allocations: 0 },
-      worker: false, buffers: 1, maxQueued: 0 },
-  };
-  return capture;
 }
 
 async function nextSample(iterator: AsyncIterator<AcquisitionChunk>, signal?: AbortSignal) {

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker as NodeWorker } from 'node:worker_threads';
-import { DemoDevice, defaultDeviceConfiguration, createSampleChunk } from '../dist/src/libhakei/index.js';
+import { defaultDeviceConfiguration, createSampleChunk } from '../dist/src/libhakei/index.js';
+import { DemoDevice } from '../dist/src/drivers/index.js';
 import { deviceCapture, captureSampleSource, captureMemory } from '../dist/src/web/capture.js';
 import { MemoryBudget, MemoryBudgetError, SampleAllocationError } from '../dist/src/web/memory.js';
 import { PlanarSampleStore } from '../dist/src/web/data/planarStore.js';

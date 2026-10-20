@@ -77,6 +77,4 @@ export async function consumeSampleSource<T>(source: AsyncIterable<T> | Iterable
   for await (const chunk of source) { signal?.throwIfAborted(); await onChunk(chunk); signal?.throwIfAborted(); }
 }
 
-export * from './demo.js';
-
 export * from './device.js';
