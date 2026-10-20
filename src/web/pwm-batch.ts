@@ -7,7 +7,11 @@ export function createPWMBatchReader(sampleRate: number): (message: PackedPWMBat
   return message => {
     const frames: PWMFrame[] = [], annotations: Annotation[] = []; let remaining = message.annotations;
     for (let i = 0; i < message.cycles.length; i += 3) {
-      const ss = message.cycles[i], es = message.cycles[i + 1], activeSamples = message.cycles[i + 2], averageDutyCycle = message.averages[i / 3];
+      const rawSs = message.cycles[i]!, rawEs = message.cycles[i + 1]!, rawActive = message.cycles[i + 2];
+      const ss = typeof rawSs === 'bigint' ? rawSs : BigInt(rawSs);
+      const es = typeof rawEs === 'bigint' ? rawEs : BigInt(rawEs);
+      const activeSamples = typeof rawActive === 'bigint' ? rawActive : BigInt(rawActive);
+      const averageDutyCycle = message.averages[i / 3];
       const periodSamples = es - ss, dutyCycle = sampleRatio(activeSamples, periodSamples) * 100, periodSeconds = Number(periodSamples) / sampleRate;
       frames.push({ protocol: 'pwm', ss, es, activeSamples, periodSamples, dutyCycle, periodSeconds, frequencyHz: sampleRate / Number(periodSamples), averageDutyCycle });
       if (remaining > 0) {

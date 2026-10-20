@@ -341,7 +341,7 @@ export class AnalyzerApp {
   private flushLiveCaptureView(): void {
 
     if (this.capture) {
-      this.renderer.updateCapture(this.capture);
+      this.renderer.updateCapture(this.capture, true);
       this.updateViewport();
     }
   }
@@ -377,7 +377,7 @@ export class AnalyzerApp {
             if (diagnostics) addStageTiming(diagnostics.ui.decodeUI, uiElapsed);
           }, protocol.decoder, capture.sharedSource, (progress, frames, annotations, resultBytes) => {
             protocol.progress = progress; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
-            if (protocol.annotations instanceof PagedAnnotationIndex) { protocol.annotations.setTotal(annotations); protocol.annotations.invalidate(); }
+            if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(annotations);
             this.updateMemoryUsage(); this.updateDecodeSummary();
             if (protocol === this.selectedProtocol) { this.renderer.schedule(); }
           }, (frames, annotations, resultBytes) => {

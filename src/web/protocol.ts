@@ -18,7 +18,8 @@ export interface DecodeQueryAnnotationsResult { type: 'decode-query-annotations-
 export interface DecodeReadFramesRequest { type: 'decode-read-frames'; requestId: number; offset: number; count: number }
 export interface DecodeReadFramesResult { type: 'decode-read-frames-result'; requestId: number; frames: Frame[] }
 
-export interface PackedPWMBatch { type: 'pwm-batch'; progress: number; cycles: bigint[]; averages: Float64Array; annotations: number }
+export type PWMPosition = number | bigint;
+export interface PackedPWMBatch { type: 'pwm-batch'; progress: number; cycles: PWMPosition[]; averages: Float64Array; annotations: number }
 export type WorkerDecodeMessage = DecodeMessage | PackedPWMBatch | DecodeProgressMessage | DecodePagedMessage | DecodeQueryAnnotationsResult | DecodeReadFramesResult | { type: 'decode-ack' };
 export interface DecodeStartRequest {
   type: 'decode-start'; decoder: DecoderId; sampleRate: number; length: bigint; channels: string[]; gaps: GapSpan[]; options: Partial<UARTOptions> | Partial<PWMOptions>; paged?: 'always' | 'auto' | 'never';

@@ -165,7 +165,7 @@ function start(request: DecodeStartRequest): void {
       const started = performance.now();
       s.pwmFrames!.append(message.cycles, message.averages);
       s.framesCount = s.pwmFrames!.length; s.annotationsCount = s.framesCount * 3;
-      if (!s.pagedRequested && !s.pagedOutput && (!s.pagedAutomatic || s.framesCount <= 100_000)) {
+      if (!s.pagedRequested && !s.pagedOutput && (!s.pagedAutomatic || s.framesCount <= 16_384)) {
         const batch = restore(message); s.stages.pwmBatchMs += performance.now() - started;
         return postBatch(s, batch);
       }
@@ -251,9 +251,28 @@ async function consumePacked(s: Session): Promise<void> {
 
 async function consumeShared(s: Session, reader: SharedChunkReader, selected: Record<string, number>): Promise<void> {
   try {
+    const directPacked = s.decoder === 'pwm' && s.channels.length === 1;
+    const directKey = directPacked ? s.channels[0]! : '', directBit = directPacked ? selected[directKey] : undefined;
+    if (directPacked && (!Number.isInteger(directBit) || directBit! < 0 || directBit! > 7)) throw new Error('Invalid shared PWM channel');
+    let lastYield = performance.now();
     while (true) {
       const part = await reader.next(1_048_576);
       if (!part) break;
+      if (directPacked) {
+        const started = performance.now();
+        const endSample = part.startSample + BigInt(part.sampleCount);
+        await s.pwm!.pushPacked(part.startSample, part.data, directBit!, Number(endSample * 1000n / (s.length || 1n)) / 1000);
+        s.stages.decoderPushMs += performance.now() - started;
+        s.decodedSamples += BigInt(part.sampleCount); s.processed = endSample; maybePostProgress(s);
+        if (performance.now() - lastYield >= 8) {
+          const yieldStarted = performance.now();
+          await yieldWorkerTask();
+          s.stages.cooperativeYieldMs += performance.now() - yieldStarted;
+          s.stages.cooperativeYieldCount++;
+          lastYield = performance.now();
+        }
+        continue;
+      }
       const unpackStarted = performance.now();
       const channels: Record<string, Uint8Array> = {};
       for (const [key, channel] of Object.entries(selected)) {

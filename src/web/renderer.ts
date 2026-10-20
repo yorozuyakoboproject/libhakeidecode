@@ -54,13 +54,14 @@ export class WaveformRenderer {
   onChange: () => void = () => {};
   onProtocolOrderChange: () => void = () => {};
   private pending = false;
-  private dataRequest = 0;
-  private preparedPending = false;
-  private preparing = new Map<object, Map<number, Promise<void>>>();
+  private viewRefresh: Promise<void> | null = null;
+  private viewRefreshDirty = false;
+  private viewReady = true;
+  private viewGeneration = 0;
+  private lastLiveViewAt = -Infinity;
   private renderingEnabled = true;
   private followLiveEnd = true;
   private frameRequest = 0;
-  private preparedFrameRequest = 0;
   private readonly observer: ResizeObserver;
   private draggingCursor = false;
   private pointerStart: { x: number; y: number } | null = null;
@@ -85,7 +86,7 @@ export class WaveformRenderer {
   constructor(readonly canvas: HTMLCanvasElement, readonly overview: HTMLCanvasElement, readonly axisCanvas?: HTMLCanvasElement) {
     window.addEventListener('hakei:themechange', this.themeChanged);
     const scroll = canvas.parentElement!;
-    this.observer = new ResizeObserver(() => this.schedule()); this.observer.observe(scroll);
+    this.observer = new ResizeObserver(() => this.invalidateView()); this.observer.observe(scroll);
     scroll.addEventListener('wheel', event => {
       if (!this.capture) return;
       event.preventDefault();
@@ -166,20 +167,24 @@ export class WaveformRenderer {
     this.capture = capture; this.channels = Array.from({ length: (capture.logicChannelCount ?? capture.store.channelCount) }, (_, i) => i);
     this.analogChannels = Array.from({ length: capture.analogChannels?.length ?? 0 }, (_, i) => i);
     this.rowOrder = this.channels.map(id => ({ kind: 'channel', id })); this.settleRows();
-    this.annotations.clear(); this.cursorA = null; this.cursorB = null; this.cursorMode = false; this.followLiveEnd = true; this.applyViewport(0n, capture.store.length);
+    this.annotations.clear(); this.cursorA = null; this.cursorB = null; this.cursorMode = false; this.followLiveEnd = true; this.lastLiveViewAt = -Infinity;
+    this.invalidateView(); this.applyViewport(0n, capture.store.length);
   }
   clearCapture(): void {
-    this.dataRequest++;
     this.capture = null; this.channels = []; this.analogChannels = []; this.rowOrder = [];
     this.start = 0n; this.end = 1n; this.cursorA = null; this.cursorB = null; this.cursorMode = false;
+    this.viewGeneration++; this.viewReady = true;
     this.schedule(); this.onChange();
   }
 
-  updateCapture(capture: Capture): void {
+  updateCapture(capture: Capture, force = false): void {
     this.capture = capture;
-    if (this.followLiveEnd) this.applyViewport(0n, capture.store.length);
+    if (this.followLiveEnd) {
+      const now = performance.now();
+      if (force || now - this.lastLiveViewAt >= 80) { this.lastLiveViewAt = now; this.applyViewport(0n, capture.store.length); }
+      else this.schedule();
+    }
     else this.applyViewport(this.start, minSample(capture.store.length, this.end));
-    this.schedule();
   }
   setViewport(startInput: SampleInput, endInput: SampleInput): void {
     this.followLiveEnd = false;
@@ -190,13 +195,17 @@ export class WaveformRenderer {
     let start: bigint, end: bigint;
     try { start = sampleFloor(startInput); end = sampleCeil(endInput); } catch { return; }
     const length = this.capture.store.length, span = maxSample(1n, minSample(length, end - start));
-    this.start = maxSample(0n, minSample(length - span, start)); this.end = this.start + span;
-    this.onChange(); this.schedule();
+    const nextStart = maxSample(0n, minSample(length - span, start)), nextEnd = nextStart + span, changed = nextStart !== this.start || nextEnd !== this.end;
+    this.start = nextStart; this.end = nextEnd;
+    this.onChange();
+    if (changed) this.invalidateView(); else this.schedule();
   }
+  private invalidateView(): void { this.viewGeneration++; this.viewReady = false; this.schedule(); }
   zoom(factor: number, anchor = .5): void {
     if (!(factor > 0) || !Number.isFinite(factor)) return;
     const bounded = Math.max(0, Math.min(1, anchor)), span = this.end - this.start;
-    const point = this.start + scaleSamples(span, bounded), next = maxSample(1n, scaleSamples(span, 1 / factor));
+    const point = this.start + scaleSamples(span, bounded), scaled = scaleSamples(span, 1 / factor);
+    const next = factor < 1 ? maxSample(span + 1n, scaled) : maxSample(1n, scaled);
     const start = point - scaleSamples(next, bounded); this.setViewport(start, start + next);
   }
   pan(samples: SampleInput): void { const delta = samplePosition(samples); this.setViewport(this.start + delta, this.end + delta); }
@@ -331,54 +340,57 @@ export class WaveformRenderer {
   setRenderingEnabled(enabled: boolean): void {
     this.renderingEnabled = enabled;
     if (!enabled) {
-      this.dataRequest++;
       if (this.pending) { cancelAnimationFrame(this.frameRequest); this.pending = false; }
-      if (this.preparedPending) { cancelAnimationFrame(this.preparedFrameRequest); this.preparedPending = false; }
     }
     else if (enabled) this.schedule();
   }
   resetMetrics(): void { this.timings = []; this.queryTimings = []; this.queryTotalMs = 0; this.queryCalls = 0; this.queryMaxMs = 0; }
   schedule(): void {
-    if (!this.renderingEnabled || this.pending) return; this.pending = true;
+    if (!this.renderingEnabled) return;
+    this.viewRefreshDirty = true;
+    if (this.pending) return;
+    this.pending = true;
     this.frameRequest = requestAnimationFrame(() => {
       this.pending = false;
       const capture = this.capture;
-      const store = capture?.store as (Capture['store'] & { prepareView?: (channels: readonly number[], start: bigint, end: bigint, bins: number, includeEdges?: boolean) => Promise<void> }) | undefined;
       if (!capture) { this.drawNow(); return; }
-      const width = Math.max(300, Math.floor(this.canvas.parentElement?.clientWidth || 1000));
-      const bins = Math.max(1, width - this.gutter - 16), request = ++this.dataRequest;
-      const start = this.start, end = this.end;
-      this.drawNow();
-      if (store?.prepareView) for (const channel of this.channels) this.prepareView(store, channel, request, capture, () => store.prepareView!([channel], start, end, bins));
-      for (const protocol of this.protocols) this.prepareView(protocol.annotations, -1, request, capture,
-        () => protocol.annotations.prepareView(start, end, Math.max(1, Math.floor(bins * this.protocolRows(protocol) * 3))));
+      this.refreshView();
     });
   }
-  private prepareView(target: object, channel: number, request: number, capture: Capture, read: () => Promise<void>): void {
-    let channels = this.preparing.get(target);
-    if (!channels) { channels = new Map(); this.preparing.set(target, channels); }
-    if (channels.has(channel)) return;
-    const task = read(); channels.set(channel, task);
-    const completed = (): void => {
-      if (channels!.get(channel) !== task) return;
-      channels!.delete(channel);
-      if (!channels!.size) this.preparing.delete(target);
-      if (!this.renderingEnabled) return;
-      if (request === this.dataRequest && this.capture === capture) this.schedulePreparedDraw(request, capture);
-      else this.schedule();
-    };
-    void task.then(completed, completed);
-  }
-  private schedulePreparedDraw(request: number, capture: Capture): void {
-    if (!this.renderingEnabled || request !== this.dataRequest || this.preparedPending) return;
-    this.preparedPending = true;
-    this.preparedFrameRequest = requestAnimationFrame(() => {
-      this.preparedPending = false;
-      if (request === this.dataRequest && this.renderingEnabled && this.capture === capture && !this.pending) this.drawNow();
+  private refreshView(): void {
+    const capture = this.capture;
+    if (!this.renderingEnabled || !capture) return;
+    if (this.viewRefresh) { this.viewRefreshDirty = true; return; }
+    const store = capture.store as (Capture['store'] & { prepareView?: (channels: readonly number[], start: bigint, end: bigint, bins: number, includeEdges?: boolean) => Promise<void> }) | undefined;
+    const width = Math.max(300, Math.floor(this.canvas.parentElement?.clientWidth || 1000));
+    const bins = Math.max(1, width - this.gutter - 16), start = this.start, end = this.end, generation = this.viewGeneration;
+    const tasks: Promise<void>[] = [];
+    if (store?.prepareView) tasks.push(store.prepareView(this.channels, start, end, bins));
+    for (const protocol of this.protocols) tasks.push(protocol.annotations.prepareView(start, end, Math.max(1, Math.floor(bins * this.protocolRows(protocol) * 3))));
+    if (!tasks.length) { this.viewReady = true; this.drawNow(); return; }
+    this.viewRefreshDirty = false;
+    const task = Promise.all(tasks).then(() => true, () => false).then(ready => {
+      if (this.viewRefresh === task) this.viewRefresh = null;
+      if (!this.renderingEnabled || this.capture !== capture) return;
+      if (!ready) return;
+      const currentWidth = Math.max(300, Math.floor(this.canvas.parentElement?.clientWidth || 1000));
+      if (Math.max(1, currentWidth - this.gutter - 16) !== bins) { this.schedule(); return; }
+      const current = generation === this.viewGeneration && start === this.start && end === this.end;
+      if (current) { this.viewReady = true; this.drawNow(); }
+      else this.drawPreparedFrame(start, end);
+      if (!current || this.viewRefreshDirty) this.schedule();
     });
+    this.viewRefresh = task;
+  }
+  private drawPreparedFrame(start: bigint, end: bigint): number {
+    const requestedStart = this.start, requestedEnd = this.end, ready = this.viewReady;
+    this.start = start; this.end = end; this.viewReady = true;
+    try { return this.drawNow(); }
+    finally { this.start = requestedStart; this.end = requestedEnd; this.viewReady = ready; }
   }
   drawNow(): number {
     if (!this.renderingEnabled) return 0;
+    if (this.capture && !this.viewReady) return 0;
     if (this.pending) { cancelAnimationFrame(this.frameRequest); this.pending = false; }
     const started = performance.now(); const capture = this.capture;
     this.width = Math.max(300, Math.floor(this.canvas.parentElement?.clientWidth || 1000));

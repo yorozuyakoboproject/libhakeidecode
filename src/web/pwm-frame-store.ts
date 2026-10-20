@@ -1,12 +1,13 @@
 import { sampleRatio } from '../libhakei/sample-index.js';
 import { formatPWMDuty, formatPWMPeriod, formatPWMFrequency } from '../decoders/pwm.js';
-import type { Annotation, PWMFrame } from './protocol.js';
+import type { Annotation, PWMFrame, PWMPosition } from './protocol.js';
 
 const PAGE_SIZE = 65_536;
 const UINT32_MAX = 0xffff_ffffn;
 type PositionArray = Uint32Array | BigUint64Array;
 type PositionPage = {
   base: bigint;
+  baseNumber: number;
   count: number;
   starts: PositionArray;
   active: PositionArray;
@@ -26,14 +27,41 @@ export class PWMFrameStore {
 
   clear(): void { this.pages.length = 0; this.count = 0; }
 
-  append(cycles: readonly bigint[], averages: ArrayLike<number>): void {
+  append(cycles: readonly PWMPosition[], averages: ArrayLike<number>): void {
     if (cycles.length % 3 !== 0 || averages.length !== cycles.length / 3) throw new RangeError('Invalid packed PWM page');
+    if (!cycles.length) return;
+    if (typeof cycles[0] === 'number') this.appendNumbers(cycles as readonly number[], averages);
+    else this.appendBigints(cycles as readonly bigint[], averages);
+  }
+
+  private appendNumbers(cycles: readonly number[], averages: ArrayLike<number>): void {
+    for (let index = 0; index < cycles.length; index += 3) {
+      const ss = cycles[index]!, es = cycles[index + 1]!, active = cycles[index + 2]!, period = es - ss;
+      if (!Number.isSafeInteger(ss) || !Number.isSafeInteger(es) || ss < 0 || es <= ss || !Number.isSafeInteger(active) || active < 0 || active > period) throw new RangeError('Invalid PWM cycle');
+      let page = this.pages.at(-1);
+      if (!page || page.count === PAGE_SIZE) {
+        page = { base: BigInt(ss), baseNumber: ss, count: 0, starts: new Uint32Array(PAGE_SIZE), active: new Uint32Array(PAGE_SIZE), periods: new Uint32Array(PAGE_SIZE), averages: new Float64Array(PAGE_SIZE) };
+        this.pages.push(page);
+      }
+      const offset = ss - page.baseNumber;
+      if (!Number.isSafeInteger(offset) || offset < 0 || page.count && ss < page.baseNumber + Number(page.starts[page.count - 1]!)) throw new Error('PWM cycle positions are not ordered');
+      if (offset > 0xffff_ffff || active > 0xffff_ffff || period > 0xffff_ffff) this.promote(page);
+      page.starts[page.count] = page.starts instanceof BigUint64Array ? BigInt(offset) : offset;
+      page.active[page.count] = page.active instanceof BigUint64Array ? BigInt(active) : active;
+      page.periods[page.count] = page.periods instanceof BigUint64Array ? BigInt(period) : period;
+      page.averages[page.count] = Number(averages[index / 3]!);
+      page.count++;
+      this.count++;
+    }
+  }
+
+  private appendBigints(cycles: readonly bigint[], averages: ArrayLike<number>): void {
     for (let index = 0; index < cycles.length; index += 3) {
       const ss = cycles[index]!, es = cycles[index + 1]!, active = cycles[index + 2]!, period = es - ss;
       if (ss < 0n || es <= ss || active < 0n || active > period) throw new RangeError('Invalid PWM cycle');
       let page = this.pages.at(-1);
       if (!page || page.count === PAGE_SIZE) {
-        page = { base: ss, count: 0, starts: new Uint32Array(PAGE_SIZE), active: new Uint32Array(PAGE_SIZE), periods: new Uint32Array(PAGE_SIZE), averages: new Float64Array(PAGE_SIZE) };
+        page = { base: ss, baseNumber: Number(ss), count: 0, starts: new Uint32Array(PAGE_SIZE), active: new Uint32Array(PAGE_SIZE), periods: new Uint32Array(PAGE_SIZE), averages: new Float64Array(PAGE_SIZE) };
         this.pages.push(page);
       }
       const offset = ss - page.base;

@@ -217,6 +217,7 @@ function stateCode(state: SharedCaptureState): number { return state === 'comple
 
 export class SharedChunkReader {
   private readonly chunks = new Map<number, SharedChunkDescriptor>();
+  private readonly orderedChunks: SharedChunkDescriptor[] = [];
   private cursor = 0n;
   private state: SharedCaptureState = 'open';
   private failure: string | undefined;
@@ -282,7 +283,7 @@ export class SharedChunkReader {
   async next(maxSamples = 1_048_576): Promise<SharedSampleRead | null> {
     if (!Number.isSafeInteger(maxSamples) || maxSamples < 1) throw new RangeError('maxSamples must be a positive safe integer');
     while (!this.closed) {
-      const chunk = [...this.chunks.values()].find(item => item.startSample <= this.cursor && this.cursor < item.startSample + BigInt(item.capacitySamples));
+      const chunk = this.findChunk(this.cursor);
       if (chunk) {
         const header = sharedHeader(chunk), committed = Atomics.load(header, COMMITTED_SAMPLES);
         const offset = Number(this.cursor - chunk.startSample);
@@ -313,12 +314,22 @@ export class SharedChunkReader {
     const previous = this.chunks.get(chunk.id);
     if (previous && previous.buffer !== chunk.buffer) throw new Error('Shared chunk id was reused');
     this.chunks.set(chunk.id, chunk);
+    const index = this.orderedChunks.findIndex(item => item.id === chunk.id);
+    if (index >= 0) this.orderedChunks[index] = chunk;
+    else if (!this.orderedChunks.length || chunk.startSample >= this.orderedChunks.at(-1)!.startSample) this.orderedChunks.push(chunk);
+    else {
+      const at = this.orderedChunks.findIndex(item => item.startSample > chunk.startSample);
+      if (at < 0) this.orderedChunks.push(chunk); else this.orderedChunks.splice(at, 0, chunk);
+    }
   }
   private findChunk(sample: bigint): SharedChunkDescriptor | undefined {
-    for (const chunk of this.chunks.values()) {
-      if (sample >= chunk.startSample && sample < chunk.startSample + BigInt(chunk.capacitySamples)) return chunk;
+    let low = 0, high = this.orderedChunks.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.orderedChunks[mid]!.startSample <= sample) low = mid + 1; else high = mid;
     }
-    return undefined;
+    const chunk = this.orderedChunks[low - 1];
+    return chunk && sample < chunk.startSample + BigInt(chunk.capacitySamples) ? chunk : undefined;
   }
   private waitForChange(): Promise<void> {
     return new Promise(resolve => this.waiters.add(resolve));

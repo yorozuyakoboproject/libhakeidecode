@@ -20,11 +20,14 @@ type Response =
 type ViewRequest =
   | { type: 'start'; port: MessagePort; channelCount: number }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
+  | { type: 'query-many'; id: number; channels: readonly number[]; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'finish' };
+type ViewChannelResult = { channel: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array };
 type ViewResponse =
   | { type: 'progress'; length: bigint; summaryBytes: number }
   | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array }
+  | { type: 'query-many-result'; id: number; startSample: bigint; endSample: bigint; bins: number; results: readonly ViewChannelResult[] }
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'done'; state: 'complete' | 'stopped' | 'error'; length: bigint; error?: string; summaryBytes: number }
   | { type: 'error'; message: string };
@@ -32,6 +35,7 @@ type RemoteView = { view: ColumnView; edges: bigint[] | null };
 type Pending = { resolve(value: Response): void; reject(error: Error): void };
 type PendingView = { resolve(value: ViewResponse): void; reject(error: Error): void };
 const keyFor = (channel: number, start: bigint, end: bigint, bins: number): string => `${channel}:${start}:${end}:${bins}`;
+const MAX_SAFE_SAMPLE = BigInt(Number.MAX_SAFE_INTEGER);
 
 export class SharedWorkerSampleStore implements SampleStore {
   readonly channelCount: number;
@@ -124,35 +128,46 @@ export class SharedWorkerSampleStore implements SampleStore {
 
   async prepareView(channels: readonly number[], start: bigint, end: bigint, bins: number, includeEdges = end - start < BigInt(bins)): Promise<void> {
     const unique = [...new Set(channels)].filter(channel => Number.isInteger(channel) && channel >= 0 && channel < this.channelCount);
-    await Promise.all(unique.map(async channel => {
+    if (!unique.length) return;
+    const fresh = (channel: number): RemoteView | undefined => {
       const key = keyFor(channel, start, end, bins);
-      const fresh = (): RemoteView | undefined => {
-        const cached = this.views.get(key), availableEnd = end < this.latestLength ? end : this.latestLength;
-        return cached && cached.view.endSample >= availableEnd && (!includeEdges || cached.edges !== null) ? cached : undefined;
-      };
-      if (fresh()) return;
-      const pendingKey = includeEdges ? key + ':edges' : key;
-      const pending = this.pendingViews.get(pendingKey);
-      if (pending) { await pending; if (fresh()) return; }
-      const task = (async (): Promise<void> => {
-        if (fresh()) return;
-        const response = await this.requestView({ type: 'query', id: this.nextId++, channel, startSample: start, endSample: end, bins });
-        if (response.type !== 'query-result') throw new Error('Invalid shared viewport response');
-        const previousEdges = this.views.get(key)?.edges ?? null;
+      const cached = this.views.get(key), availableEnd = end < this.latestLength ? end : this.latestLength;
+      return cached && cached.view.endSample >= availableEnd && (!includeEdges || cached.edges !== null) ? cached : undefined;
+    };
+    const missing = unique.filter(channel => !fresh(channel));
+    if (!missing.length) return;
+    const pendingKey = `batch:${start}:${end}:${bins}:${includeEdges ? 1 : 0}:${missing.join(',')}`;
+    const pending = this.pendingViews.get(pendingKey);
+    if (pending) { await pending; return; }
+    const task = (async (): Promise<void> => {
+      const loaded = new Map<number, ColumnView>();
+      if (missing.length > 1 && end <= MAX_SAFE_SAMPLE && this.latestLength <= MAX_SAFE_SAMPLE) {
+        const response = await this.requestView({ type: 'query-many', id: this.nextId++, channels: missing, startSample: start, endSample: end, bins });
+        if (response.type !== 'query-many-result') throw new Error('Invalid shared viewport batch response');
+        for (const result of response.results) loaded.set(result.channel, { channel: result.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
+          low: result.low, high: result.high, edge: result.edge, packed: result.packed });
+      } else {
+        await Promise.all(missing.map(async channel => {
+          const response = await this.requestView({ type: 'query', id: this.nextId++, channel, startSample: start, endSample: end, bins });
+          if (response.type !== 'query-result') throw new Error('Invalid shared viewport response');
+          loaded.set(channel, { channel: response.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
+            low: response.low, high: response.high, edge: response.edge, packed: response.packed });
+        }));
+      }
+      await Promise.all([...loaded.values()].map(async view => {
+        const key = keyFor(view.channel, start, end, bins), previousEdges = this.views.get(key)?.edges ?? null;
         let edges: bigint[] | null = previousEdges;
         if (includeEdges && edges === null) {
-          const edgeResponse = await this.requestView({ type: 'edges', id: this.nextId++, channel, startSample: start, endSample: end });
+          const edgeResponse = await this.requestView({ type: 'edges', id: this.nextId++, channel: view.channel, startSample: start, endSample: end });
           if (edgeResponse.type !== 'edges-result') throw new Error('Invalid shared viewport edge response');
           edges = edgeResponse.edges;
         }
-        const view: ColumnView = { channel: response.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
-          low: response.low, high: response.high, edge: response.edge, packed: response.packed };
         this.views.set(key, { view, edges });
         while (this.views.size > 96) this.views.delete(this.views.keys().next().value!);
-      })();
-      this.pendingViews.set(pendingKey, task);
-      try { await task; } finally { if (this.pendingViews.get(pendingKey) === task) this.pendingViews.delete(pendingKey); }
-    }));
+      }));
+    })();
+    this.pendingViews.set(pendingKey, task);
+    try { await task; } finally { if (this.pendingViews.get(pendingKey) === task) this.pendingViews.delete(pendingKey); }
   }
 
   query(channel: number, startInput: SampleInput, endInput: SampleInput, bins: number): ColumnView {
@@ -178,10 +193,16 @@ export class SharedWorkerSampleStore implements SampleStore {
     return response.data;
   }
   connectPackedReader(port: MessagePort): void { this.worker.postMessage({ type: 'reader', port } satisfies Request, [port]); }
-  async finish(): Promise<Extract<Response, { type: 'done' }>> {
+  async finishStorage(): Promise<Extract<Response, { type: 'done' }>> {
     this.worker.postMessage({ type: 'finish' } satisfies Request);
+    return this.done;
+  }
+  async finishViews(): Promise<Extract<ViewResponse, { type: 'done' }>> {
     this.viewWorker.postMessage({ type: 'finish' } satisfies ViewRequest);
-    const [stored] = await Promise.all([this.done, this.viewDone]);
+    return this.viewDone;
+  }
+  async finish(): Promise<Extract<Response, { type: 'done' }>> {
+    const [stored] = await Promise.all([this.finishStorage(), this.finishViews()]);
     return stored;
   }
   dispose(): void {
@@ -211,7 +232,7 @@ export class SharedWorkerSampleStore implements SampleStore {
       catch (error) { this.pending.delete(request.id); reject(error instanceof Error ? error : new Error(String(error))); }
     });
   }
-  private requestView(request: Extract<ViewRequest, { type: 'query' | 'edges' }>): Promise<ViewResponse> {
+  private requestView(request: Extract<ViewRequest, { type: 'query' | 'query-many' | 'edges' }>): Promise<ViewResponse> {
     if (this.viewFailure) return Promise.reject(this.viewFailure);
     return new Promise((resolve, reject) => {
       this.viewPending.set(request.id, { resolve, reject });

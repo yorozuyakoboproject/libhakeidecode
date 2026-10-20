@@ -214,7 +214,7 @@ async function captureSharedWorkerSource(source: WorkerSampleSource, name: strin
   publish(false);
   try {
     await source.waitForCompletion();
-    const stored = await store.finish();
+    const stored = await store.finishStorage();
     diagnostics.sharedStorage = stored.metrics;
     if (signal?.aborted) signal.throwIfAborted();
     if (options.stopSignal?.aborted) stopReason = 'stopped';
