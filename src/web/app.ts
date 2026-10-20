@@ -108,7 +108,7 @@ export class AnalyzerApp {
     element('decoder-form').addEventListener('change', event => {
       if ((event.target as HTMLElement).id === 'decoder-decimals') return;
       if (this.state === 'loading' && !this.captureAbort || !this.selectedProtocol) return;
-      const protocol = this.selectedProtocol; this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); this.clearProtocol(protocol); this.setStatus('ready', 'status.updated');
+      const protocol = this.selectedProtocol; this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelDecodes(protocol); this.clearProtocol(protocol); this.setStatus('ready', 'status.updated');
       this.decodeTimer = setTimeout(() => {
         this.decodeTimer = null;
         if (this.captureAbort) this.scheduleLiveDecode(); else void this.runProtocols([protocol]);
@@ -164,8 +164,9 @@ export class AnalyzerApp {
     return { ...settings, decimalPlaces: settings.decimalPlaces ?? 3, options: { ...defaults(settings.decoder), ...settings.options }, mapping: { ...settings.mapping }, client: new DecodeClient(), annotations: new AnnotationIndex(), frames: [], frameCount: 0, annotationCount: 0, resultBytes: 0, pagedResults: false, result: null, state: 'ready', progress: 0, error: null, savedOptions: {} };
   }
   removeProtocol(id: string): void {
-    this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); const index = this.protocols.findIndex(p => p.id === id); if (index < 0) return;
-    this.protocols[index].client.cancel(); this.protocols.splice(index, 1); this.syncTraces();
+    this.commitForm(); const index = this.protocols.findIndex(p => p.id === id); if (index < 0) return;
+    const protocol = this.protocols[index]!; if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelDecodes(protocol);
+    this.protocols.splice(index, 1); this.syncTraces();
     this.selectProtocol(this.protocols[Math.min(index, this.protocols.length - 1)]?.id ?? null, false);
     this.setStatus(this.protocols.length && this.protocols.every(p => p.state === 'done') ? 'done' : 'ready', 'status.ready');
   }
@@ -254,7 +255,7 @@ export class AnalyzerApp {
   }
   changeDecoder(decoder: DecoderId): void {
     const protocol = this.selectedProtocol; if (!protocol || !decoderDefinitions.some(definition => definition.decoder.descriptor.id === decoder) || decoder === protocol.decoder) return;
-    this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); protocol.savedOptions[protocol.decoder] = { ...protocol.options }; protocol.decoder = decoder; protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
+    this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelDecodes(protocol); protocol.savedOptions[protocol.decoder] = { ...protocol.options }; protocol.decoder = decoder; protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
     const previous = protocol.mapping, next: Record<string, number> = {}, inputs = decoderDefinition(decoder).ui.inputs;
     for (const input of inputs) if (previous[input.key] !== undefined) next[input.key] = previous[input.key]!;
     if (!Object.keys(next).length && inputs.length) { const first = Object.values(previous)[0]; if (first !== undefined) next[inputs[0]!.key] = first; }
@@ -574,9 +575,17 @@ export class AnalyzerApp {
     ++this.decodeVersion;
     for (const protocol of this.protocols) { protocol.client.cancel(); protocol.liveSession = undefined; if (protocol.state === 'decoding') protocol.state = 'cancelled'; }
   }
+  private cancelDecodes(target?: ProtocolInstance): void {
+    if (this.decodeTimer) { clearTimeout(this.decodeTimer); this.decodeTimer = null; }
+    ++this.version;
+    for (const protocol of this.protocols) {
+      if (protocol !== target && protocol.state !== 'decoding' && !protocol.liveSession) continue;
+      protocol.client.cancel(); protocol.liveSession = undefined; if (protocol.state === 'decoding') protocol.state = 'cancelled';
+    }
+  }
   private async runProtocols(protocols: readonly ProtocolInstance[], live = false, sampleLimit?: bigint): Promise<void> {
     if (!this.capture || (!live && this.state === 'loading')) return;
-    if (live) this.cancelDecodeOnly(); else this.cancelTask(false);
+    if (live) this.cancelDecodeOnly(); else this.cancelDecodes();
     const token = live ? ++this.decodeVersion : this.version, capture = this.capture; this.showMessage('');
     const pending = [...protocols, ...this.protocols.filter(p => !protocols.includes(p) && (p.state === 'ready' || p.state === 'cancelled'))].filter(p => this.hasInput(p));
     if (!pending.length) { this.setStatus('ready', 'status.ready'); this.updateDecodeSummary(); this.showCaptureOutcome(); return; }
