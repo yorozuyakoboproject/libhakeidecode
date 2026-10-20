@@ -1,0 +1,64 @@
+{
+  "name": "libhakeidecode",
+  "version": "0.3.0",
+  "description": "Browser and Node.js ESM logic sampling and protocol decoding.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    },
+    "./libhakei": {
+      "types": "./dist/src/libhakei/index.d.ts",
+      "import": "./dist/src/libhakei/index.js",
+      "default": "./dist/src/libhakei/index.js"
+    },
+    "./libhakeidecode": {
+      "types": "./dist/src/libhakeidecode/index.d.ts",
+      "import": "./dist/src/libhakeidecode/index.js",
+      "default": "./dist/src/libhakeidecode/index.js"
+    },
+    "./decoders/pwm": {
+      "types": "./dist/src/decoders/pwm.d.ts",
+      "import": "./dist/src/decoders/pwm.js",
+      "default": "./dist/src/decoders/pwm.js"
+    },
+    "./decoders/uart": {
+      "types": "./dist/src/decoders/uart.d.ts",
+      "import": "./dist/src/decoders/uart.js",
+      "default": "./dist/src/decoders/uart.js"
+    },
+    "./drivers/ch32h417": {
+      "types": "./dist/src/drivers/ch32h417/index.d.ts",
+      "import": "./dist/src/drivers/ch32h417/index.js",
+      "default": "./dist/src/drivers/ch32h417/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test tests/*.test.mjs",
+    "preserve": "npm run build",
+    "serve": "node scripts/server.mjs",
+    "prepack": "npm run build",
+    "build:wasm": "node scripts/build-transpose-wasm.mjs"
+  },
+  "files": [
+    "src",
+    "dist",
+    "web",
+    "scripts",
+    "README.md",
+    "tsconfig.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wabt": "1.0.39"
+  },
+  "types": "./dist/src/index.d.ts"
+}

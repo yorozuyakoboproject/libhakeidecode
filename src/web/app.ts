@@ -1,0 +1,606 @@
+import { compareSamples, minSample, maxSample } from '../libhakei/sample-index.js';
+import { scaleSamples } from '../libhakei/sample-index.js';
+import { PWMDecoder, type PWMOptions } from '../decoders/pwm.js';
+import { UARTDecoder, type UARTOptions } from '../decoders/uart.js';
+import { deviceCapture, importCapture, captureMemory, type Capture, type StageTiming } from './capture.js';
+import { MemoryBudgetError, type BudgetSnapshot } from './memory.js';
+import { DemoDevice } from '../libhakei/demo.js';
+import { DeviceControls } from './device-controls.js';
+import { CH32H417Device } from '../drivers/ch32h417/index.js';
+import { serializeSR } from './sr.js';
+import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
+import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
+import { PlanarSampleStore } from './data/planarStore.js';
+import { AnalogSampleStore } from './data/analogStore.js';
+import { AnnotationIndex } from './event-index.js';
+import { PagedAnnotationIndex } from './paged-annotation-index.js';
+import { frameCSV, type Frame, type DecoderId } from './protocol.js';
+import type { ProtocolSettings, WorkspaceSettings } from './workspace.js';
+import type { OptionDeclaration } from '../libhakeidecode/types.js';
+import './preferences.js';
+import { errorLabel, hasMessage, numberLabel, t, translateDOM, UIError, type MessageKey, type MessageParams } from './i18n.js';
+export function element<T extends HTMLElement = HTMLElement>(id: string): T {
+  const node = document.getElementById(id); if (!node) throw new Error(`Missing UI element: ${id}`); return node as T;
+}
+function downloadBlob(name: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob); const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = name; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function download(name: string, data: BlobPart, type: string): void { downloadBlob(name, new Blob([data], { type })); }
+export interface ProtocolInstance extends ProtocolSettings {
+  client: DecodeClient;
+  annotations: AnnotationIndex;
+  frames: Frame[];
+  frameCount: number;
+  annotationCount: number;
+  resultBytes: number;
+  pagedResults: boolean;
+  result: DecodeResult | null;
+  state: 'ready' | 'decoding' | 'done' | 'cancelled' | 'error';
+  progress: number;
+  error: string | UIError | null;
+  savedOptions: Partial<Record<DecoderId, Record<string, string | number>>>;
+  liveSession?: LiveDecodeSession;
+  liveBatchMetrics?: LiveDecodeSession['mainThreadBatches'];
+  liveBatchStages?: { frames: { calls: number; totalMs: number; maxMs: number }; annotations: { calls: number; totalMs: number; maxMs: number }; ui: { calls: number; totalMs: number; maxMs: number } };
+}
+const colors = ['#70d7a1', '#efbc6b', '#79adff', '#d091eb', '#72c9df', '#ec8291', '#b3ca78', '#aca6eb'];
+function addStageTiming(stage: StageTiming, elapsed: number): void {
+  stage.calls++; stage.totalMs += elapsed; stage.maxMs = Math.max(stage.maxMs, elapsed);
+}
+function declarations(decoder: DecoderId): readonly OptionDeclaration[] { return (decoder === 'pwm' ? PWMDecoder : UARTDecoder).descriptor.options as readonly OptionDeclaration[]; }
+function defaults(decoder: DecoderId): Record<string, string | number> { return Object.fromEntries(declarations(decoder).map(o => [o.id, o.default as string | number])); }
+export class AnalyzerApp {
+  protocols: ProtocolInstance[] = [];
+  selectedId: string | null = null;
+  get selectedProtocol(): ProtocolInstance | null { return this.protocols.find(p => p.id === this.selectedId) ?? null; }
+  get decoder(): DecoderId { return this.selectedProtocol?.decoder ?? 'uart'; }
+  get frames(): Frame[] { return this.selectedProtocol?.frames ?? []; }
+  get result(): DecodeResult | null { return this.selectedProtocol?.result ?? null; }
+  capture: Capture | null = null;
+  state: 'ready' | 'loading' | 'decoding' | 'done' | 'cancelled' | 'error' = 'ready';
+  readonly renderer = new WaveformRenderer(element('waveform'), element('overview'), element('time-axis'));
+  private version = 0;
+  private decodeVersion = 0;
+  private nextId = 0;
+  readonly deviceControls = new DeviceControls(element<HTMLFormElement>('device-form'), [new DemoDevice(), new CH32H417Device()]);
+  private captureAbort: AbortController | null = null;
+  private captureStop: AbortController | null = null;
+  private acquisitionMemory: BudgetSnapshot | null = null;
+  private importAbort: AbortController | null = null;
+  private saveAbort: AbortController | null = null;
+  private decodeTimer: ReturnType<typeof setTimeout> | null = null;
+  private statusMessage: { key: MessageKey; params: MessageParams } = { key: 'status.ready', params: {} };
+  private displayedMessage: string | UIError | { key: MessageKey; params?: MessageParams } = '';
+  private messageIsError = false;
+  constructor() {
+    this.renderer.onChange = () => this.updateViewport();
+    this.renderer.onProtocolOrderChange = () => this.renderProtocolList();
+    this.renderer.onAnnotationClick = (id, ss, es) => { this.selectProtocol(id); if (ss !== this.renderer.start || es !== this.renderer.end) this.renderer.focus(ss, es); };
+    window.addEventListener('hakei:localechange', () => this.refreshLocale());
+    element('add-protocol').addEventListener('click', () => this.addProtocol(element<HTMLSelectElement>('add-decoder-type').value as DecoderId));
+    element('remove-protocol').addEventListener('click', () => { if (this.selectedId) this.removeProtocol(this.selectedId); });
+    element<HTMLSelectElement>('decoder-type').addEventListener('change', () => this.changeDecoder(element<HTMLSelectElement>('decoder-type').value as DecoderId));
+    element<HTMLInputElement>('protocol-name').addEventListener('input', () => {
+      const protocol = this.selectedProtocol; if (!protocol) return;
+      protocol.name = element<HTMLInputElement>('protocol-name').value.trim().slice(0, 80) || protocol.decoder.toUpperCase(); this.renderProtocolList(); this.renderer.schedule();
+    });
+    element<HTMLInputElement>('protocol-color').addEventListener('input', () => {
+      const protocol = this.selectedProtocol; if (!protocol) return;
+      protocol.color = element<HTMLInputElement>('protocol-color').value; this.renderProtocolList(); this.renderer.schedule();
+    });
+    element<HTMLFormElement>('decoder-form').addEventListener('submit', event => { event.preventDefault(); });
+    element('pwm-decimals').addEventListener('change', () => {
+      const protocol = this.selectedProtocol; if (!protocol) return;
+      protocol.decimalPlaces = Number(element<HTMLSelectElement>('pwm-decimals').value);
+      this.updateDecodeSummary(); this.renderer.schedule();
+    });
+    element('decoder-form').addEventListener('change', event => {
+      if ((event.target as HTMLElement).id === 'pwm-decimals') return;
+      if (this.state === 'loading' && !this.captureAbort || !this.selectedProtocol) return;
+      const protocol = this.selectedProtocol; this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); this.clearProtocol(protocol); this.setStatus('ready', 'status.updated');
+      this.decodeTimer = setTimeout(() => {
+        this.decodeTimer = null;
+        if (this.captureAbort) this.scheduleLiveDecode(); else void this.runProtocols([protocol]);
+      }, 180);
+    });
+    element('open-file').addEventListener('click', () => element<HTMLInputElement>('file-input').click());
+    element<HTMLInputElement>('file-input').addEventListener('change', event => { const input = event.target as HTMLInputElement, file = input.files?.[0]; input.value = ''; if (file) void this.openFile(file); });
+    element<HTMLFormElement>('device-form').addEventListener('submit', event => { event.preventDefault(); void this.startCapture(); });
+    this.deviceControls.onConnectionChange = () => this.renderStatus();
+    this.deviceControls.onChange = () => {
+      this.cancelTask(false); this.refreshProtocolMappings(); this.setStatus('ready', 'status.updated'); this.updateMemoryUsage();
+    };
+    this.updateMemoryUsage();
+    element('cancel').addEventListener('click', () => this.cancelTask());
+    element('zoom-in').addEventListener('click', () => this.renderer.zoom(2)); element('zoom-out').addEventListener('click', () => this.renderer.zoom(.5)); element('fit').addEventListener('click', () => this.renderer.fit());
+    element('cursor-toggle').addEventListener('click', () => {
+      this.renderer.cursorMode = !this.renderer.cursorMode;
+      this.updateViewport(); this.renderer.schedule();
+    });
+    element('cursor-clear').addEventListener('click', () => { this.renderer.cursorA = null; this.renderer.cursorB = null; this.renderer.cursorMode = false; this.updateViewport(); this.renderer.schedule(); });
+    element('export-csv').addEventListener('click', () => { void this.exportCSV(); });
+    element('export-binary').addEventListener('click', () => {
+      const direction = element<HTMLSelectElement>('binary-direction').value as 'rx' | 'tx'; if (!this.result) return;
+      download(this.decoder === 'pwm' ? 'hakei-pwm.bin' : `hakei-uart-${direction}.bin`, (this.decoder === 'pwm' ? this.result.pwm : this.result[direction]).slice().buffer, 'application/octet-stream');
+    });
+    element('save-capture').addEventListener('click', () => { void this.saveCapture(); });
+    document.addEventListener('keydown', event => {
+      if ((event.target as HTMLElement)?.matches('input,select,textarea')) return;
+      if (event.key === '+' || event.key === '=') this.renderer.zoom(2); else if (event.key === '-') this.renderer.zoom(.5); else if (event.key === '0') this.renderer.fit();
+      else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); this.renderer.pan(scaleSamples(this.renderer.end - this.renderer.start, event.key === 'ArrowLeft' ? -.2 : .2)); } else if (event.key === 'Escape') this.cancelTask();
+    });
+    this.selectProtocol(null, false);
+  }
+  addProtocol(decoder: DecoderId, decode = true): ProtocolInstance {
+    if (this.protocols.length >= 100) { this.showMessage({ key: 'message.protocolLimit' }); return this.protocols[this.protocols.length - 1]; }
+    const count = this.protocols.filter(p => p.decoder === decoder).length;
+    const protocol = this.createProtocol({ id: `protocol-${++this.nextId}-${crypto.randomUUID()}`, decoder, name: decoder.toUpperCase() + (count ? ` ${count + 1}` : ''), color: colors[this.nextId % colors.length], options: defaults(decoder), mapping: {} });
+    this.commitForm(); this.protocols.push(protocol); this.syncTraces(); this.selectProtocol(protocol.id, false);
+    if (decode) { if (this.captureAbort) this.scheduleLiveDecode(); else void this.runProtocols([protocol]); }
+    return protocol;
+  }
+  private createProtocol(settings: ProtocolSettings): ProtocolInstance {
+    return { ...settings, decimalPlaces: settings.decimalPlaces ?? 3, options: { ...defaults(settings.decoder), ...settings.options }, mapping: { ...settings.mapping }, client: new DecodeClient(), annotations: new AnnotationIndex(), frames: [], frameCount: 0, annotationCount: 0, resultBytes: 0, pagedResults: false, result: null, state: 'ready', progress: 0, error: null, savedOptions: {} };
+  }
+  removeProtocol(id: string): void {
+    this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); const index = this.protocols.findIndex(p => p.id === id); if (index < 0) return;
+    this.protocols[index].client.cancel(); this.protocols.splice(index, 1); this.syncTraces();
+    this.selectProtocol(this.protocols[Math.min(index, this.protocols.length - 1)]?.id ?? null, false);
+    this.setStatus(this.protocols.length && this.protocols.every(p => p.state === 'done') ? 'done' : 'ready', 'status.ready');
+  }
+  selectProtocol(id: string | null, commit = true): void {
+    if (id !== null && !this.protocols.some(p => p.id === id)) return;
+    if (commit) this.commitForm(); this.selectedId = id; this.renderer.selectedProtocolId = id; this.renderer.decoder = this.decoder;
+    element('protocol-editor').hidden = !this.selectedProtocol; element('protocol-empty').hidden = !!this.protocols.length;
+    if (this.selectedProtocol) {
+      element<HTMLSelectElement>('decoder-type').value = this.decoder; element<HTMLInputElement>('protocol-name').value = this.selectedProtocol.name; element<HTMLInputElement>('protocol-color').value = this.selectedProtocol.color;
+      element<HTMLSelectElement>('pwm-decimals').value = String(this.selectedProtocol.decimalPlaces ?? 3);
+      this.createOptions(); this.populateMapping(); this.refreshDecoderUI();
+    }
+    this.renderProtocolList(); this.updateDecodeSummary(); this.renderStatus(); this.renderer.schedule();
+  }
+  private syncTraces(): void { this.renderer.protocols = this.protocols; this.renderer.schedule(); }
+  private renderProtocolList(): void {
+    const list = element('protocol-list'); list.replaceChildren();
+    for (const protocol of this.protocols) {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'protocol-item' + (protocol.id === this.selectedId ? ' selected' : ''); button.dataset.protocolId = protocol.id; button.setAttribute('aria-pressed', String(protocol.id === this.selectedId));
+      const dot = document.createElement('i'); dot.style.backgroundColor = protocol.color;
+      const name = document.createElement('span'); name.textContent = protocol.name; name.title = protocol.name;
+      const kind = document.createElement('small'); kind.textContent = protocol.decoder.toUpperCase(); button.append(dot, name, kind); button.addEventListener('click', () => this.selectProtocol(protocol.id)); list.append(button);
+    }
+  }
+  private createOptions(): void {
+    element('decoder-options').replaceChildren(); element('advanced-options').replaceChildren(); const protocol = this.selectedProtocol; if (!protocol) return;
+    const primary = new Set(['polarity', 'baudrate', 'data_bits', 'parity', 'stop_bits', 'format']);
+    for (const option of declarations(protocol.decoder)) {
+      const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span'); caption.dataset.i18n = 'option.' + option.id; caption.textContent = option.desc ?? option.id; label.append(caption);
+      let input: HTMLInputElement | HTMLSelectElement;
+      if (option.values) { input = document.createElement('select'); for (const value of option.values) { const item = document.createElement('option'); item.value = String(value); item.textContent = String(value); if (hasMessage('value.' + value)) item.dataset.i18n = 'value.' + value; input.append(item); } }
+      else { input = document.createElement('input'); input.type = typeof option.default === 'number' ? 'number' : 'text'; input.step = option.id === 'sample_point' ? 'any' : '1'; if (option.id === 'baudrate') { input.min = '1'; input.required = true; } if (option.id === 'sample_point') { input.min = '1'; input.max = '99'; input.required = true; } }
+      input.id = 'option-' + option.id; input.value = String(protocol.options[option.id] ?? option.default); input.dataset.i18nAttrs = 'aria-label:option.' + option.id; label.append(input); element(primary.has(option.id) ? 'decoder-options' : 'advanced-options').append(label);
+    }
+    translateDOM();
+  }
+  private commitForm(): void {
+    const protocol = this.selectedProtocol; if (!protocol) return;
+    for (const option of declarations(protocol.decoder)) { const input = document.getElementById('option-' + option.id) as HTMLInputElement | HTMLSelectElement | null; if (input) protocol.options[option.id] = input.value; }
+    for (const [id, key] of [['rx-channel', 'rx'], ['tx-channel', 'tx'], ['data-channel', 'data']] as const) {
+      const select = document.getElementById(id) as HTMLSelectElement | null;
+      if (select?.options.length) { if (select.value === '') delete protocol.mapping[key]; else protocol.mapping[key] = Number(select.value); }
+    }
+  }
+  private populateMapping(): void {
+    const protocol = this.selectedProtocol, capture = this.capture; if (!protocol) return;
+    const count = capture ? capture.logicChannelCount ?? capture.store.channelCount : this.deviceControls.configuration().logicChannels;
+    for (const [id, key] of [['rx-channel', 'rx'], ['tx-channel', 'tx'], ['data-channel', 'data']] as const) {
+      const select = element<HTMLSelectElement>(id); select.replaceChildren(); const none = document.createElement('option'); none.value = ''; none.dataset.i18n = 'channels.none'; none.textContent = t('channels.none'); select.append(none);
+      for (let i = 0; i < count; i++) { const item = document.createElement('option'); item.value = String(i); item.textContent = `D${i} · ${capture?.labels[i] ?? `D${i}`}`; select.append(item); }
+      select.value = protocol.mapping[key] !== undefined && protocol.mapping[key]! < count ? String(protocol.mapping[key]) : '';
+    }
+  }
+  private refreshProtocolMappings(): void {
+    const count = this.capture ? this.capture.logicChannelCount ?? this.capture.store.channelCount : this.deviceControls.configuration().logicChannels;
+    for (const protocol of this.protocols) for (const key of Object.keys(protocol.mapping) as (keyof ProtocolSettings['mapping'])[]) {
+      if (protocol.mapping[key] !== undefined && protocol.mapping[key]! >= count) delete protocol.mapping[key];
+    }
+    this.populateMapping();
+  }
+  changeDecoder(decoder: DecoderId): void {
+    const protocol = this.selectedProtocol; if (!protocol || !['uart', 'pwm'].includes(decoder) || decoder === protocol.decoder) return;
+    this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); protocol.savedOptions[protocol.decoder] = { ...protocol.options }; protocol.decoder = decoder; protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
+    const input = protocol.mapping.rx ?? protocol.mapping.data;
+    protocol.mapping = decoder === 'pwm' ? (input === undefined ? {} : { data: input }) : { ...(input === undefined ? {} : { rx: input }), ...(protocol.mapping.tx === undefined ? {} : { tx: protocol.mapping.tx }) };
+    this.clearProtocol(protocol); this.selectProtocol(protocol.id, false); void this.startDecode();
+  }
+  private refreshDecoderUI(): void {
+    const pwm = this.decoder === 'pwm'; element('pwm-display-options').hidden = !pwm; element('uart-mapping').hidden = pwm; element('pwm-mapping').hidden = !pwm; element('decoder-advanced').hidden = pwm; element('binary-direction').hidden = pwm;
+    element('protocol-description').dataset.i18n = pwm ? 'pwm.description' : 'decoder.description'; translateDOM();
+  }
+  readOptions(protocol = this.selectedProtocol): Partial<UARTOptions> | Partial<PWMOptions> {
+    if (!protocol) return {};
+    return Object.fromEntries(declarations(protocol.decoder).map(o => { const value = protocol.options[o.id] ?? o.default; if (typeof o.default === 'number' && (!String(value).trim() || !Number.isFinite(Number(value)))) throw new UIError('error.option', { option: { key: ('option.' + o.id) as MessageKey } }); return [o.id, typeof o.default === 'number' ? Number(value) : value]; })) as Partial<UARTOptions> | Partial<PWMOptions>;
+  }
+  stopCapture(): void {
+    if (!this.captureStop || this.captureStop.signal.aborted) return;
+    this.captureStop.abort(); this.setStatus('loading', 'device.stopping');
+  }
+  async startCapture(): Promise<void> {
+    if (this.captureAbort) { this.stopCapture(); return; }
+    if (!element<HTMLFormElement>('device-form').reportValidity()) return;
+    this.commitForm(); this.cancelTask(false);
+    const device = this.deviceControls.device, configuration = this.deviceControls.configuration();
+    this.clearCaptureForAcquisition();
+    const token = ++this.version, abort = new AbortController(), stop = new AbortController();
+    this.captureAbort = abort; this.captureStop = stop; this.acquisitionMemory = null;
+    this.setStatus('loading', 'device.acquiring'); this.showMessage(''); this.updateMemoryUsage();
+    try {
+      const capture = await deviceCapture(device, configuration, abort.signal, {
+        stopSignal: stop.signal,
+        onProgress: (samples, memory) => {
+          if (token !== this.version) return;
+          this.acquisitionMemory = memory; this.updateMemoryUsage();
+          if (!stop.signal.aborted && this.state !== 'decoding') this.setStatus('loading', 'capture.progress', { samples: numberLabel(samples), target: numberLabel(configuration.sampleCount), memory: (memory.usedBytes / 1048576).toFixed(2) });
+        },
+        onCapture: capture => {
+          if (token !== this.version) return;
+          const diagnostics = capture.diagnostics;
+          let stageStarted = performance.now();
+          if (!this.capture) { this.setCapture(capture, false, true); this.renderer.updateCapture(capture); this.updateViewport(); }
+          else {
+            this.capture = capture;
+            const labelsStarted = performance.now(); this.updateCaptureLabels();
+            if (diagnostics) addStageTiming(diagnostics.ui.captureLabels, performance.now() - labelsStarted);
+            this.renderer.updateCapture(capture); this.updateViewport();
+          }
+          if (diagnostics) addStageTiming(diagnostics.ui.captureRefresh, performance.now() - stageStarted);
+          this.acquisitionMemory = capture.acquisition?.memory ?? this.acquisitionMemory;
+          stageStarted = performance.now(); this.updateMemoryUsage();
+          addStageTiming(capture.diagnostics!.ui.memoryRefresh, performance.now() - stageStarted);
+          stageStarted = performance.now(); this.scheduleLiveDecode();
+          addStageTiming(capture.diagnostics!.ui.decodeScheduling, performance.now() - stageStarted);
+        },
+      });
+      if (token !== this.version) return;
+      this.captureAbort = null; this.captureStop = null; this.acquisitionMemory = null;
+      if (hasMessage(`device.name.${device.descriptor.id}`)) capture.nameKey = `device.name.${device.descriptor.id}` as MessageKey;
+      if (!this.capture) this.setCapture(capture, false, true);
+      else { this.capture = capture; this.flushLiveCaptureView(); this.updateCaptureLabels(); }
+      this.setStatus('ready', 'status.ready'); this.updateMemoryUsage();
+      if (capture.store.length && !await this.finishLiveDecodes(capture)) await this.decodeAll();
+      if (this.capture === capture && capture.acquisition?.stopReason !== 'complete') this.showCaptureOutcome();
+    } catch (error) {
+      if (token !== this.version) return;
+      this.captureAbort = null; this.captureStop = null; this.acquisitionMemory = null; this.updateMemoryUsage();
+      if (stop.signal.aborted && error === stop.signal.reason) { this.setStatus('ready', 'device.stopped'); return; }
+      this.setStatus('error', 'device.captureError');
+      this.showMessage(error instanceof MemoryBudgetError ? { key: 'capture.reason.budget' } : error instanceof UIError ? error : errorLabel(error), true);
+    }
+  }
+  setCapture(capture: Capture, cancel = true, live = false): void {
+    if (cancel) this.cancelTask(false); this.capture = capture; const count = capture.logicChannelCount ?? capture.store.channelCount;
+    for (const protocol of this.protocols) { this.clearProtocol(protocol); for (const [key, value] of Object.entries(protocol.mapping)) if (value >= count) delete protocol.mapping[key as keyof ProtocolSettings['mapping']]; }
+    if (capture.workspace) { this.protocols = capture.workspace.protocols.map(p => this.createProtocol(p)); this.selectedId = capture.workspace.selectedId; this.nextId += this.protocols.length; }
+    this.syncTraces(); this.renderer.setCapture(capture); this.updateCaptureLabels();
+    element<HTMLInputElement>('import-sample-rate').value = String(capture.store.samplerate); element<HTMLSelectElement>('import-channel-count').value = String(capture.store.channelCount); element('channel-badge').textContent = String(count);
+    const list = element('channel-list'); list.replaceChildren();
+    for (let i = 0; i < count; i++) {
+      const chip = document.createElement('label'); chip.className = 'channel-chip'; chip.style.setProperty('--channel-color', 'var(--channel-' + (i % 8) + ')');
+      const check = document.createElement('input'); check.type = 'checkbox'; check.checked = !capture.workspace || capture.workspace.channels.includes(i); check.setAttribute('aria-label', t('channels.show', { channel: i }));
+      const tag = document.createElement('strong'); tag.textContent = `D${i}`; const name = document.createElement('span'); name.textContent = capture.labels[i]; chip.append(check, tag, name); list.append(chip);
+      check.addEventListener('change', () => {
+        if (check.checked) { if (!this.renderer.channels.includes(i)) this.renderer.channels.push(i); }
+        else this.renderer.channels = this.renderer.channels.filter(channel => channel !== i);
+        this.renderer.schedule();
+      });
+    }
+    for (let i = 0; i < (capture.analogChannels?.length ?? 0); i++) {
+      const item = capture.analogChannels![i]!, chip = document.createElement('label'); chip.className = 'channel-chip analog-chip'; chip.style.setProperty('--channel-color', 'var(--channel-' + ((count + i) % 8) + ')');
+      const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; check.setAttribute('aria-label', t('channels.showAnalog', { channel: i }));
+      const tag = document.createElement('strong'); tag.textContent = `A${i}`; const name = document.createElement('span'); name.textContent = item.name; chip.append(check, tag, name); list.append(chip);
+      check.addEventListener('change', () => {
+        if (check.checked) { if (!this.renderer.analogChannels.includes(i)) this.renderer.analogChannels.push(i); }
+        else this.renderer.analogChannels = this.renderer.analogChannels.filter(channel => channel !== i);
+        this.renderer.schedule();
+      });
+    }
+    this.selectProtocol(this.selectedId, false);
+    if (capture.workspace) { this.renderer.cursorA = capture.workspace.cursorA ?? capture.workspace.cursor; this.renderer.cursorB = capture.workspace.cursorB ?? null; this.renderer.channels = [...capture.workspace.channels]; this.renderer.rowOrder = capture.workspace.rowOrder?.map(row => ({ ...row })) ?? []; this.renderer.setViewport(...capture.workspace.viewport); }
+    if (!live) { this.showMessage(''); this.setStatus('ready', 'status.ready'); this.updateViewport(); this.updateMemoryUsage(); this.showCaptureOutcome(); }
+  }
+  private clearCaptureForAcquisition(): void {
+    const previous = this.capture;
+    if (previous?.store instanceof PlanarSampleStore) previous.store.dispose();
+    for (const channel of previous?.analogChannels ?? []) if (channel.store instanceof AnalogSampleStore) channel.store.dispose();
+    this.clearCaptureView();
+  }
+  private clearCaptureView(): void {
+    this.capture = null; this.renderer.clearCapture();
+    for (const protocol of this.protocols) this.clearProtocol(protocol);
+    element('capture-name').textContent = t('capture.empty'); element('sample-count').textContent = '—';
+    element('rate-label').textContent = '—'; element('duration-label').textContent = '—'; element('channel-badge').textContent = '0';
+    element('channel-list').replaceChildren(); this.updateDecodeSummary(); this.updateViewport(); this.updateMemoryUsage(); this.showMessage('');
+  }
+  async openFile(file: File): Promise<void> {
+    this.commitForm(); this.cancelTask(false); const token = ++this.version; this.importAbort = new AbortController(); this.setStatus('loading', 'status.loading'); this.showMessage('');
+    try {
+      const capture = await importCapture(file, Number(element<HTMLInputElement>('import-sample-rate').value), Number(element<HTMLSelectElement>('import-channel-count').value), undefined, this.importAbort.signal);
+      if (token !== this.version) return; this.importAbort = null; this.setCapture(capture); await this.decodeAll();
+    } catch (error) { if (token === this.version) { this.importAbort = null; this.setStatus('error', 'status.importError'); this.showMessage(error instanceof UIError ? error : errorLabel(error), true); } }
+  }
+  private hasInput(protocol: ProtocolSettings): boolean {
+    return protocol.decoder === 'pwm' ? protocol.mapping.data !== undefined : protocol.mapping.rx !== undefined || protocol.mapping.tx !== undefined;
+  }
+  async startDecode(): Promise<void> {
+    if (!this.capture || (this.state === 'loading' && !this.captureAbort) || !this.selectedProtocol || !element<HTMLFormElement>('decoder-form').reportValidity()) return;
+    this.commitForm();
+    if (this.captureAbort) { this.scheduleLiveDecode(); return; }
+    await this.runProtocols([this.selectedProtocol]);
+  }
+  async decodeAll(): Promise<void> { await this.runProtocols(this.protocols); }
+  private flushLiveCaptureView(): void {
+
+    if (this.capture) {
+      this.renderer.updateCapture(this.capture);
+      this.updateViewport();
+    }
+  }
+  private scheduleLiveDecode(): void {
+    const capture = this.capture;
+    if (!this.captureAbort || !capture || (!capture.store.length && !capture.sharedSource?.publishedSamples)) return;
+    let started = false;
+    for (const protocol of this.protocols) {
+      if (!this.hasInput(protocol)) continue;
+      if (!protocol.liveSession) {
+        this.clearProtocol(protocol); protocol.state = 'decoding';
+        try {
+          let session!: LiveDecodeSession;
+          protocol.liveBatchMetrics = undefined;
+          protocol.liveBatchStages = { frames: { calls: 0, totalMs: 0, maxMs: 0 }, annotations: { calls: 0, totalMs: 0, maxMs: 0 }, ui: { calls: 0, totalMs: 0, maxMs: 0 } };
+          const mapping = protocol.decoder === 'pwm' ? { data: protocol.mapping.data } : { rx: protocol.mapping.rx, tx: protocol.mapping.tx };
+          session = protocol.client.startLive(capture, this.readOptions(protocol), mapping, batch => {
+            if (protocol.liveSession !== session) return;
+            const stages = protocol.liveBatchStages!, diagnostics = this.capture?.diagnostics;
+            let started = performance.now();
+            for (const frame of batch.frames) protocol.frames.push(frame);
+            protocol.frameCount += batch.frames.length; protocol.annotationCount += batch.annotations.length;
+            protocol.annotations.append(batch.annotations);
+            const frameElapsed = performance.now() - started;
+            addStageTiming(stages.frames, frameElapsed);
+            if (diagnostics) addStageTiming(diagnostics.ui.decodeFrames, frameElapsed);
+            started = performance.now();
+            const annotationElapsed = performance.now() - started; addStageTiming(stages.annotations, annotationElapsed);
+            if (diagnostics) addStageTiming(diagnostics.ui.decodeAnnotations, annotationElapsed);
+            protocol.progress = batch.progress;
+            started = performance.now(); this.renderer.schedule(); this.updateDecodeSummary();
+            const uiElapsed = performance.now() - started; addStageTiming(stages.ui, uiElapsed);
+            if (diagnostics) addStageTiming(diagnostics.ui.decodeUI, uiElapsed);
+          }, protocol.decoder, capture.sharedSource, (progress, frames, annotations, resultBytes) => {
+            protocol.progress = progress; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
+            if (protocol.annotations instanceof PagedAnnotationIndex) { protocol.annotations.setTotal(annotations); protocol.annotations.invalidate(); }
+            this.updateMemoryUsage(); this.updateDecodeSummary();
+            if (protocol === this.selectedProtocol) { this.renderer.schedule(); }
+          }, (frames, annotations, resultBytes) => {
+            protocol.pagedResults = true; protocol.frames = []; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
+            const pagedAnnotations = new PagedAnnotationIndex(protocol.client); pagedAnnotations.setTotal(annotations); protocol.annotations = pagedAnnotations;
+            this.updateMemoryUsage(); this.updateDecodeSummary();
+            if (protocol === this.selectedProtocol) this.renderer.schedule();
+          });
+          protocol.liveSession = session; started = true;
+        } catch (error) {
+          protocol.state = 'error'; protocol.error = error instanceof UIError ? error : errorLabel(error);
+          this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true); continue;
+        }
+      }
+      const session = protocol.liveSession;
+      if (!session) continue;
+      started = true; protocol.state = 'decoding';
+      void session.advance(capture).catch(error => {
+        if (protocol.liveSession !== session) return;
+        protocol.liveSession = undefined; protocol.state = 'error';
+        protocol.error = error instanceof UIError ? error : errorLabel(error);
+        this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true); this.updateDecodeSummary();
+      });
+    }
+    if (started && this.state !== 'decoding') this.setStatus('decoding', 'status.decoding');
+    else this.updateDecodeSummary();
+  }
+  private async finishLiveDecodes(capture: Capture): Promise<boolean> {
+    const pending = this.protocols.filter(protocol => protocol.liveSession);
+    if (!pending.length) return false;
+    this.setStatus('decoding', 'status.decoding');
+    await Promise.all(pending.map(async protocol => {
+      const session = protocol.liveSession!;
+      try {
+        const result = await session.finish(capture);
+        if (protocol.liveSession !== session) return;
+        protocol.liveBatchMetrics = { ...session.mainThreadBatches };
+        if (capture.diagnostics) {
+          if (result.stats.stages) capture.diagnostics.decodeWorker = { ...result.stats.stages };
+          capture.diagnostics.decodeMainThread = {
+            restoreTotalMs: session.mainThreadBatches.restoreTotalMs,
+            restoreMaxMs: session.mainThreadBatches.restoreMaxMs,
+            callbackTotalMs: session.mainThreadBatches.callbackTotalMs,
+            callbackMaxMs: session.mainThreadBatches.callbackMaxMs,
+            batchCount: session.mainThreadBatches.count,
+            frames: session.mainThreadBatches.frames,
+            annotations: session.mainThreadBatches.annotations,
+          };
+        }
+        protocol.liveSession = undefined; protocol.result = result; protocol.frameCount = result.stats.frames; protocol.annotationCount = result.stats.annotations; protocol.resultBytes = Math.max(protocol.resultBytes, protocol.annotations.reservedBytes) + result.pwm.byteLength;
+        if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(protocol.annotationCount);
+        protocol.frames.sort((a, b) => compareSamples(a.ss, b.ss) || (a.protocol !== 'pwm' && b.protocol !== 'pwm' ? a.direction - b.direction : 0));
+        protocol.state = 'done'; protocol.progress = 1;
+        if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
+      } catch (error) {
+        if (protocol.liveSession !== session) return;
+        protocol.liveSession = undefined; protocol.state = 'error';
+        protocol.error = error instanceof UIError ? error : errorLabel(error);
+        this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+      }
+      this.updateDecodeSummary();
+    }));
+    const failed = pending.some(protocol => protocol.state === 'error');
+    const elapsed = pending.reduce((sum, protocol) => sum + (protocol.result?.stats.elapsedMs ?? 0), 0);
+    const samples = pending.reduce((sum, protocol) => sum + (protocol.result?.stats.samples ?? 0n), 0n);
+    this.setStatus(failed ? 'error' : 'done', failed ? 'status.stopped' : 'status.done', { ms: elapsed.toFixed(0), throughput: (elapsed ? Number(samples) / elapsed / 1000 : 0).toFixed(2) });
+    this.updateDecodeSummary(); this.showCaptureOutcome();
+    return true;
+  }
+  private async exportCSV(): Promise<void> {
+    const capture = this.capture, protocol = this.selectedProtocol;
+    if (!capture || !protocol || !protocol.frameCount) return;
+    try {
+      if (!protocol.pagedResults) {
+        download(`hakei-${protocol.decoder}.csv`, frameCSV(protocol.frames, capture.store.samplerate, capture.triggerSample, protocol.decoder), 'text/csv;charset=utf-8');
+        return;
+      }
+      const picker = (window as Window & { showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void>; abort(): Promise<void> }> }> }).showSaveFilePicker;
+      const writable = picker ? await picker({ suggestedName: `hakei-${protocol.decoder}.csv`, types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }] }).then(file => file.createWritable()) : null;
+      const parts: Blob[] = writable ? [] : [new Blob(['start_sample,end_sample,time_s,active_samples,period_samples,duty_percent,period_s,frequency_hz,average_duty_percent\r\n'])];
+      const pageSize = 20_000;
+      try {
+        for (let offset = 0; offset < protocol.frameCount; offset += pageSize) {
+          const frames = await protocol.client.readFrames(offset, Math.min(pageSize, protocol.frameCount - offset));
+          const csv = frameCSV(frames, capture.store.samplerate, capture.triggerSample, protocol.decoder);
+          const body = csv.slice(csv.indexOf('\r\n') + 2);
+          if (!body) continue;
+          if (writable) await writable.write(body + '\r\n'); else parts.push(new Blob([body + '\r\n']));
+        }
+        if (writable) await writable.close(); else downloadBlob(`hakei-${protocol.decoder}.csv`, new Blob(parts, { type: 'text/csv;charset=utf-8' }));
+      } catch (error) { await writable?.abort(); throw error; }
+    } catch (error) { this.showMessage(error instanceof UIError ? error : errorLabel(error), true); }
+  }
+  private cancelDecodeOnly(): void {
+    ++this.decodeVersion;
+    for (const protocol of this.protocols) { protocol.client.cancel(); protocol.liveSession = undefined; if (protocol.state === 'decoding') protocol.state = 'cancelled'; }
+  }
+  private async runProtocols(protocols: readonly ProtocolInstance[], live = false, sampleLimit?: bigint): Promise<void> {
+    if (!this.capture || (!live && this.state === 'loading')) return;
+    if (live) this.cancelDecodeOnly(); else this.cancelTask(false);
+    const token = live ? ++this.decodeVersion : this.version, capture = this.capture; this.showMessage('');
+    const pending = [...protocols, ...this.protocols.filter(p => !protocols.includes(p) && (p.state === 'ready' || p.state === 'cancelled'))].filter(p => this.hasInput(p));
+    if (!pending.length) { this.setStatus('ready', 'status.ready'); this.updateDecodeSummary(); this.showCaptureOutcome(); return; }
+    this.setStatus('decoding', 'status.decoding');
+    let failed = false;
+    for (const protocol of pending) {
+      if (token !== (live ? this.decodeVersion : this.version)) return; this.clearProtocol(protocol); protocol.state = 'decoding'; this.updateDecodeSummary();
+      try {
+        const mapping = protocol.decoder === 'pwm' ? { data: protocol.mapping.data } : { rx: protocol.mapping.rx, tx: protocol.mapping.tx };
+        const result = await protocol.client.run(capture, this.readOptions(protocol), mapping, batch => {
+          if (token !== (live ? this.decodeVersion : this.version)) return;
+          for (const frame of batch.frames) protocol.frames.push(frame);
+          protocol.frameCount += batch.frames.length; protocol.annotationCount += batch.annotations.length;
+          protocol.annotations.append(batch.annotations);
+          protocol.progress = batch.progress;
+          this.renderer.schedule(); this.updateDecodeSummary();
+        }, protocol.decoder, live ? sampleLimit : undefined, undefined, (progress, frames, annotations, resultBytes) => {
+          protocol.progress = progress; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
+          if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(annotations);
+          this.updateMemoryUsage(); this.updateDecodeSummary(); if (protocol === this.selectedProtocol) this.renderer.schedule();
+        }, (frames, annotations, resultBytes) => {
+          protocol.pagedResults = true; protocol.frames = []; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
+          const pagedAnnotations = new PagedAnnotationIndex(protocol.client); pagedAnnotations.setTotal(annotations); protocol.annotations = pagedAnnotations;
+          this.updateMemoryUsage(); this.updateDecodeSummary(); if (protocol === this.selectedProtocol) this.renderer.schedule();
+        }, true);
+        if (token !== (live ? this.decodeVersion : this.version)) return; protocol.result = result; protocol.frameCount = result.stats.frames; protocol.annotationCount = result.stats.annotations; protocol.resultBytes = protocol.annotations.reservedBytes + result.pwm.byteLength; protocol.frames.sort((a, b) => compareSamples(a.ss, b.ss) || (a.protocol !== 'pwm' && b.protocol !== 'pwm' ? a.direction - b.direction : 0)); protocol.state = 'done'; protocol.progress = 1;
+        if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
+      } catch (error) {
+        if (token !== (live ? this.decodeVersion : this.version)) return; protocol.state = 'error'; protocol.error = error instanceof UIError ? error : errorLabel(error); failed = true; this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+      }
+      this.updateDecodeSummary(); this.renderer.schedule();
+    }
+    if (token !== (live ? this.decodeVersion : this.version)) return;
+    if (live && this.captureAbort) return;
+    const elapsed = pending.reduce((sum, p) => sum + (p.result?.stats.elapsedMs ?? 0), 0), samples = pending.reduce((sum, p) => sum + (p.result?.stats.samples ?? 0n), 0n);
+    this.setStatus(failed ? 'error' : 'done', failed ? 'status.stopped' : 'status.done', { ms: elapsed.toFixed(0), throughput: (elapsed ? Number(samples) / elapsed / 1000 : 0).toFixed(2) }); this.updateDecodeSummary(); this.showCaptureOutcome();
+  }
+  cancelTask(update = true): void {
+    const cancellingCapture = !!this.captureAbort;
+    if (this.decodeTimer) { clearTimeout(this.decodeTimer); this.decodeTimer = null; }
+    ++this.version; ++this.decodeVersion; for (const protocol of this.protocols) { protocol.client.cancel(); protocol.liveSession = undefined; if (protocol.state === 'decoding') protocol.state = 'cancelled'; }
+    this.captureAbort?.abort(); this.captureAbort = null; this.captureStop = null; this.acquisitionMemory = null;
+    this.updateMemoryUsage();
+    this.importAbort?.abort(); this.importAbort = null; this.saveAbort?.abort(); this.saveAbort = null;
+    if (cancellingCapture) this.clearCaptureView();
+    if (update) this.setStatus('cancelled', 'status.cancelled'); else if (this.state === 'loading' || this.state === 'decoding') this.state = 'ready';
+  }
+  private clearProtocol(protocol: ProtocolInstance): void { protocol.frames = []; protocol.frameCount = 0; protocol.annotationCount = 0; protocol.resultBytes = 0; protocol.pagedResults = false; protocol.result = null; protocol.annotations.clear(); protocol.progress = 0; protocol.state = 'ready'; protocol.error = null; this.renderer.schedule(); this.updateDecodeSummary(); }
+  workspaceSettings(): WorkspaceSettings {
+    this.commitForm(); const rowOrder = this.renderer.getRowOrder(); return { protocols: this.protocols.map(({ id, decoder, name, color, options, decimalPlaces, mapping }) => ({ id, decoder, name, color, decimalPlaces, options: { ...options }, mapping: Object.fromEntries(Object.entries(mapping).filter(([key]) => decoder === 'pwm' ? key === 'data' : key === 'rx' || key === 'tx')) })), selectedId: this.selectedId, cursor: this.renderer.cursorA, cursorA: this.renderer.cursorA, cursorB: this.renderer.cursorB, viewport: [this.renderer.start, this.renderer.end], channels: [...this.renderer.channels], rowOrder };
+  }
+  async saveCapture(): Promise<void> {
+    if (!this.capture || this.saveAbort) return;
+    const button = element<HTMLButtonElement>('save-capture'), capture = this.capture, workspace = this.workspaceSettings(), abort = new AbortController(); this.saveAbort = abort; button.disabled = true; this.renderStatus();
+    try { const blob = await serializeSR(capture, workspace, undefined, abort.signal); abort.signal.throwIfAborted(); download('capture.sr', blob, 'application/zip'); }
+    catch (error) { if (!abort.signal.aborted) this.showMessage(error instanceof UIError ? error : errorLabel(error), true); }
+    finally { if (this.saveAbort === abort) this.saveAbort = null; button.disabled = false; this.renderStatus(); }
+  }
+  private setStatus(state: AnalyzerApp['state'], key: MessageKey, params: MessageParams = {}): void { this.state = state; this.statusMessage = { key, params }; this.renderStatus(); }
+  private renderStatus(): void {
+    const message = t(this.statusMessage.key, this.statusMessage.params); element('decode-state').textContent = message; element('status-text').textContent = message;
+    const run = element<HTMLButtonElement>('run-capture');
+    const runKey = this.captureAbort ? this.captureStop?.signal.aborted ? 'device.stopping' : 'device.stop' : 'device.run';
+    run.dataset.i18n = runKey; run.textContent = t(runKey); run.formNoValidate = !!this.captureAbort;
+    run.disabled = this.captureAbort ? !!this.captureStop?.signal.aborted : this.state === 'loading' || this.deviceControls.device.connected === false;
+    this.deviceControls.setBusy(!!this.captureAbort);
+    element<HTMLButtonElement>('save-capture').disabled = !this.capture || !!this.saveAbort;
+    element<HTMLButtonElement>('cancel').disabled = this.state !== 'decoding' && this.state !== 'loading' && !this.saveAbort;
+  }
+  private updateDecodeSummary(): void {
+    element('frame-count').textContent = numberLabel(this.selectedProtocol?.frameCount ?? this.frames.length); element('text-preview').textContent = this.result ? this.decoder === 'pwm' ? this.result.pwmAverage === null ? '' : t('pwm.summary', { duty: this.result.pwmAverage.toFixed(this.selectedProtocol?.decimalPlaces ?? 3) }) : 'RX: ' + new TextDecoder().decode(this.result.rx.subarray(0, 100)).replace(/[\r\n]/g, ' ') : '';
+    element<HTMLButtonElement>('export-csv').disabled = !(this.selectedProtocol?.frameCount ?? this.frames.length); element<HTMLButtonElement>('export-binary').disabled = !this.result;
+  }
+  showMessage(message: string | UIError | { key: MessageKey; params?: MessageParams }, error = false): void { this.displayedMessage = message; this.messageIsError = error; this.renderMessage(); }
+  private renderMessage(): void { const value = this.displayedMessage, node = element('message'); const message = typeof value === 'string' ? value : value instanceof UIError ? errorLabel(value) : t(value.key, value.params); node.textContent = message; node.hidden = !message; node.classList.toggle('error', this.messageIsError); }
+  private updateCaptureLabels(): void {
+    const capture = this.capture; if (!capture) return; delete element('capture-name').dataset.i18n; element('capture-name').textContent = capture.nameKey ? t(capture.nameKey) : capture.name; element('sample-count').textContent = numberLabel(capture.store.length);
+    element('rate-label').textContent = numberLabel(capture.store.samplerate / 1e6, { maximumFractionDigits: 6 }) + ' MHz'; element('duration-label').textContent = timeLabel(Number(capture.store.length) / capture.store.samplerate);
+    element('memory-status').textContent = t('status.memory', { memory: (captureMemory(capture).totalBytes / 1048576).toFixed(2), ms: capture.loadedMs.toFixed(1) });
+    for (const input of element('channel-list').querySelectorAll<HTMLInputElement>('input')) {
+      const tag = input.closest('label')?.querySelector('strong')?.textContent ?? '';
+      input.setAttribute('aria-label', t(tag.startsWith('A') ? 'channels.showAnalog' : 'channels.show', { channel: Number(tag.slice(1)) }));
+    }
+  }
+  private retainedDataBytes(): number {
+    return (this.capture ? captureMemory(this.capture).totalBytes : 0) + this.protocols.reduce((sum, protocol) => sum + protocol.resultBytes + protocol.annotations.reservedBytes
+      + (protocol.result ? protocol.result.rx.byteLength + protocol.result.tx.byteLength + protocol.result.pwm.byteLength : 0), 0);
+  }
+  private updateMemoryUsage(): void {
+    const shared = this.capture?.sharedSource;
+    const bytes = (this.acquisitionMemory?.usedBytes ?? this.retainedDataBytes()) + (shared?.allocatedBytes ?? 0);
+    const storedSamples = this.capture?.store.length ?? 0n;
+    const samples = shared?.publishedSamples && shared.publishedSamples > storedSamples ? shared.publishedSamples : storedSamples;
+    const target = this.capture?.acquisition?.targetSamples ?? samples;
+    const progress = target > 0n ? Number(samples * 10000n / target) / 100 : 0;
+    element('capture-memory-usage').textContent = t('capture.memoryUsage', { used: (bytes / 1048576).toFixed(2), samples: numberLabel(samples), progress: progress.toFixed(1) });
+  }
+  private showCaptureOutcome(): void {
+    const outcome = this.capture?.acquisition;
+    if (!outcome || outcome.stopReason === 'complete') return;
+    const failed = outcome.stopReason !== 'stopped';
+    const reason = outcome.stopReason === 'error' && outcome.error
+      ? { key: 'capture.reason.errorDetail' as const, params: { error: outcome.error } }
+      : { key: `capture.reason.${outcome.stopReason}` as const };
+    this.showMessage({ key: 'capture.partial', params: { actual: numberLabel(outcome.actualSamples), target: numberLabel(outcome.targetSamples), reason } }, failed);
+    if (failed && this.state !== 'loading' && this.state !== 'decoding') this.setStatus('error', 'device.captureError');
+  }
+  private refreshLocale(): void { this.updateMemoryUsage(); this.refreshDecoderUI(); this.renderProtocolList(); this.updateDecodeSummary(); this.updateCaptureLabels(); this.renderStatus(); this.renderMessage(); this.updateViewport(); this.renderer.schedule(); }
+  private updateViewport(): void {
+    element('waveform').parentElement!.classList.toggle('cursor-mode', this.renderer.cursorMode);
+    element('waveform').style.cursor = this.renderer.cursorMode ? 'crosshair' : '';
+    element('cursor-toggle').classList.toggle('active', this.renderer.cursorMode); element('cursor-toggle').setAttribute('aria-pressed', String(this.renderer.cursorMode));
+    if (!this.capture) return; const rate = this.capture.store.samplerate, trigger = this.capture.triggerSample, resolution = this.renderer.timeResolution();
+    element('view-range').textContent = `${timeLabel(Number(this.renderer.start - trigger) / rate, resolution)} → ${timeLabel(Number(this.renderer.end - trigger) / rate, resolution)}`;
+    const a = this.renderer.cursorA, b = this.renderer.cursorB;
+    if (a === null && b === null) element('cursor-measurement').textContent = t('wave.hint');
+    else if (a !== null && b !== null) {
+      const start = minSample(a, b), end = maxSample(a, b), delta = Number(end - start) / rate;
+      element('cursor-measurement').textContent = `${t('wave.start')}: ${timeLabel(Number(start - trigger) / rate, resolution)} · ${t('wave.end')}: ${timeLabel(Number(end - trigger) / rate, resolution)} · ${t('wave.delta')}: ${timeLabel(delta)} · ${t('wave.frequency')}: ${frequencyLabel(delta > 0 ? 1 / delta : Infinity)}`;
+    } else {
+      const sample = a ?? b!; element('cursor-measurement').textContent = `${t('wave.cursor')}: ${timeLabel(Number(sample - trigger) / rate, resolution)} · ${numberLabel(sample)} ${t('wave.samples')}`;
+    }
+    element('render-status').textContent = t('wave.draw', { ms: this.renderer.metrics().p95Ms.toFixed(1) });
+  }
+}
+export const app = new AnalyzerApp();
