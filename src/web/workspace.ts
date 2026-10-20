@@ -1,14 +1,15 @@
 import { sampleIndex, type SampleInput } from '../libhakei/sample-index.js';
-import type { DecoderId } from './protocol.js';
+import { decoderDefinition } from '../decoders/index.js';
+import type { OptionValue } from '../libhakeidecode/index.js';
 import { rowKey, type TimelineRow } from './timeline.js';
 export interface ProtocolSettings {
   id: string;
-  decoder: DecoderId;
+  decoder: string;
   name: string;
   color: string;
-  options: Record<string, string | number>;
+  options: Record<string, OptionValue>;
   decimalPlaces?: number;
-  mapping: { rx?: number; tx?: number; data?: number };
+  mapping: Record<string, number>;
 }
 export interface WorkspaceSettings {
   protocols: ProtocolSettings[];
@@ -30,13 +31,16 @@ export function parseWorkspace(value: unknown, channelCount: number, length: big
   if (!Array.isArray(obj.protocols) || obj.protocols.length > 100) throw new Error('Invalid protocol list');
   const ids = new Set<string>();
   const protocols = obj.protocols.map(p => {
-    if (!p || typeof p.id !== 'string' || !p.id || ids.has(p.id) || !['uart', 'pwm'].includes(p.decoder)
+    if (!p || typeof p.id !== 'string' || !p.id || ids.has(p.id) || typeof p.decoder !== 'string' || !p.decoder
       || typeof p.name !== 'string' || !p.name.trim() || p.name.length > 80 || !/^#[\da-f]{6}$/i.test(p.color)
       || !p.options || typeof p.options !== 'object' || Array.isArray(p.options)
-      || Object.entries(p.options).some(([key, v]) => !/^[a-z_]+$/.test(key) || (typeof v !== 'string' && (typeof v !== 'number' || !Number.isFinite(v))))
+      || Object.entries(p.options).some(([key, v]) => !/^[a-z_]+$/.test(key) || !(typeof v === 'boolean' || typeof v === 'string' || typeof v === 'number' && Number.isFinite(v)))
       || (p.decimalPlaces !== undefined && (!Number.isInteger(p.decimalPlaces) || p.decimalPlaces < 0 || p.decimalPlaces > 9))
-      || !p.mapping || typeof p.mapping !== 'object' || Array.isArray(p.mapping)
-      || Object.entries(p.mapping).some(([key, v]) => !['rx', 'tx', 'data'].includes(key) || !index(v))) throw new Error('Invalid protocol settings');
+      || !p.mapping || typeof p.mapping !== 'object' || Array.isArray(p.mapping)) throw new Error('Invalid protocol settings');
+    let inputs: Set<string>;
+    try { inputs = new Set(decoderDefinition(p.decoder).ui.inputs.map(input => input.key)); }
+    catch { throw new Error('Invalid protocol settings'); }
+    if (Object.entries(p.mapping).some(([key, v]) => !inputs.has(key) || !index(v))) throw new Error('Invalid protocol settings');
     ids.add(p.id);
     return { ...p, options: { ...p.options }, mapping: { ...p.mapping } };
   });

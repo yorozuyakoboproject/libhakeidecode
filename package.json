@@ -19,15 +19,25 @@
       "import": "./dist/src/libhakeidecode/index.js",
       "default": "./dist/src/libhakeidecode/index.js"
     },
+    "./decoders": {
+      "types": "./dist/src/decoders/index.d.ts",
+      "import": "./dist/src/decoders/index.js",
+      "default": "./dist/src/decoders/index.js"
+    },
+    "./drivers": {
+      "types": "./dist/src/drivers/index.d.ts",
+      "import": "./dist/src/drivers/index.js",
+      "default": "./dist/src/drivers/index.js"
+    },
     "./decoders/pwm": {
-      "types": "./dist/src/decoders/pwm.d.ts",
-      "import": "./dist/src/decoders/pwm.js",
-      "default": "./dist/src/decoders/pwm.js"
+      "types": "./dist/src/decoders/pwm/index.d.ts",
+      "import": "./dist/src/decoders/pwm/index.js",
+      "default": "./dist/src/decoders/pwm/index.js"
     },
     "./decoders/uart": {
-      "types": "./dist/src/decoders/uart.d.ts",
-      "import": "./dist/src/decoders/uart.js",
-      "default": "./dist/src/decoders/uart.js"
+      "types": "./dist/src/decoders/uart/index.d.ts",
+      "import": "./dist/src/decoders/uart/index.js",
+      "default": "./dist/src/decoders/uart/index.js"
     },
     "./drivers/ch32h417": {
       "types": "./dist/src/drivers/ch32h417/index.d.ts",

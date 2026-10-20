@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSampleChunk } from '../dist/src/libhakei/index.js';
 import { Decoder, DecoderRunner, ProtocolStack, OUTPUT_PROTOCOL, SampleGapError } from '../dist/src/libhakeidecode/index.js';
-import { UARTDecoder } from '../dist/src/decoders/uart.js';
-import { PWMDecoder, PWM_ANN } from '../dist/src/decoders/pwm.js';
+import { UARTDecoder } from '../dist/src/decoders/uart/index.js';
+import { PWMDecoder, PWM_ANN } from '../dist/src/decoders/pwm/index.js';
 import { FrameToTextDecoder } from '../dist/src/pipeline/frame-to-text.js';
 
 class ConditionProbe extends Decoder {

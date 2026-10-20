@@ -1,12 +1,13 @@
 import { samplePosition, sampleFloor, sampleCeil, minSample, maxSample, absSample, compareSamples, scaleSamples, sampleRatio, type SampleInput } from '../libhakei/sample-index.js';
 import type { Annotation, DecoderId } from './protocol.js';
 import type { ProtocolSettings } from './workspace.js';
+import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import type { Capture } from './capture.js';
 import type { AnalogColumnView } from './data/analogStore.js';
 import type { ColumnView } from './data/types.js';
 import { AnnotationIndex } from './event-index.js';
 import { readPalette } from './theme.js';
-import { t } from './i18n.js';
+import { hasMessage, t } from './i18n.js';
 import { rowKey, reconcileRowOrder, moveTimelineRow, type TimelineRow } from './timeline.js';
 const timeUnits = [
   [1e-15, 'fs'], [1e-12, 'ps'], [1e-9, 'ns'], [1e-6, 'µs'], [1e-3, 'ms'],
@@ -26,16 +27,10 @@ export function frequencyLabel(hz: number, digits = 3): string {
   while (index < units.length - 1 && Number((Math.abs(hz) / 1000 ** index).toFixed(digits)) >= 1000) index++;
   return (hz / 1000 ** index).toFixed(digits) + ' ' + units[index];
 }
-export function pwmAnnotationLabel(annotation: Annotation, sampleRate: number, digits = 3): string {
-  if (annotation.classIndex === 0) return (annotation.value ?? Number.parseFloat(annotation.texts[0])).toFixed(digits) + '%';
-  const period = Number(annotation.es - annotation.ss) / sampleRate;
-  return annotation.classIndex === 1 ? timeLabel(annotation.value ?? period, undefined, digits)
-    : frequencyLabel(annotation.value ?? 1 / period, digits);
-}
 export interface TimelineLayoutRow { entry: TimelineRow; top: number; height: number }
 export interface ProtocolTrace extends ProtocolSettings { annotations: AnnotationIndex }
 export class WaveformRenderer {
-  decoder: DecoderId = 'uart';
+  decoder: DecoderId = decoderDefinitions[0]!.decoder.descriptor.id;
   capture: Capture | null = null;
   protocols: ProtocolTrace[] = [];
   selectedProtocolId: string | null = null;
@@ -221,7 +216,7 @@ export class WaveformRenderer {
   }
   private axisHeight(): number { return this.cursorA !== null && this.cursorB !== null ? 60 : 30; }
   private waveformTop(): number { return this.axisHeight() + 8; }
-  private protocolRows(protocol: ProtocolTrace): number { return protocol.decoder === 'pwm' ? 3 : 4; }
+  private protocolRows(protocol: ProtocolTrace): number { return decoderDefinition(protocol.decoder).ui.rows.length; }
   private protocolHeight(protocol: ProtocolTrace): number { return this.protocolRows(protocol) * 32 + 8; }
   getRowOrder(): TimelineRow[] {
     const count = this.capture ? this.capture.logicChannelCount ?? this.capture.store.channelCount : 0;
@@ -328,7 +323,7 @@ export class WaveformRenderer {
     if (x < this.gutter) { this.onAnnotationClick(protocol.id, this.start, this.end); return; }
     const index = Math.floor((y - top) / 32);
     if (index >= this.protocolRows(protocol)) return;
-    const classes = protocol.decoder === 'pwm' ? [index] : index === 0 ? [12] : index === 1 ? [0, 2, 4, 6, 8, 10, 14, 16] : index === 2 ? [13] : [1, 3, 5, 7, 9, 11, 15, 17];
+    const classes = decoderDefinition(protocol.decoder).ui.rows[index]?.classes ?? [];
     const sample = this.sampleAtX(x), annotation = protocol.annotations.query(sample, sample).find(a => classes.includes(a.classIndex));
     if (annotation) this.onAnnotationClick(protocol.id, annotation.ss, annotation.es);
   }
@@ -546,7 +541,8 @@ export class WaveformRenderer {
   }
   private drawProtocol(ctx: CanvasRenderingContext2D, protocol: ProtocolTrace, annY: number, toX: (sample: bigint) => number, plotWidth: number): void {
     ctx.font = '11px system-ui, sans-serif'; ctx.textBaseline = 'middle';
-    const pwm = protocol.decoder === 'pwm', rows = this.protocolRows(protocol), rowHeight = 32, height = this.protocolHeight(protocol);
+    const definition = decoderDefinition(protocol.decoder), rowDefinitions = definition.ui.rows;
+    const rows = this.protocolRows(protocol), rowHeight = 32, height = this.protocolHeight(protocol);
     ctx.save(); ctx.textAlign = 'left';
     for (let row = 0; row < rows; row++) {
       const y = annY + row * rowHeight;
@@ -555,9 +551,10 @@ export class WaveformRenderer {
       ctx.fillStyle = protocol.color; ctx.fillRect(14, y + 2, 3, rowHeight - 4);
       ctx.save(); ctx.beginPath(); ctx.rect(23, y, this.gutter - 37, rowHeight - 2); ctx.clip();
       ctx.fillStyle = this.palette['label'];
-      const uartLabels = ['RX bits', 'RX data', 'TX bits', 'TX data'];
       ctx.font = '600 10px system-ui, sans-serif'; ctx.fillText(protocol.name, 26, y + 10);
-      ctx.font = '9px system-ui, sans-serif'; ctx.fillText(pwm ? t((['pwm.duty', 'pwm.period', 'pwm.frequency'] as const)[row]) : uartLabels[row], 26, y + 23);
+      ctx.font = '9px system-ui, sans-serif';
+      const rowDefinition = rowDefinitions[row]!, rowLabel = rowDefinition.labelKey && hasMessage(rowDefinition.labelKey) ? t(rowDefinition.labelKey) : rowDefinition.label;
+      ctx.fillText(rowLabel, 26, y + 23);
       ctx.restore();
       ctx.strokeStyle = this.palette['grid']; ctx.beginPath(); ctx.moveTo(this.gutter, y + rowHeight - 2); ctx.lineTo(this.width - 16, y + rowHeight - 2); ctx.stroke();
     }
@@ -565,20 +562,21 @@ export class WaveformRenderer {
     const queryStarted = performance.now();
     const visible = protocol.annotations.query(this.start, this.end, Math.max(1, Math.floor(plotWidth * rows * 3)));
     this.recordQuery?.(performance.now() - queryStarted);
-    const classes = pwm ? [0, 1, 2] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+    const rowOfClass = new Map<number, number>();
+    rowDefinitions.forEach((row, index) => { for (const classIndex of row.classes) rowOfClass.set(classIndex, index); });
     const dense = visible.length > plotWidth * rows * 3;
     const occupied = Array.from({ length: rows }, () => new Set<number>());
     const merged = new Map<string, { annotation: typeof visible[number]; row: number; x: number; right: number; error: boolean }>();
     const blocks: Array<{ annotation: typeof visible[number]; row: number; x: number; right: number; merged: boolean }> = [];
     for (const annotation of visible) {
-      if (!classes.includes(annotation.classIndex)) continue;
-      const row = pwm ? annotation.classIndex : annotation.classIndex === 12 ? 0 : annotation.classIndex === 13 ? 2 : (annotation.classIndex % 2 ? 3 : 1);
+      const row = rowOfClass.get(annotation.classIndex);
+      if (row === undefined) continue;
       const x = Math.max(this.gutter, toX(annotation.ss)), right = Math.min(this.width - 16, toX(annotation.es));
       const w = Math.max(2, right - x), cell = Math.floor(x);
       if (!dense && w < 8 && occupied[row].has(cell)) continue;
       if (!dense) occupied[row].add(cell);
       if (dense && w < 12) {
-        const error = !pwm && [6, 7, 10, 11].includes(annotation.classIndex);
+        const error = definition.ui.isErrorClass?.(annotation.classIndex) ?? false;
         const key = `${row}:${cell}:${error ? 1 : 0}`;
         const previous = merged.get(key);
         if (previous) { previous.x = Math.min(previous.x, x); previous.right = Math.max(previous.right, right); }
@@ -595,13 +593,16 @@ export class WaveformRenderer {
     for (const block of blocks) {
       const { annotation, row, x, right } = block;
       const blockHeight = Math.max(6, rowHeight - 4), w = Math.max(2, right - x), y = annY + row * rowHeight + 2;
-      ctx.fillStyle = !pwm && [6, 7, 10, 11].includes(annotation.classIndex) ? this.palette['annotation-error'] : protocol.color;
+      ctx.fillStyle = definition.ui.isErrorClass?.(annotation.classIndex) ? this.palette['annotation-error'] : protocol.color;
       ctx.globalAlpha = protocol.id === this.selectedProtocolId ? .9 : .7;
       const leftTab = Math.min(7, Math.max(2, w / 3)), rightTab = leftTab;
       const middle = y + blockHeight / 2; ctx.beginPath(); ctx.moveTo(x, middle); ctx.lineTo(x + leftTab, y); ctx.lineTo(Math.max(x + leftTab, x + w - rightTab), y); ctx.lineTo(x + w, middle); ctx.lineTo(Math.max(x + leftTab, x + w - rightTab), y + blockHeight); ctx.lineTo(x + leftTab, y + blockHeight); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
       if (!block.merged && w > 8) {
         ctx.fillStyle = this.palette['annotation-text']; ctx.font = '11px system-ui, sans-serif';
-        const texts = pwm ? [pwmAnnotationLabel(annotation, this.capture!.store.samplerate, protocol.decimalPlaces ?? 3)] : annotation.classIndex === 6 || annotation.classIndex === 7 ? [t('annotation.parityError'), 'PE'] : annotation.classIndex === 10 || annotation.classIndex === 11 ? [t('annotation.frameError'), 'FE'] : annotation.texts;
+        const texts = definition.ui.annotationTexts?.(annotation, {
+          sampleRate: this.capture!.store.samplerate, decimals: protocol.decimalPlaces ?? 3,
+          text: (key, fallback) => hasMessage(key) ? t(key) : fallback,
+        }) ?? annotation.texts;
         const available = Math.max(8, w - 4), text = texts.find(value => ctx.measureText(value).width <= available); if (text) { ctx.textAlign = 'center'; ctx.fillText(text, x + w / 2, middle); ctx.textAlign = 'left'; }
       }
     }

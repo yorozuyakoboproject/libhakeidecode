@@ -1,6 +1,7 @@
 import { DecodeError } from './errors.js';
+import { generatorPlugin } from './engine.js';
 import { WaitToken } from './wait.js';
-import type { ChannelId, DecoderClass, DecoderContext, DecoderDescriptor, DecoderLifecycle, MetaDefinition, OptionDeclaration, OptionValue, OutputType, Pin, WaitConditions } from './types.js';
+import type { ChannelId, DecoderClass, DecoderContext, DecoderDescriptor, DecoderLifecycle, DecoderPlugin, MetaDefinition, OptionDeclaration, OptionValue, OutputType, Pin, WaitConditions } from './types.js';
 
 export class Decoder<Options extends object = Record<string, OptionValue>> implements DecoderLifecycle {
   static apiVersion = 3;
@@ -40,6 +41,7 @@ export class Decoder<Options extends object = Record<string, OptionValue>> imple
 
 export class DecoderRegistry {
   readonly decoders = new Map<string, DecoderClass>();
+  readonly plugins = new Map<string, DecoderPlugin<any, any>>();
   register<T extends DecoderClass>(DecoderClass: T): T {
     const descriptor = DecoderClass.descriptor;
     if (!descriptor?.id || (descriptor.apiVersion ?? DecoderClass.apiVersion) !== 3) throw new DecodeError('Decoder must declare an id and API version 3.');
@@ -51,6 +53,21 @@ export class DecoderRegistry {
     const decoder = this.decoders.get(id);
     if (!decoder) throw new DecodeError(`Unknown decoder: ${id}`);
     return decoder;
+  }
+  registerPlugin<T extends DecoderPlugin<any, any>>(plugin: T): T {
+    const descriptor = plugin.descriptor;
+    if (!descriptor?.id || (descriptor.apiVersion ?? plugin.decoder.apiVersion) !== 3) throw new DecodeError('Plugin must declare an id and API version 3.');
+    if (this.decoders.has(descriptor.id) && this.decoders.get(descriptor.id) !== plugin.decoder) throw new DecodeError(`Decoder already registered: ${descriptor.id}`);
+    this.decoders.set(descriptor.id, plugin.decoder);
+    this.plugins.set(descriptor.id, plugin);
+    return plugin;
+  }
+  getPlugin(id: string): DecoderPlugin<any, any> {
+    const plugin = this.plugins.get(id);
+    if (plugin) return plugin;
+    const decorated = generatorPlugin(this.get(id));
+    this.plugins.set(id, decorated);
+    return decorated;
   }
   list(): DecoderDescriptor[] { return [...this.decoders.values()].map(cls => cls.descriptor); }
 }

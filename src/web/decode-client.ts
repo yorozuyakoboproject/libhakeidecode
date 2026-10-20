@@ -1,15 +1,23 @@
-import { createPWMBatchReader } from './pwm-batch.js';
 import { channelStoreRange, type Capture, type SharedCaptureConsumerSource } from './capture.js';
 import { SharedWorkerSampleStore } from './shared-sample-store.js';
-import type { Annotation, DecodeMessage, DecoderId, Frame, WorkerDecodeMessage } from './protocol.js';
-import type { PWMOptions } from '../decoders/pwm.js';
-import type { UARTOptions } from '../decoders/uart.js';
+import type { Annotation, DecodeBatchMessage, DecodeMessage, DecoderId, Frame, WorkerDecodeMessage } from './protocol.js';
+import { decoderDefinition } from '../decoders/index.js';
+import type { OptionValue } from '../libhakeidecode/index.js';
 import { t, UIError } from './i18n.js';
 export type DecodeResult = Extract<DecodeMessage, { type: 'done' }>;
 const DECODE_SAMPLE_WINDOW = 8_000_000n;
 const LIVE_DECODE_SAMPLE_WINDOW = 1_000_000n;
 const DECODE_EDGE_WINDOW_LIMIT = 100_000;
 const yieldTask = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
+type ChannelMapping = Record<string, number | undefined>;
+function mappedChannels(decoder: DecoderId, mapping: ChannelMapping): [string, number][] {
+  const definition = decoderDefinition(decoder), entries = definition.ui.inputs.flatMap(input => {
+    const index = mapping[input.key]; return index === undefined ? [] : [[input.key, index] as [string, number]];
+  });
+  const mode = definition.ui.inputRequirement ?? 'all';
+  if (!entries.length || mode === 'all' && definition.ui.inputs.some(input => !input.optional && mapping[input.key] === undefined)) throw new UIError('error.noMapping');
+  return entries;
+}
 export interface LiveDecodeSession {
 
   readonly mainThreadBatches: { count: number; frames: number; annotations: number; restoreTotalMs: number; restoreMaxMs: number; callbackTotalMs: number; callbackMaxMs: number; totalMs: number; maxMs: number };
@@ -49,17 +57,14 @@ export class DecodeClient {
     }
     return false;
   }
-  startLive(capture: Capture, options: Partial<UARTOptions> | Partial<PWMOptions>, mapping: { rx?: number; tx?: number; data?: number }, onBatch: (message: Extract<DecodeMessage, { type: 'batch' }>) => void, decoder: DecoderId = 'uart', sharedSource?: SharedCaptureConsumerSource, onProgress?: (progress: number, frames: number, annotations: number, resultBytes: number) => void, onPaged?: (frames: number, annotations: number, resultBytes: number) => void): LiveDecodeSession {
+  startLive(capture: Capture, options: Record<string, OptionValue>, mapping: ChannelMapping, onBatch: (message: DecodeBatchMessage) => void, decoder: DecoderId, sharedSource?: SharedCaptureConsumerSource, onProgress?: (progress: number, frames: number, annotations: number, resultBytes: number) => void, onPaged?: (frames: number, annotations: number, resultBytes: number) => void): LiveDecodeSession {
     this.cancel();
     const generation = this.generation;
-    const channelIndexes = Object.entries(mapping).filter(([, index]) => index !== undefined) as [string, number][];
-    if (decoder === 'pwm' && !channelIndexes.some(([key]) => key === 'data')) throw new UIError('error.pwmMapping');
-    if (!channelIndexes.length) throw new UIError('error.noMapping');
+    const channelIndexes = mappedChannels(decoder, mapping), edgeInput = decoderDefinition(decoder).ui.edgeInput;
     const worker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
     this.worker = worker;
-    const readPWM = createPWMBatchReader(capture.store.samplerate);
     const mainThreadBatches = { count: 0, frames: 0, annotations: 0, restoreTotalMs: 0, restoreMaxMs: 0, callbackTotalMs: 0, callbackMaxMs: 0, totalMs: 0, maxMs: 0 };
-    const deliverBatch = (batch: Extract<DecodeMessage, { type: 'batch' }>, restoreMs = 0): void => {
+    const deliverBatch = (batch: DecodeBatchMessage, restoreMs = 0): void => {
       const callbackStarted = performance.now();
       try { onBatch(batch); }
       finally { worker.postMessage({ type: 'decode-output-ack' });
@@ -92,7 +97,6 @@ export class DecodeClient {
       if (event.data.type === 'decode-ack') { this.acknowledge?.(); this.acknowledge = null; }
       else if (event.data.type === 'decode-progress') onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.resultBytes);
       else if (event.data.type === 'decode-output-mode') { keepWorker = true; onPaged?.(event.data.frames, event.data.annotations, event.data.resultBytes); }
-      else if (event.data.type === 'pwm-batch') { const started = performance.now(), batch = readPWM(event.data); deliverBatch(batch, performance.now() - started); }
       else if (event.data.type === 'batch') deliverBatch(event.data);
       else if (event.data.type === 'done') {
         if (settled) return;
@@ -118,8 +122,9 @@ export class DecodeClient {
       catch (error) { this.acknowledge = null; rejectChunk(error); }
     });
     const sendKnown = async (source: Capture, start: bigint, end: bigint): Promise<void> => {
-      if (decoder === 'pwm') {
-        const index = mapping.data!;
+      const edgeIndex = edgeInput === undefined ? undefined : mapping[edgeInput];
+      if (edgeInput !== undefined && edgeIndex !== undefined) {
+        const index = edgeIndex;
         const edgeCount = source.store.edgeCount(index, start, end);
         if (edgeCount <= DECODE_EDGE_WINDOW_LIMIT) {
           const edges = source.store.edges(index, start, end);
@@ -128,7 +133,7 @@ export class DecodeClient {
           return;
         }
         const data = channelStoreRange(source.store, index, start, end);
-        await postChunk({ type: 'decode-chunk', startSample: start, sampleRate: source.store.samplerate, channels: { data } }, [data.buffer]);
+        await postChunk({ type: 'decode-chunk', startSample: start, sampleRate: source.store.samplerate, channels: { [edgeInput]: data } }, [data.buffer]);
         return;
       }
       const channels: Record<string, Uint8Array> = {};
@@ -182,7 +187,7 @@ export class DecodeClient {
       },
     };
   }
-  run(capture: Capture, options: Partial<UARTOptions> | Partial<PWMOptions>, mapping: { rx?: number; tx?: number; data?: number }, onBatch: (message: Extract<DecodeMessage, { type: 'batch' }>) => void, decoder: DecoderId = 'uart', sampleLimit?: bigint, _sharedSource?: SharedCaptureConsumerSource, onProgress?: (progress: number, frames: number, annotations: number, resultBytes: number) => void, onPaged?: (frames: number, annotations: number, resultBytes: number) => void, pageLargeResults = false): Promise<DecodeResult> {
+  run(capture: Capture, options: Record<string, OptionValue>, mapping: ChannelMapping, onBatch: (message: DecodeBatchMessage) => void, decoder: DecoderId, sampleLimit?: bigint, _sharedSource?: SharedCaptureConsumerSource, onProgress?: (progress: number, frames: number, annotations: number, resultBytes: number) => void, onPaged?: (frames: number, annotations: number, resultBytes: number) => void, pageLargeResults = false): Promise<DecodeResult> {
     this.cancel();
     const packedStore = capture.store instanceof SharedWorkerSampleStore ? capture.store : null;
     if (packedStore && sampleLimit !== undefined) throw new UIError('error.worker');
@@ -194,10 +199,8 @@ export class DecodeClient {
         try {
           const availableLength = capture.store.length;
           const length = sampleLimit === undefined ? availableLength : sampleLimit < 0n ? 0n : sampleLimit < availableLength ? sampleLimit : availableLength;
-          const channelIndexes = Object.entries(mapping).filter(([, index]) => index !== undefined) as [string, number][];
+          const channelIndexes = mappedChannels(decoder, mapping), edgeInput = decoderDefinition(decoder).ui.edgeInput;
           if (generation !== this.generation) return;
-          if (decoder === 'pwm' && !channelIndexes.some(([key]) => key === 'data')) throw new UIError('error.pwmMapping');
-          if (!channelIndexes.length) throw new UIError('error.noMapping');
           const worker = activeWorker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
           this.worker = worker; this.reject = reject;
           const cleanup = (): void => { worker.terminate(); if (this.worker === worker) { this.worker = null; this.reject = null; } };
@@ -206,7 +209,6 @@ export class DecodeClient {
             try { worker.postMessage(message, transfer); }
             catch (error) { this.acknowledge = null; rejectChunk(error); }
           });
-          const readPWM = createPWMBatchReader(capture.store.samplerate);
           let keepWorker = false;
           worker.onmessage = (event: MessageEvent<WorkerDecodeMessage>) => {
             if (this.worker !== worker) return;
@@ -214,7 +216,6 @@ export class DecodeClient {
             if (event.data.type === 'decode-ack') { this.acknowledge?.(); this.acknowledge = null; }
             else if (event.data.type === 'decode-progress') onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.resultBytes);
             else if (event.data.type === 'decode-output-mode') { keepWorker = true; onPaged?.(event.data.frames, event.data.annotations, event.data.resultBytes); }
-            else if (event.data.type === 'pwm-batch') { try { onBatch(readPWM(event.data)); } finally { worker.postMessage({ type: 'decode-output-ack' }); } }
             else if (event.data.type === 'batch') { try { onBatch(event.data); } finally { worker.postMessage({ type: 'decode-output-ack' }); } }
             else if (event.data.type === 'done') { this.acknowledge?.(); this.acknowledge = null; if (keepWorker) { if (this.worker === worker) this.reject = null; } else cleanup(); resolve(event.data); }
             else if (event.data.type === 'error') {
@@ -237,8 +238,9 @@ export class DecodeClient {
             for (let offset = start; offset < end; offset += window) {
               if (generation !== this.generation) return;
               const chunkEnd = offset + window < end ? offset + window : end;
-              if (decoder === 'pwm') {
-                const index = mapping.data!;
+              const edgeIndex = edgeInput === undefined ? undefined : mapping[edgeInput];
+              if (edgeInput !== undefined && edgeIndex !== undefined) {
+                const index = edgeIndex;
                 const edgeCount = capture.store.edgeCount(index, offset, chunkEnd);
                 if (edgeCount <= DECODE_EDGE_WINDOW_LIMIT) {
                   const edges = capture.store.edges(index, offset, chunkEnd);
@@ -248,7 +250,7 @@ export class DecodeClient {
                   continue;
                 }
                 const data = channelStoreRange(capture.store, index, offset, chunkEnd);
-                await postChunk({ type: 'decode-chunk', startSample: offset, sampleRate: capture.store.samplerate, channels: { data } }, [data.buffer]);
+                await postChunk({ type: 'decode-chunk', startSample: offset, sampleRate: capture.store.samplerate, channels: { [edgeInput]: data } }, [data.buffer]);
               } else {
                 const channels: Record<string, Uint8Array> = {};
                 for (const [key, index] of channelIndexes) channels[key] = channelStoreRange(capture.store, index, offset, chunkEnd);

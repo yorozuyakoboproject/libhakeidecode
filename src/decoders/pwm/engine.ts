@@ -1,10 +1,20 @@
-import type { PackedPWMBatch, PWMPosition } from './protocol.js';
-import type { PWMOptions } from '../decoders/pwm.js';
+import { DecodeError } from '../../libhakeidecode/errors.js';
+import type { DecoderEngine, DecoderEngineContext, DecoderEngineContext as Context, LogicLevel, LogicWindow, SignalWindow } from '../../libhakeidecode/index.js';
+import type { PWMOptions } from './index.js';
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+const FLUSH_CYCLES = 4096;
 
-export class PWMStreamDecoder {
+export type PWMPosition = number | bigint;
+export interface PWMScanBatch {
+  cycles: PWMPosition[];
+  averages: Float64Array;
+  raw: Uint8Array;
+}
+
+export class PWMScanEngine implements DecoderEngine<PWMScanBatch> {
   private readonly active: 0 | 1;
+  private readonly sink: Context<PWMOptions, PWMScanBatch>['sink'];
   private level: 0 | 1 | null = null;
   private activeStart: bigint | null = null;
   private activeEnd: bigint | null = null;
@@ -12,32 +22,30 @@ export class PWMStreamDecoder {
   private fastEnd: number | null = null;
   private cycles: PWMPosition[] = [];
   private averages: number[] = [];
-  private batchAnnotations = 0;
-  private cycleCount = 0;
+  private rawValues: number[] = [];
   private totalDuty = 0;
+  private cycleCount = 0;
   private frameCount = 0;
-  private annotationCount = 0;
-  private rawPages: Uint8Array[] = [];
-  private rawLength = 0;
-  private rawOffset = 0;
-  get rawBytes(): number { return this.rawLength; }
-  private truncated = false;
-  private binaryTruncated = false;
-  constructor(sampleRate: number, options: Partial<PWMOptions>, private readonly emit: (message: PackedPWMBatch, transfer?: Transferable[]) => void | Promise<void>) {
-    if (!(sampleRate > 0)) throw new Error('Cannot decode without samplerate.');
-    this.active = options.polarity === 'active-low' ? 0 : 1;
+  constructor(context: DecoderEngineContext<PWMOptions, PWMScanBatch>) {
+    if (!(context.sampleRate > 0)) throw new DecodeError('Cannot decode without samplerate.');
+    this.active = context.options.polarity === 'active-low' ? 0 : 1;
+    this.sink = context.sink;
   }
-  async push(startSample: bigint, data: Uint8Array, progress: number): Promise<void> {
-    if (!data.length) return;
-    if (this.level === null) { this.level = data[0]! as 0 | 1; await this.scan(startSample, data, 1, progress); }
-    else await this.scan(startSample, data, 0, progress);
-    await this.flushIfFull(progress);
+  get frames(): number { return this.frameCount; }
+  get averageDuty(): number | null { return this.cycleCount ? this.totalDuty / this.cycleCount : null; }
+  async push(window: SignalWindow): Promise<void> {
+    const view = window.channel('data');
+    if (!view) throw new DecodeError('PWM requires a data channel.');
+    if (view.kind === 'packed' && view.data) await this.pushPacked(window.startSample, view.data as Uint8Array, view.bit ?? 0);
+    else if (view.kind === 'edges') await this.pushEdges(window.startSample, view.initial ?? 0, view.edges ?? []);
+    else await this.pushValues(window, view);
+    await this.flush();
   }
-  async pushPacked(startSample: bigint, data: Uint8Array, bit: number, progress: number): Promise<void> {
+  private async pushPacked(startSample: bigint, data: Uint8Array, bit: number): Promise<void> {
     if (!data.length) return;
     if (!Number.isInteger(bit) || bit < 0 || bit > 7) throw new RangeError('Invalid packed PWM channel bit');
     if (startSample < 0n || startSample + BigInt(data.length) > BigInt(Number.MAX_SAFE_INTEGER)) {
-      await this.pushPackedBigint(startSample, data, bit, progress); return;
+      await this.pushPackedBigint(startSample, data, bit); return;
     }
     const start = Number(startSample);
     let offset = 0;
@@ -67,6 +75,7 @@ export class PWMStreamDecoder {
             changes &= ~(1 << changeBit);
           }
           this.level = ((bits >>> 24) & 1) as 0 | 1;
+          if (this.cycles.length >= 3 * FLUSH_CYCLES) { const pending = this.flush(); if (pending) await pending; }
         }
         offset += wordCount * 4;
       }
@@ -75,10 +84,10 @@ export class PWMStreamDecoder {
       const next = ((data[offset]! >>> bit) & 1) as 0 | 1;
       if (next !== this.level) this.transitionNumber(start + offset);
       this.level = next; offset++;
+      if (this.cycles.length >= 3 * FLUSH_CYCLES) { const pending = this.flush(); if (pending) await pending; }
     }
-    await this.flush(progress);
   }
-  private async pushPackedBigint(startSample: bigint, data: Uint8Array, bit: number, progress: number): Promise<void> {
+  private async pushPackedBigint(startSample: bigint, data: Uint8Array, bit: number): Promise<void> {
     this.promoteFast();
     let offset = 0;
     if (this.level === null) { this.level = ((data[0]! >>> bit) & 1) as 0 | 1; offset = 1; }
@@ -88,37 +97,54 @@ export class PWMStreamDecoder {
       if (next === level) continue;
       level = next; this.level = level;
       this.transition(startSample + BigInt(offset));
-      if (this.cycles.length >= 3 * 128) await this.flush(progress);
+      if (this.cycles.length >= 3 * FLUSH_CYCLES) { const pending = this.flush(); if (pending) await pending; }
     }
     this.level = level;
-    await this.flush(progress);
   }
-  async pushEdges(startSample: bigint, initial: 0 | 1, edges: readonly bigint[], progress: number): Promise<void> {
+  private async pushValues(window: SignalWindow, view: LogicWindow): Promise<void> {
+    if (!view.length) return;
+    let offset = 0;
+    if (this.level === null) { this.level = view.at(0) as 0 | 1; offset = 1; }
+    if (offset === 0) {
+      const next = view.at(0) as 0 | 1;
+      if (next !== this.level) await this.transitionAt(window.startSample, 0);
+      this.level = next; offset = 1;
+    }
+    for (; offset < view.length; offset++) {
+      const next = view.at(offset) as 0 | 1;
+      if (next === this.level) continue;
+      await this.transitionAt(window.startSample, offset);
+      this.level = next;
+      if (this.cycles.length >= 3 * FLUSH_CYCLES) { const pending = this.flush(); if (pending) await pending; }
+    }
+  }
+  private async transitionAt(startSample: bigint, offset: number): Promise<void> {
+    if (startSample + BigInt(offset) <= BigInt(Number.MAX_SAFE_INTEGER)) this.transitionNumber(Number(startSample) + offset);
+    else { this.promoteFast(); this.transition(startSample + BigInt(offset)); }
+  }
+  private async pushEdges(startSample: bigint, initial: LogicLevel, edges: readonly (number | bigint)[]): Promise<void> {
     const fresh = this.level === null;
     if (fresh) this.level = initial;
-    for (const position of edges) {
+    for (const edge of edges) {
+      const position = typeof edge === 'bigint' ? edge : BigInt(edge);
       if (position < startSample || fresh && position === startSample) continue;
+      this.promoteFast();
       this.transition(position);
-      if (this.cycles.length >= 3 * 128) await this.flush(progress);
+      if (this.cycles.length >= 3 * FLUSH_CYCLES) { const pending = this.flush(); if (pending) await pending; }
     }
-    await this.flushIfFull(progress);
   }
+  flush(): void | Promise<void> {
+    if (!this.cycles.length) return;
+    const batch: PWMScanBatch = { cycles: this.cycles, averages: Float64Array.from(this.averages), raw: Uint8Array.from(this.rawValues) };
+    this.cycles = []; this.averages = []; this.rawValues = [];
+    return this.sink.write(batch);
+  }
+  async finish(): Promise<void> { const pending = this.flush(); if (pending) await pending; }
   reset(): void {
     this.level = null; this.activeStart = null; this.activeEnd = null; this.fastStart = null; this.fastEnd = null;
     this.totalDuty = 0; this.cycleCount = 0;
   }
-  private async scan(startSample: bigint, data: Uint8Array, first: number, progress: number): Promise<void> {
-    let level = this.level!;
-    for (let offset = first; offset < data.length; offset++) {
-      const next = data[offset]! as 0 | 1;
-      if (next === level) continue;
-      level = next;
-      const position = startSample + BigInt(offset);
-      this.transition(position);
-      if (this.cycles.length >= 3 * 128) await this.flush(progress);
-    }
-    this.level = level;
-  }
+  cancel(): void { this.reset(); }
   private transition(position: bigint): void {
     const level = this.level! ^ 1;
     this.level = level as 0 | 1;
@@ -151,27 +177,14 @@ export class PWMStreamDecoder {
     this.recordCycle(ss, es, activeSamples, duty);
   }
   private recordCycle(ss: PWMPosition, es: PWMPosition, activeSamples: PWMPosition, duty: number): void {
-    this.totalDuty += duty * 100; this.cycleCount++; const average = this.totalDuty / this.cycleCount;
-    this.pushRaw(Math.trunc(duty * 256));
-    this.cycles.push(ss, es, activeSamples); this.averages.push(average); this.frameCount++;
-    this.batchAnnotations += 3; this.annotationCount += 3;
+    this.totalDuty += duty * 100; this.cycleCount++;
+    this.cycles.push(ss, es, activeSamples);
+    this.averages.push(this.totalDuty / this.cycleCount);
+    this.rawValues.push(Math.trunc(duty * 256));
+    this.frameCount++;
   }
-  private pushRaw(value: number): void {
-    let page = this.rawPages.at(-1);
-    if (!page || this.rawOffset === page.length) { page = new Uint8Array(65_536); this.rawPages.push(page); this.rawOffset = 0; }
-    page[this.rawOffset++] = value & 0xff; this.rawLength++;
-  }
-  private async flushIfFull(progress: number): Promise<void> { if (this.cycles.length >= 3 * 128) await this.flush(progress); }
-  async flush(progress: number): Promise<void> {
-    if (!this.cycles.length && !this.batchAnnotations) return;
-    const averages = Float64Array.from(this.averages);
-    await this.emit({ type: 'pwm-batch', progress, cycles: this.cycles, averages, annotations: this.batchAnnotations }, [averages.buffer]);
-    this.cycles = []; this.averages = []; this.batchAnnotations = 0;
-  }
-  result(): { rx: Uint8Array; tx: Uint8Array; pwm: Uint8Array; pwmAverage: number | null; frames: number; annotations: number; truncated: boolean; binaryTruncated: boolean } {
-    const raw = new Uint8Array(this.rawLength); let offset = 0;
-    for (const page of this.rawPages) { const length = Math.min(page.length, this.rawLength - offset); raw.set(page.subarray(0, length), offset); offset += length; if (offset === this.rawLength) break; }
-    return { rx: new Uint8Array(), tx: new Uint8Array(), pwm: raw, pwmAverage: this.cycleCount ? this.totalDuty / this.cycleCount : null,
-      frames: this.frameCount, annotations: this.annotationCount, truncated: this.truncated, binaryTruncated: this.binaryTruncated };
-  }
+}
+
+export function createPWMScanEngine(context: DecoderEngineContext<PWMOptions, PWMScanBatch>): PWMScanEngine {
+  return new PWMScanEngine(context);
 }

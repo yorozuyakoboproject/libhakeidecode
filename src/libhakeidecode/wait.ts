@@ -31,24 +31,39 @@ export function compileWait(token: WaitToken, channelIndex: (id: ChannelId) => n
 }
 
 export function matchWait(conditions: CompiledWait, pins: Pins, previous: Pins): boolean[] {
-  return conditions.map(terms => terms.length > 0 && terms.every(term => {
-    if (term.kind === 'skip') {
-      if (term.count < 0) return false;
-      if (term.skipped === term.count) return true;
-      term.skipped += 1n;
-      return false;
+  const flags: boolean[] = [];
+  matchWaitInto(conditions, pins, previous, flags);
+  return flags;
+}
+
+export function matchWaitInto(conditions: CompiledWait, pins: Pins, previous: Pins, flags: boolean[]): boolean {
+  let matched = false;
+  for (let index = 0; index < conditions.length; index++) {
+    const terms = conditions[index]!;
+    let result = terms.length > 0;
+    for (let termIndex = 0; result && termIndex < terms.length; termIndex++) {
+      const term = terms[termIndex]!;
+      if (term.kind === 'skip') {
+        if (term.count < 0) result = false;
+        else if (term.skipped === term.count) result = true;
+        else { term.skipped += 1n; result = false; }
+        continue;
+      }
+      if (term.channel < 0 || term.channel >= pins.length) { result = false; continue; }
+      const pin = pins[term.channel]!, old = previous[term.channel];
+      if (pin !== 0 && pin !== 1) { result = false; continue; }
+      switch (term.kind) {
+        case 'l': result = pin === 0; break;
+        case 'h': result = pin === 1; break;
+        case 'r': result = old === 0 && pin === 1; break;
+        case 'f': result = old === 1 && pin === 0; break;
+        case 'e': result = old !== pin; break;
+        case 'n': result = old === pin; break;
+        default: result = false;
+      }
     }
-    if (term.channel < 0 || term.channel >= pins.length) return false;
-    const pin = pins[term.channel], old = previous[term.channel];
-    if (pin !== 0 && pin !== 1) return false;
-    switch (term.kind) {
-      case 'l': return pin === 0;
-      case 'h': return pin === 1;
-      case 'r': return old === 0 && pin === 1;
-      case 'f': return old === 1 && pin === 0;
-      case 'e': return old !== pin;
-      case 'n': return old === pin;
-      default: return false;
-    }
-  }));
+    flags[index] = result;
+    if (result) matched = true;
+  }
+  return matched;
 }

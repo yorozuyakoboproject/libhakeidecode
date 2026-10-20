@@ -1,5 +1,5 @@
-import { Decoder, OUTPUT_ANN, OUTPUT_BINARY, OUTPUT_PROTOCOL, SRD_CONF_SAMPLERATE, registry } from '../libhakeidecode/index.js';
-import type { AnnotationData, BinaryData, DecoderContext, DecoderDescriptor, LogicGenerator, WaitCondition } from '../libhakeidecode/index.js';
+import { Decoder, OUTPUT_ANN, OUTPUT_BINARY, OUTPUT_PROTOCOL, SRD_CONF_SAMPLERATE, registry } from '../../libhakeidecode/index.js';
+import type { AnnotationData, BinaryData, DecoderContext, DecoderDescriptor, LogicGenerator, WaitCondition } from '../../libhakeidecode/index.js';
 export type UARTDirection = 0 | 1;
 export type UARTSignal = number | boolean;
 export type UARTDataBit = [signal: UARTSignal, ss: bigint, es: bigint];
@@ -79,7 +79,7 @@ export class UARTDecoder extends Decoder<UARTOptions> {
       { id: 'tx', name: 'TX', desc: 'UART transmit line' },
     ],
     options: [
-      { id: 'baudrate', desc: 'Baud rate', default: 115200 },
+      { id: 'baudrate', desc: 'Baud rate', default: 115200, min: 1, required: true },
       { id: 'data_bits', desc: 'Data bits', default: 8, values: [5, 6, 7, 8, 9] },
       { id: 'parity', desc: 'Parity', default: 'none', values: ['none', 'odd', 'even', 'zero', 'one', 'ignore'] },
       { id: 'stop_bits', desc: 'Stop bits', default: 1, values: [0, 0.5, 1, 1.5, 2] },
@@ -87,7 +87,7 @@ export class UARTDecoder extends Decoder<UARTOptions> {
       { id: 'format', desc: 'Data format', default: 'hex', values: ['ascii', 'dec', 'hex', 'oct', 'bin'] },
       { id: 'invert_rx', desc: 'Invert RX', default: 'no', values: ['yes', 'no'] },
       { id: 'invert_tx', desc: 'Invert TX', default: 'no', values: ['yes', 'no'] },
-      { id: 'sample_point', desc: 'Sample point (%)', default: 50 },
+      { id: 'sample_point', desc: 'Sample point (%)', default: 50, min: 1, max: 99, step: 'any', required: true },
       { id: 'rx_packet_delim', desc: 'RX packet delimiter (decimal)', default: -1 },
       { id: 'tx_packet_delim', desc: 'TX packet delimiter (decimal)', default: -1 },
       { id: 'rx_packet_len', desc: 'RX packet length', default: -1 },

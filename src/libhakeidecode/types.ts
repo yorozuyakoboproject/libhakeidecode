@@ -23,6 +23,10 @@ export interface OptionDeclaration {
   readonly desc?: string;
   readonly default: OptionValue;
   readonly values?: readonly OptionValue[];
+  readonly min?: number;
+  readonly max?: number;
+  readonly step?: number | 'any';
+  readonly required?: boolean;
 }
 export type ClassDeclaration = readonly [id: string, description: string];
 export type AnnotationRow = readonly [id: string, description: string, classes: readonly number[]];
@@ -103,6 +107,48 @@ export interface DecoderClass {
   readonly apiVersion?: number;
 }
 export type ChannelMapping = Readonly<Record<string, string | number | boolean | null | undefined>>;
+
+export type LogicWindowKind = 'values' | 'packed' | 'edges';
+export interface LogicWindow {
+  readonly kind: LogicWindowKind;
+  readonly length: number;
+  readonly data?: ArrayLike<number>;
+  readonly bit?: number;
+  readonly initial?: LogicLevel;
+  readonly edges?: readonly (number | bigint)[];
+  at(index: number): Pin;
+  nextEdge(index: number): number;
+}
+export interface SignalWindow {
+  readonly startSample: bigint;
+  readonly endSample: bigint;
+  readonly sampleRate: number;
+  readonly length: number;
+  readonly channelIds: readonly string[];
+  channel(id: ChannelId): LogicWindow | undefined;
+}
+export interface OutputSink<Batch = readonly OutputEvent[]> {
+  write(batch: Batch): void | Promise<void>;
+}
+export interface DecoderEngineContext<Options extends object = Record<string, OptionValue>, Batch = readonly OutputEvent[]> {
+  readonly sampleRate: number;
+  readonly options: Options;
+  readonly channels: ChannelMapping;
+  readonly instanceId?: string;
+  readonly sink: OutputSink<Batch>;
+}
+export interface DecoderEngine<Batch = readonly OutputEvent[]> {
+  push(window: SignalWindow): void | Promise<void>;
+  flush?(): void | Promise<void>;
+  finish(): void | Promise<void>;
+  reset(): void;
+  cancel(): void;
+}
+export interface DecoderPlugin<Options extends object = Record<string, OptionValue>, Batch = readonly OutputEvent[]> {
+  readonly decoder: DecoderClass;
+  readonly descriptor: DecoderDescriptor;
+  createEngine(context: DecoderEngineContext<Options, Batch>): DecoderEngine<Batch>;
+}
 export interface RunnerOptions {
   channels?: ChannelMapping;
   onEvent?: EventHandler;

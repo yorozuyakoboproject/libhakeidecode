@@ -29,7 +29,7 @@ export interface CaptureDiagnostics {
   h417Worker?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number };
   sharedPublisher?: { calls: number; bytes: number; totalMs: number; maxMs: number };
   sharedStorage?: { readerWaitMs: number; summaryMs: number; processCalls: number; queryMs: number; queryCalls: number; edgeMs: number; edgeCalls: number; packMs: number; packCalls: number; samples: bigint; groups: number };
-  decodeWorker?: { sharedUnpackMs: number; decoderPushMs: number; pwmBatchMs: number; outputPostMs: number; cooperativeYieldMs: number; cooperativeYieldCount: number };
+  decodeWorker?: { sharedUnpackMs: number; decoderPushMs: number; runtimeBatchMs: number; outputPostMs: number; cooperativeYieldMs: number; cooperativeYieldCount: number };
   decodeMainThread?: { restoreTotalMs: number; restoreMaxMs: number; callbackTotalMs: number; callbackMaxMs: number; batchCount: number; frames: number; annotations: number };
 }
 export interface AcquisitionResult {

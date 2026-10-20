@@ -9,10 +9,6 @@ export const OUTPUT_LOGIC = 'logic';
 export const SRD_CONF_SAMPLERATE = 10000;
 const TYPES = new Set<OutputType>([OUTPUT_ANN, OUTPUT_PROTOCOL, OUTPUT_BINARY, OUTPUT_META, OUTPUT_LOGIC]);
 
-function copy<T>(value: T): T {
-  return structuredClone(value);
-}
-
 export class OutputStreams {
   readonly decoder: Pick<DecoderLifecycle, 'descriptor'>;
   readonly instanceId: string;
@@ -65,7 +61,7 @@ export class OutputStreams {
     }
     this.onEvent(Object.freeze({
       type: stream.type, ss, es, outputId, protoId: stream.protoId, meta: stream.meta,
-      decoder: descriptor.id, instanceId: this.instanceId, data: copy(data),
+      decoder: descriptor.id, instanceId: this.instanceId, data,
     }) as OutputEvent);
   }
 }

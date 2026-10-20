@@ -1,21 +1,19 @@
 import { compareSamples, minSample, maxSample } from '../libhakei/sample-index.js';
 import { scaleSamples } from '../libhakei/sample-index.js';
-import { PWMDecoder, type PWMOptions } from '../decoders/pwm.js';
-import { UARTDecoder, type UARTOptions } from '../decoders/uart.js';
+import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import { deviceCapture, importCapture, captureMemory, type Capture, type StageTiming } from './capture.js';
 import { MemoryBudgetError, type BudgetSnapshot } from './memory.js';
-import { DemoDevice } from '../libhakei/demo.js';
 import { DeviceControls } from './device-controls.js';
-import { CH32H417Device } from '../drivers/ch32h417/index.js';
+import { sampleDevices } from '../drivers/index.js';
 import { serializeSR } from './sr.js';
 import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
 import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
 import { AnalogSampleStore } from './data/analogStore.js';
 import { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
-import { frameCSV, type Frame, type DecoderId } from './protocol.js';
+import type { DecodeBatchMessage, Frame, DecoderId } from './protocol.js';
 import type { ProtocolSettings, WorkspaceSettings } from './workspace.js';
-import type { OptionDeclaration } from '../libhakeidecode/types.js';
+import type { OptionDeclaration, OptionValue } from '../libhakeidecode/types.js';
 import './preferences.js';
 import { errorLabel, hasMessage, numberLabel, t, translateDOM, UIError, type MessageKey, type MessageParams } from './i18n.js';
 export function element<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -38,7 +36,7 @@ export interface ProtocolInstance extends ProtocolSettings {
   state: 'ready' | 'decoding' | 'done' | 'cancelled' | 'error';
   progress: number;
   error: string | UIError | null;
-  savedOptions: Partial<Record<DecoderId, Record<string, string | number>>>;
+  savedOptions: Record<DecoderId, Record<string, OptionValue>>;
   liveSession?: LiveDecodeSession;
   liveBatchMetrics?: LiveDecodeSession['mainThreadBatches'];
   liveBatchStages?: { frames: { calls: number; totalMs: number; maxMs: number }; annotations: { calls: number; totalMs: number; maxMs: number }; ui: { calls: number; totalMs: number; maxMs: number } };
@@ -47,13 +45,25 @@ const colors = ['#70d7a1', '#efbc6b', '#79adff', '#d091eb', '#72c9df', '#ec8291'
 function addStageTiming(stage: StageTiming, elapsed: number): void {
   stage.calls++; stage.totalMs += elapsed; stage.maxMs = Math.max(stage.maxMs, elapsed);
 }
-function declarations(decoder: DecoderId): readonly OptionDeclaration[] { return (decoder === 'pwm' ? PWMDecoder : UARTDecoder).descriptor.options as readonly OptionDeclaration[]; }
-function defaults(decoder: DecoderId): Record<string, string | number> { return Object.fromEntries(declarations(decoder).map(o => [o.id, o.default as string | number])); }
+function declarations(decoder: DecoderId): readonly OptionDeclaration[] {
+  const options = decoderDefinition(decoder).decoder.descriptor.options;
+  if (!options) return [];
+  return Array.isArray(options) ? options as readonly OptionDeclaration[]
+    : Object.entries(options).map(([id, value]) => ({ id, default: value }));
+}
+function defaults(decoder: DecoderId): Record<string, OptionValue> { return Object.fromEntries(declarations(decoder).map(option => [option.id, option.default])); }
+function framesCSV(decoder: DecoderId, frames: Iterable<Frame>, sampleRate: number, triggerSample: bigint): string {
+  const definition = decoderDefinition(decoder), rows = Array.from(frames, frame => definition.ui.csvRow(frame, sampleRate, triggerSample));
+  return definition.ui.csvHeader + '\r\n' + rows.join('\r\n');
+}
+function binaryBytes(result: DecodeResult): number {
+  return Object.values(result.result.binaries).reduce((sum, data) => sum + data.byteLength, 0);
+}
 export class AnalyzerApp {
   protocols: ProtocolInstance[] = [];
   selectedId: string | null = null;
   get selectedProtocol(): ProtocolInstance | null { return this.protocols.find(p => p.id === this.selectedId) ?? null; }
-  get decoder(): DecoderId { return this.selectedProtocol?.decoder ?? 'uart'; }
+  get decoder(): DecoderId { return this.selectedProtocol?.decoder ?? decoderDefinitions[0]!.decoder.descriptor.id; }
   get frames(): Frame[] { return this.selectedProtocol?.frames ?? []; }
   get result(): DecodeResult | null { return this.selectedProtocol?.result ?? null; }
   capture: Capture | null = null;
@@ -62,7 +72,7 @@ export class AnalyzerApp {
   private version = 0;
   private decodeVersion = 0;
   private nextId = 0;
-  readonly deviceControls = new DeviceControls(element<HTMLFormElement>('device-form'), [new DemoDevice(), new CH32H417Device()]);
+  readonly deviceControls = new DeviceControls(element<HTMLFormElement>('device-form'), sampleDevices);
   private captureAbort: AbortController | null = null;
   private captureStop: AbortController | null = null;
   private acquisitionMemory: BudgetSnapshot | null = null;
@@ -73,13 +83,14 @@ export class AnalyzerApp {
   private displayedMessage: string | UIError | { key: MessageKey; params?: MessageParams } = '';
   private messageIsError = false;
   constructor() {
+    this.populateDecoderSelects();
     this.renderer.onChange = () => this.updateViewport();
     this.renderer.onProtocolOrderChange = () => this.renderProtocolList();
     this.renderer.onAnnotationClick = (id, ss, es) => { this.selectProtocol(id); if (ss !== this.renderer.start || es !== this.renderer.end) this.renderer.focus(ss, es); };
     window.addEventListener('hakei:localechange', () => this.refreshLocale());
-    element('add-protocol').addEventListener('click', () => this.addProtocol(element<HTMLSelectElement>('add-decoder-type').value as DecoderId));
+    element('add-protocol').addEventListener('click', () => this.addProtocol(element<HTMLSelectElement>('add-decoder-type').value));
     element('remove-protocol').addEventListener('click', () => { if (this.selectedId) this.removeProtocol(this.selectedId); });
-    element<HTMLSelectElement>('decoder-type').addEventListener('change', () => this.changeDecoder(element<HTMLSelectElement>('decoder-type').value as DecoderId));
+    element<HTMLSelectElement>('decoder-type').addEventListener('change', () => this.changeDecoder(element<HTMLSelectElement>('decoder-type').value));
     element<HTMLInputElement>('protocol-name').addEventListener('input', () => {
       const protocol = this.selectedProtocol; if (!protocol) return;
       protocol.name = element<HTMLInputElement>('protocol-name').value.trim().slice(0, 80) || protocol.decoder.toUpperCase(); this.renderProtocolList(); this.renderer.schedule();
@@ -89,13 +100,13 @@ export class AnalyzerApp {
       protocol.color = element<HTMLInputElement>('protocol-color').value; this.renderProtocolList(); this.renderer.schedule();
     });
     element<HTMLFormElement>('decoder-form').addEventListener('submit', event => { event.preventDefault(); });
-    element('pwm-decimals').addEventListener('change', () => {
+    element('decoder-decimals').addEventListener('change', () => {
       const protocol = this.selectedProtocol; if (!protocol) return;
-      protocol.decimalPlaces = Number(element<HTMLSelectElement>('pwm-decimals').value);
+      protocol.decimalPlaces = Number(element<HTMLSelectElement>('decoder-decimals').value);
       this.updateDecodeSummary(); this.renderer.schedule();
     });
     element('decoder-form').addEventListener('change', event => {
-      if ((event.target as HTMLElement).id === 'pwm-decimals') return;
+      if ((event.target as HTMLElement).id === 'decoder-decimals') return;
       if (this.state === 'loading' && !this.captureAbort || !this.selectedProtocol) return;
       const protocol = this.selectedProtocol; this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); this.clearProtocol(protocol); this.setStatus('ready', 'status.updated');
       this.decodeTimer = setTimeout(() => {
@@ -120,8 +131,9 @@ export class AnalyzerApp {
     element('cursor-clear').addEventListener('click', () => { this.renderer.cursorA = null; this.renderer.cursorB = null; this.renderer.cursorMode = false; this.updateViewport(); this.renderer.schedule(); });
     element('export-csv').addEventListener('click', () => { void this.exportCSV(); });
     element('export-binary').addEventListener('click', () => {
-      const direction = element<HTMLSelectElement>('binary-direction').value as 'rx' | 'tx'; if (!this.result) return;
-      download(this.decoder === 'pwm' ? 'hakei-pwm.bin' : `hakei-uart-${direction}.bin`, (this.decoder === 'pwm' ? this.result.pwm : this.result[direction]).slice().buffer, 'application/octet-stream');
+      const key = element<HTMLSelectElement>('binary-output').value, data = this.result?.result.binaries[key];
+      if (!data) return;
+      download('hakei-' + this.decoder + '-' + key + '.bin', data.slice().buffer, 'application/octet-stream');
     });
     element('save-capture').addEventListener('click', () => { void this.saveCapture(); });
     document.addEventListener('keydown', event => {
@@ -130,6 +142,15 @@ export class AnalyzerApp {
       else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); this.renderer.pan(scaleSamples(this.renderer.end - this.renderer.start, event.key === 'ArrowLeft' ? -.2 : .2)); } else if (event.key === 'Escape') this.cancelTask();
     });
     this.selectProtocol(null, false);
+  }
+  private populateDecoderSelects(): void {
+    for (const id of ['add-decoder-type', 'decoder-type']) {
+      const select = element<HTMLSelectElement>(id); select.replaceChildren();
+      for (const definition of decoderDefinitions) {
+        const option = document.createElement('option'); option.value = definition.decoder.descriptor.id;
+        option.textContent = definition.decoder.descriptor.name ?? definition.decoder.descriptor.id; select.append(option);
+      }
+    }
   }
   addProtocol(decoder: DecoderId, decode = true): ProtocolInstance {
     if (this.protocols.length >= 100) { this.showMessage({ key: 'message.protocolLimit' }); return this.protocols[this.protocols.length - 1]; }
@@ -154,7 +175,7 @@ export class AnalyzerApp {
     element('protocol-editor').hidden = !this.selectedProtocol; element('protocol-empty').hidden = !!this.protocols.length;
     if (this.selectedProtocol) {
       element<HTMLSelectElement>('decoder-type').value = this.decoder; element<HTMLInputElement>('protocol-name').value = this.selectedProtocol.name; element<HTMLInputElement>('protocol-color').value = this.selectedProtocol.color;
-      element<HTMLSelectElement>('pwm-decimals').value = String(this.selectedProtocol.decimalPlaces ?? 3);
+      element<HTMLSelectElement>('decoder-decimals').value = String(this.selectedProtocol.decimalPlaces ?? 3);
       this.createOptions(); this.populateMapping(); this.refreshDecoderUI();
     }
     this.renderProtocolList(); this.updateDecodeSummary(); this.renderStatus(); this.renderer.schedule();
@@ -171,54 +192,105 @@ export class AnalyzerApp {
   }
   private createOptions(): void {
     element('decoder-options').replaceChildren(); element('advanced-options').replaceChildren(); const protocol = this.selectedProtocol; if (!protocol) return;
-    const primary = new Set(['polarity', 'baudrate', 'data_bits', 'parity', 'stop_bits', 'format']);
+    const primary = new Set(decoderDefinition(protocol.decoder).ui.primaryOptions ?? []);
+    let advanced = 0;
     for (const option of declarations(protocol.decoder)) {
-      const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span'); caption.dataset.i18n = 'option.' + option.id; caption.textContent = option.desc ?? option.id; label.append(caption);
+      const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span');
+      if (hasMessage('option.' + option.id)) caption.dataset.i18n = 'option.' + option.id;
+      caption.textContent = option.desc ?? option.id; label.append(caption);
       let input: HTMLInputElement | HTMLSelectElement;
       if (option.values) { input = document.createElement('select'); for (const value of option.values) { const item = document.createElement('option'); item.value = String(value); item.textContent = String(value); if (hasMessage('value.' + value)) item.dataset.i18n = 'value.' + value; input.append(item); } }
-      else { input = document.createElement('input'); input.type = typeof option.default === 'number' ? 'number' : 'text'; input.step = option.id === 'sample_point' ? 'any' : '1'; if (option.id === 'baudrate') { input.min = '1'; input.required = true; } if (option.id === 'sample_point') { input.min = '1'; input.max = '99'; input.required = true; } }
-      input.id = 'option-' + option.id; input.value = String(protocol.options[option.id] ?? option.default); input.dataset.i18nAttrs = 'aria-label:option.' + option.id; label.append(input); element(primary.has(option.id) ? 'decoder-options' : 'advanced-options').append(label);
+      else {
+        input = document.createElement('input'); input.type = typeof option.default === 'number' ? 'number' : 'text';
+        input.step = option.step === 'any' ? 'any' : String(option.step ?? 1);
+        if (option.min !== undefined) input.min = String(option.min);
+        if (option.max !== undefined) input.max = String(option.max);
+        input.required = !!option.required;
+      }
+      input.id = 'option-' + option.id; input.value = String(protocol.options[option.id] ?? option.default);
+      if (hasMessage('option.' + option.id)) input.dataset.i18nAttrs = 'aria-label:option.' + option.id;
+      label.append(input);
+      if (primary.has(option.id)) element('decoder-options').append(label);
+      else { element('advanced-options').append(label); advanced++; }
     }
+    element('decoder-advanced').hidden = advanced === 0;
     translateDOM();
   }
   private commitForm(): void {
     const protocol = this.selectedProtocol; if (!protocol) return;
     for (const option of declarations(protocol.decoder)) { const input = document.getElementById('option-' + option.id) as HTMLInputElement | HTMLSelectElement | null; if (input) protocol.options[option.id] = input.value; }
-    for (const [id, key] of [['rx-channel', 'rx'], ['tx-channel', 'tx'], ['data-channel', 'data']] as const) {
-      const select = document.getElementById(id) as HTMLSelectElement | null;
-      if (select?.options.length) { if (select.value === '') delete protocol.mapping[key]; else protocol.mapping[key] = Number(select.value); }
+    for (const input of decoderDefinition(protocol.decoder).ui.inputs) {
+      const select = document.getElementById('mapping-' + input.key) as HTMLSelectElement | null;
+      if (select?.options.length) { if (select.value === '') delete protocol.mapping[input.key]; else protocol.mapping[input.key] = Number(select.value); }
     }
   }
   private populateMapping(): void {
     const protocol = this.selectedProtocol, capture = this.capture; if (!protocol) return;
+    const container = element('decoder-mapping'); container.replaceChildren();
     const count = capture ? capture.logicChannelCount ?? capture.store.channelCount : this.deviceControls.configuration().logicChannels;
-    for (const [id, key] of [['rx-channel', 'rx'], ['tx-channel', 'tx'], ['data-channel', 'data']] as const) {
-      const select = element<HTMLSelectElement>(id); select.replaceChildren(); const none = document.createElement('option'); none.value = ''; none.dataset.i18n = 'channels.none'; none.textContent = t('channels.none'); select.append(none);
-      for (let i = 0; i < count; i++) { const item = document.createElement('option'); item.value = String(i); item.textContent = `D${i} · ${capture?.labels[i] ?? `D${i}`}`; select.append(item); }
-      select.value = protocol.mapping[key] !== undefined && protocol.mapping[key]! < count ? String(protocol.mapping[key]) : '';
+    for (const input of decoderDefinition(protocol.decoder).ui.inputs) {
+      const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span');
+      if (input.labelKey && hasMessage(input.labelKey)) caption.dataset.i18n = input.labelKey;
+      caption.textContent = input.label; label.append(caption);
+      const select = document.createElement('select'); select.id = 'mapping-' + input.key;
+      if (input.labelKey && hasMessage(input.labelKey)) select.dataset.i18nAttrs = 'aria-label:' + input.labelKey;
+      const none = document.createElement('option'); none.value = ''; none.dataset.i18n = 'channels.none'; none.textContent = t('channels.none'); select.append(none);
+      for (let i = 0; i < count; i++) {
+        const item = document.createElement('option'), labelText = capture?.labels[i] ?? 'D' + i;
+        item.value = String(i); item.textContent = 'D' + i + ' · ' + labelText; select.append(item);
+      }
+      select.value = protocol.mapping[input.key] !== undefined && protocol.mapping[input.key]! < count ? String(protocol.mapping[input.key]) : '';
+      label.append(select); container.append(label);
     }
+    translateDOM();
   }
   private refreshProtocolMappings(): void {
     const count = this.capture ? this.capture.logicChannelCount ?? this.capture.store.channelCount : this.deviceControls.configuration().logicChannels;
-    for (const protocol of this.protocols) for (const key of Object.keys(protocol.mapping) as (keyof ProtocolSettings['mapping'])[]) {
-      if (protocol.mapping[key] !== undefined && protocol.mapping[key]! >= count) delete protocol.mapping[key];
+    for (const protocol of this.protocols) {
+      const keys = new Set(decoderDefinition(protocol.decoder).ui.inputs.map(input => input.key));
+      for (const [key, value] of Object.entries(protocol.mapping)) if (!keys.has(key) || value >= count) delete protocol.mapping[key];
     }
     this.populateMapping();
   }
   changeDecoder(decoder: DecoderId): void {
-    const protocol = this.selectedProtocol; if (!protocol || !['uart', 'pwm'].includes(decoder) || decoder === protocol.decoder) return;
+    const protocol = this.selectedProtocol; if (!protocol || !decoderDefinitions.some(definition => definition.decoder.descriptor.id === decoder) || decoder === protocol.decoder) return;
     this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelTask(false); protocol.savedOptions[protocol.decoder] = { ...protocol.options }; protocol.decoder = decoder; protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
-    const input = protocol.mapping.rx ?? protocol.mapping.data;
-    protocol.mapping = decoder === 'pwm' ? (input === undefined ? {} : { data: input }) : { ...(input === undefined ? {} : { rx: input }), ...(protocol.mapping.tx === undefined ? {} : { tx: protocol.mapping.tx }) };
+    const previous = protocol.mapping, next: Record<string, number> = {}, inputs = decoderDefinition(decoder).ui.inputs;
+    for (const input of inputs) if (previous[input.key] !== undefined) next[input.key] = previous[input.key]!;
+    if (!Object.keys(next).length && inputs.length) { const first = Object.values(previous)[0]; if (first !== undefined) next[inputs[0]!.key] = first; }
+    protocol.mapping = next;
     this.clearProtocol(protocol); this.selectProtocol(protocol.id, false); void this.startDecode();
   }
   private refreshDecoderUI(): void {
-    const pwm = this.decoder === 'pwm'; element('pwm-display-options').hidden = !pwm; element('uart-mapping').hidden = pwm; element('pwm-mapping').hidden = !pwm; element('decoder-advanced').hidden = pwm; element('binary-direction').hidden = pwm;
-    element('protocol-description').dataset.i18n = pwm ? 'pwm.description' : 'decoder.description'; translateDOM();
+    const definition = decoderDefinition(this.decoder), description = element('protocol-description');
+    if (definition.ui.descriptionKey && hasMessage(definition.ui.descriptionKey)) description.dataset.i18n = definition.ui.descriptionKey;
+    else delete description.dataset.i18n;
+    description.textContent = definition.ui.descriptionKey && hasMessage(definition.ui.descriptionKey)
+      ? t(definition.ui.descriptionKey) : definition.ui.description ?? definition.decoder.descriptor.desc ?? '';
+    element('decoder-display-options').hidden = !definition.ui.decimals;
+    const binary = element<HTMLSelectElement>('binary-output'); binary.replaceChildren();
+    for (const output of definition.ui.binaryOutputs ?? []) {
+      const option = document.createElement('option'); option.value = output.key;
+      if (output.labelKey && hasMessage(output.labelKey)) option.dataset.i18n = output.labelKey;
+      option.textContent = output.label; binary.append(option);
+    }
+    binary.hidden = !(definition.ui.binaryOutputs?.length);
+    translateDOM();
   }
-  readOptions(protocol = this.selectedProtocol): Partial<UARTOptions> | Partial<PWMOptions> {
+  readOptions(protocol = this.selectedProtocol): Record<string, OptionValue> {
     if (!protocol) return {};
-    return Object.fromEntries(declarations(protocol.decoder).map(o => { const value = protocol.options[o.id] ?? o.default; if (typeof o.default === 'number' && (!String(value).trim() || !Number.isFinite(Number(value)))) throw new UIError('error.option', { option: { key: ('option.' + o.id) as MessageKey } }); return [o.id, typeof o.default === 'number' ? Number(value) : value]; })) as Partial<UARTOptions> | Partial<PWMOptions>;
+    return Object.fromEntries(declarations(protocol.decoder).map(option => {
+      const value = protocol.options[option.id] ?? option.default;
+      if (typeof option.default === 'number' && (!String(value).trim() || !Number.isFinite(Number(value)))) throw new UIError('error.option', { option: { key: ('option.' + option.id) as MessageKey } });
+      return [option.id, typeof option.default === 'number' ? Number(value) : typeof option.default === 'boolean' ? String(value) === 'true' : value];
+    }));
+  }
+  private mappingFor(protocol: ProtocolSettings): Record<string, number> {
+    return Object.fromEntries(decoderDefinition(protocol.decoder).ui.inputs.flatMap(input => protocol.mapping[input.key] === undefined ? [] : [[input.key, protocol.mapping[input.key]!]]));
+  }
+  private sortFrames(protocol: ProtocolInstance): void {
+    const compare = decoderDefinition(protocol.decoder).ui.compareFrames;
+    protocol.frames.sort(compare ? (a, b) => compare(a, b) : (a, b) => compareSamples(a.ss, b.ss));
   }
   stopCapture(): void {
     if (!this.captureStop || this.captureStop.signal.aborted) return;
@@ -292,7 +364,11 @@ export class AnalyzerApp {
     if (cancel) this.cancelTask(false);
     if (this.capture && this.capture !== capture) this.releaseCapture(this.capture);
     this.capture = capture; const count = capture.logicChannelCount ?? capture.store.channelCount;
-    for (const protocol of this.protocols) { this.clearProtocol(protocol); for (const [key, value] of Object.entries(protocol.mapping)) if (value >= count) delete protocol.mapping[key as keyof ProtocolSettings['mapping']]; }
+    for (const protocol of this.protocols) {
+      this.clearProtocol(protocol);
+      const inputs = new Set(decoderDefinition(protocol.decoder).ui.inputs.map(input => input.key));
+      for (const [key, value] of Object.entries(protocol.mapping)) if (!inputs.has(key) || value >= count) delete protocol.mapping[key];
+    }
     if (capture.workspace) { this.protocols = capture.workspace.protocols.map(p => this.createProtocol(p)); this.selectedId = capture.workspace.selectedId; this.nextId += this.protocols.length; }
     this.syncTraces(); this.renderer.setCapture(capture, viewport); this.updateCaptureLabels();
     element<HTMLInputElement>('import-sample-rate').value = String(capture.store.samplerate); element<HTMLSelectElement>('import-channel-count').value = String(capture.store.channelCount); element('channel-badge').textContent = String(count);
@@ -347,7 +423,10 @@ export class AnalyzerApp {
     } catch (error) { if (token === this.version) { this.importAbort = null; this.setStatus('error', 'status.importError'); this.showMessage(error instanceof UIError ? error : errorLabel(error), true); } }
   }
   private hasInput(protocol: ProtocolSettings): boolean {
-    return protocol.decoder === 'pwm' ? protocol.mapping.data !== undefined : protocol.mapping.rx !== undefined || protocol.mapping.tx !== undefined;
+    const definition = decoderDefinition(protocol.decoder), mapped = definition.ui.inputs.filter(input => protocol.mapping[input.key] !== undefined);
+    if (!mapped.length) return false;
+    if (definition.ui.inputRequirement === 'any') return true;
+    return definition.ui.inputs.every(input => input.optional || protocol.mapping[input.key] !== undefined);
   }
   async startDecode(): Promise<void> {
     if (!this.capture || (this.state === 'loading' && !this.captureAbort) || !this.selectedProtocol || !element<HTMLFormElement>('decoder-form').reportValidity()) return;
@@ -375,7 +454,7 @@ export class AnalyzerApp {
           let session!: LiveDecodeSession;
           protocol.liveBatchMetrics = undefined;
           protocol.liveBatchStages = { frames: { calls: 0, totalMs: 0, maxMs: 0 }, annotations: { calls: 0, totalMs: 0, maxMs: 0 }, ui: { calls: 0, totalMs: 0, maxMs: 0 } };
-          const mapping = protocol.decoder === 'pwm' ? { data: protocol.mapping.data } : { rx: protocol.mapping.rx, tx: protocol.mapping.tx };
+          const mapping = this.mappingFor(protocol);
           session = protocol.client.startLive(capture, this.readOptions(protocol), mapping, batch => {
             if (protocol.liveSession !== session) return;
             const stages = protocol.liveBatchStages!, diagnostics = this.capture?.diagnostics;
@@ -445,9 +524,10 @@ export class AnalyzerApp {
             annotations: session.mainThreadBatches.annotations,
           };
         }
-        protocol.liveSession = undefined; protocol.result = result; protocol.frameCount = result.stats.frames; protocol.annotationCount = result.stats.annotations; protocol.resultBytes = Math.max(protocol.resultBytes, protocol.annotations.reservedBytes) + result.pwm.byteLength;
+        protocol.liveSession = undefined; protocol.result = result; protocol.frameCount = result.stats.frames; protocol.annotationCount = result.stats.annotations;
+        protocol.resultBytes = Math.max(protocol.resultBytes, protocol.annotations.reservedBytes) + binaryBytes(result);
         if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(protocol.annotationCount);
-        protocol.frames.sort((a, b) => compareSamples(a.ss, b.ss) || (a.protocol !== 'pwm' && b.protocol !== 'pwm' ? a.direction - b.direction : 0));
+        this.sortFrames(protocol);
         protocol.state = 'done'; protocol.progress = 1;
         if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
       } catch (error) {
@@ -468,24 +548,25 @@ export class AnalyzerApp {
   private async exportCSV(): Promise<void> {
     const capture = this.capture, protocol = this.selectedProtocol;
     if (!capture || !protocol || !protocol.frameCount) return;
+    const definition = decoderDefinition(protocol.decoder), name = 'hakei-' + protocol.decoder + '.csv';
     try {
       if (!protocol.pagedResults) {
-        download(`hakei-${protocol.decoder}.csv`, frameCSV(protocol.frames, capture.store.samplerate, capture.triggerSample, protocol.decoder), 'text/csv;charset=utf-8');
+        download(name, framesCSV(protocol.decoder, protocol.frames, capture.store.samplerate, capture.triggerSample), 'text/csv;charset=utf-8');
         return;
       }
       const picker = (window as Window & { showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void>; abort(): Promise<void> }> }> }).showSaveFilePicker;
-      const writable = picker ? await picker({ suggestedName: `hakei-${protocol.decoder}.csv`, types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }] }).then(file => file.createWritable()) : null;
-      const parts: Blob[] = writable ? [] : [new Blob(['start_sample,end_sample,time_s,active_samples,period_samples,duty_percent,period_s,frequency_hz,average_duty_percent\r\n'])];
+      const writable = picker ? await picker({ suggestedName: name, types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }] }).then(file => file.createWritable()) : null;
+      const parts: Blob[] = writable ? [] : [new Blob([definition.ui.csvHeader + '\r\n'])];
       const pageSize = 20_000;
       try {
         for (let offset = 0; offset < protocol.frameCount; offset += pageSize) {
           const frames = await protocol.client.readFrames(offset, Math.min(pageSize, protocol.frameCount - offset));
-          const csv = frameCSV(frames, capture.store.samplerate, capture.triggerSample, protocol.decoder);
+          const csv = framesCSV(protocol.decoder, frames, capture.store.samplerate, capture.triggerSample);
           const body = csv.slice(csv.indexOf('\r\n') + 2);
           if (!body) continue;
           if (writable) await writable.write(body + '\r\n'); else parts.push(new Blob([body + '\r\n']));
         }
-        if (writable) await writable.close(); else downloadBlob(`hakei-${protocol.decoder}.csv`, new Blob(parts, { type: 'text/csv;charset=utf-8' }));
+        if (writable) await writable.close(); else downloadBlob(name, new Blob(parts, { type: 'text/csv;charset=utf-8' }));
       } catch (error) { await writable?.abort(); throw error; }
     } catch (error) { this.showMessage(error instanceof UIError ? error : errorLabel(error), true); }
   }
@@ -504,7 +585,7 @@ export class AnalyzerApp {
     for (const protocol of pending) {
       if (token !== (live ? this.decodeVersion : this.version)) return; this.clearProtocol(protocol); protocol.state = 'decoding'; this.updateDecodeSummary();
       try {
-        const mapping = protocol.decoder === 'pwm' ? { data: protocol.mapping.data } : { rx: protocol.mapping.rx, tx: protocol.mapping.tx };
+        const mapping = this.mappingFor(protocol);
         const result = await protocol.client.run(capture, this.readOptions(protocol), mapping, batch => {
           if (token !== (live ? this.decodeVersion : this.version)) return;
           for (const frame of batch.frames) protocol.frames.push(frame);
@@ -521,7 +602,9 @@ export class AnalyzerApp {
           const pagedAnnotations = new PagedAnnotationIndex(protocol.client); pagedAnnotations.setTotal(annotations); protocol.annotations = pagedAnnotations;
           this.updateMemoryUsage(); this.updateDecodeSummary(); if (protocol === this.selectedProtocol) this.renderer.schedule();
         }, true);
-        if (token !== (live ? this.decodeVersion : this.version)) return; protocol.result = result; protocol.frameCount = result.stats.frames; protocol.annotationCount = result.stats.annotations; protocol.resultBytes = protocol.annotations.reservedBytes + result.pwm.byteLength; protocol.frames.sort((a, b) => compareSamples(a.ss, b.ss) || (a.protocol !== 'pwm' && b.protocol !== 'pwm' ? a.direction - b.direction : 0)); protocol.state = 'done'; protocol.progress = 1;
+        if (token !== (live ? this.decodeVersion : this.version)) return; protocol.result = result; protocol.frameCount = result.stats.frames;
+        protocol.annotationCount = result.stats.annotations; protocol.resultBytes = protocol.annotations.reservedBytes + binaryBytes(result);
+        this.sortFrames(protocol); protocol.state = 'done'; protocol.progress = 1;
         if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
       } catch (error) {
         if (token !== (live ? this.decodeVersion : this.version)) return; protocol.state = 'error'; protocol.error = error instanceof UIError ? error : errorLabel(error); failed = true; this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
@@ -545,7 +628,7 @@ export class AnalyzerApp {
   }
   private clearProtocol(protocol: ProtocolInstance): void { protocol.frames = []; protocol.frameCount = 0; protocol.annotationCount = 0; protocol.resultBytes = 0; protocol.pagedResults = false; protocol.result = null; protocol.annotations.clear(); protocol.progress = 0; protocol.state = 'ready'; protocol.error = null; this.renderer.schedule(); this.updateDecodeSummary(); }
   workspaceSettings(): WorkspaceSettings {
-    this.commitForm(); const rowOrder = this.renderer.getRowOrder(); return { protocols: this.protocols.map(({ id, decoder, name, color, options, decimalPlaces, mapping }) => ({ id, decoder, name, color, decimalPlaces, options: { ...options }, mapping: Object.fromEntries(Object.entries(mapping).filter(([key]) => decoder === 'pwm' ? key === 'data' : key === 'rx' || key === 'tx')) })), selectedId: this.selectedId, cursor: this.renderer.cursorA, cursorA: this.renderer.cursorA, cursorB: this.renderer.cursorB, viewport: [this.renderer.start, this.renderer.end], channels: [...this.renderer.channels], rowOrder };
+    this.commitForm(); const rowOrder = this.renderer.getRowOrder(); return { protocols: this.protocols.map(protocol => ({ id: protocol.id, decoder: protocol.decoder, name: protocol.name, color: protocol.color, decimalPlaces: protocol.decimalPlaces, options: { ...protocol.options }, mapping: this.mappingFor(protocol) })), selectedId: this.selectedId, cursor: this.renderer.cursorA, cursorA: this.renderer.cursorA, cursorB: this.renderer.cursorB, viewport: [this.renderer.start, this.renderer.end], channels: [...this.renderer.channels], rowOrder };
   }
   async saveCapture(): Promise<void> {
     if (!this.capture || this.saveAbort) return;
@@ -566,8 +649,13 @@ export class AnalyzerApp {
     element<HTMLButtonElement>('cancel').disabled = this.state !== 'decoding' && this.state !== 'loading' && !this.saveAbort;
   }
   private updateDecodeSummary(): void {
-    element('frame-count').textContent = numberLabel(this.selectedProtocol?.frameCount ?? this.frames.length); element('text-preview').textContent = this.result ? this.decoder === 'pwm' ? this.result.pwmAverage === null ? '' : t('pwm.summary', { duty: this.result.pwmAverage.toFixed(this.selectedProtocol?.decimalPlaces ?? 3) }) : 'RX: ' + new TextDecoder().decode(this.result.rx.subarray(0, 100)).replace(/[\r\n]/g, ' ') : '';
-    element<HTMLButtonElement>('export-csv').disabled = !(this.selectedProtocol?.frameCount ?? this.frames.length); element<HTMLButtonElement>('export-binary').disabled = !this.result;
+    const protocol = this.selectedProtocol, definition = protocol ? decoderDefinition(protocol.decoder) : null;
+    element('frame-count').textContent = numberLabel(protocol?.frameCount ?? this.frames.length);
+    element('text-preview').textContent = this.result && definition?.ui.summary
+      ? definition.ui.summary(this.result.result, protocol?.decimalPlaces ?? 3, (key, fallback) => hasMessage(key) ? t(key) : fallback) : '';
+    const key = element<HTMLSelectElement>('binary-output').value;
+    element<HTMLButtonElement>('export-csv').disabled = !(protocol?.frameCount ?? this.frames.length);
+    element<HTMLButtonElement>('export-binary').disabled = !this.result?.result.binaries[key];
   }
   showMessage(message: string | UIError | { key: MessageKey; params?: MessageParams }, error = false): void { this.displayedMessage = message; this.messageIsError = error; this.renderMessage(); }
   private renderMessage(): void { const value = this.displayedMessage, node = element('message'); const message = typeof value === 'string' ? value : value instanceof UIError ? errorLabel(value) : t(value.key, value.params); node.textContent = message; node.hidden = !message; node.classList.toggle('error', this.messageIsError); }
@@ -582,7 +670,7 @@ export class AnalyzerApp {
   }
   private retainedDataBytes(): number {
     return (this.capture ? captureMemory(this.capture).totalBytes : 0) + this.protocols.reduce((sum, protocol) => sum + protocol.resultBytes + protocol.annotations.reservedBytes
-      + (protocol.result ? protocol.result.rx.byteLength + protocol.result.tx.byteLength + protocol.result.pwm.byteLength : 0), 0);
+      + (protocol.result ? Object.values(protocol.result.result.binaries).reduce((bytes, data) => bytes + data.byteLength, 0) : 0), 0);
   }
   private updateMemoryUsage(): void {
     const shared = this.capture?.sharedSource;
