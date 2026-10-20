@@ -229,6 +229,18 @@ export class AnalyzerApp {
     if (this.captureAbort) { this.stopCapture(); return; }
     if (!element<HTMLFormElement>('device-form').reportValidity()) return;
     this.commitForm(); this.cancelTask(false);
+    const previous = this.capture;
+    const previousViewport = previous && this.renderer.end > this.renderer.start
+      ? { start: this.renderer.start, end: this.renderer.end, sampleRate: previous.store.samplerate }
+      : null;
+    const initialView = (capture: Capture): [bigint, bigint] | undefined => {
+      if (!previousViewport) return undefined;
+      const rate = BigInt(capture.store.samplerate), sourceRate = BigInt(previousViewport.sampleRate);
+      const start = previousViewport.start * rate / sourceRate;
+      const end = (previousViewport.end * rate + sourceRate - 1n) / sourceRate;
+      const limit = capture.acquisition?.targetSamples ?? capture.store.length;
+      return start >= 0n && end > start && end <= limit ? [start, end] : undefined;
+    };
     const device = this.deviceControls.device, configuration = this.deviceControls.configuration();
     this.clearCaptureForAcquisition();
     const token = ++this.version, abort = new AbortController(), stop = new AbortController();
@@ -246,7 +258,7 @@ export class AnalyzerApp {
           if (token !== this.version) return;
           const diagnostics = capture.diagnostics;
           let stageStarted = performance.now();
-          if (!this.capture) { this.setCapture(capture, false, true); this.renderer.updateCapture(capture); this.updateViewport(); }
+          if (!this.capture) { this.setCapture(capture, false, true, initialView(capture)); this.renderer.updateCapture(capture); this.updateViewport(); }
           else {
             this.capture = capture;
             const labelsStarted = performance.now(); this.updateCaptureLabels();
@@ -264,7 +276,7 @@ export class AnalyzerApp {
       if (token !== this.version) return;
       this.captureAbort = null; this.captureStop = null; this.acquisitionMemory = null;
       if (hasMessage(`device.name.${device.descriptor.id}`)) capture.nameKey = `device.name.${device.descriptor.id}` as MessageKey;
-      if (!this.capture) this.setCapture(capture, false, true);
+      if (!this.capture) this.setCapture(capture, false, true, initialView(capture));
       else { this.capture = capture; this.flushLiveCaptureView(); this.updateCaptureLabels(); }
       this.setStatus('ready', 'status.ready'); this.updateMemoryUsage();
       if (capture.store.length && !await this.finishLiveDecodes(capture)) await this.decodeAll();
@@ -277,11 +289,11 @@ export class AnalyzerApp {
       this.showMessage(error instanceof MemoryBudgetError ? { key: 'capture.reason.budget' } : error instanceof UIError ? error : errorLabel(error), true);
     }
   }
-  setCapture(capture: Capture, cancel = true, live = false): void {
+  setCapture(capture: Capture, cancel = true, live = false, viewport?: readonly [bigint, bigint]): void {
     if (cancel) this.cancelTask(false); this.capture = capture; const count = capture.logicChannelCount ?? capture.store.channelCount;
     for (const protocol of this.protocols) { this.clearProtocol(protocol); for (const [key, value] of Object.entries(protocol.mapping)) if (value >= count) delete protocol.mapping[key as keyof ProtocolSettings['mapping']]; }
     if (capture.workspace) { this.protocols = capture.workspace.protocols.map(p => this.createProtocol(p)); this.selectedId = capture.workspace.selectedId; this.nextId += this.protocols.length; }
-    this.syncTraces(); this.renderer.setCapture(capture); this.updateCaptureLabels();
+    this.syncTraces(); this.renderer.setCapture(capture, viewport); this.updateCaptureLabels();
     element<HTMLInputElement>('import-sample-rate').value = String(capture.store.samplerate); element<HTMLSelectElement>('import-channel-count').value = String(capture.store.channelCount); element('channel-badge').textContent = String(count);
     const list = element('channel-list'); list.replaceChildren();
     for (let i = 0; i < count; i++) {
@@ -341,7 +353,7 @@ export class AnalyzerApp {
   private flushLiveCaptureView(): void {
 
     if (this.capture) {
-      this.renderer.updateCapture(this.capture, true);
+      this.renderer.updateCapture(this.capture);
       this.updateViewport();
     }
   }

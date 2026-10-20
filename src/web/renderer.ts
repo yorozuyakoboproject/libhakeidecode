@@ -58,9 +58,7 @@ export class WaveformRenderer {
   private viewRefreshDirty = false;
   private viewReady = true;
   private viewGeneration = 0;
-  private lastLiveViewAt = -Infinity;
   private renderingEnabled = true;
-  private followLiveEnd = true;
   private frameRequest = 0;
   private readonly observer: ResizeObserver;
   private draggingCursor = false;
@@ -163,12 +161,19 @@ export class WaveformRenderer {
     overview.addEventListener('pointercancel', () => { this.overviewDrag = null; });
     overview.addEventListener('lostpointercapture', () => { this.overviewDrag = null; });
   }
-  setCapture(capture: Capture): void {
+  setCapture(capture: Capture, viewport?: readonly [SampleInput, SampleInput]): void {
     this.capture = capture; this.channels = Array.from({ length: (capture.logicChannelCount ?? capture.store.channelCount) }, (_, i) => i);
     this.analogChannels = Array.from({ length: capture.analogChannels?.length ?? 0 }, (_, i) => i);
     this.rowOrder = this.channels.map(id => ({ kind: 'channel', id })); this.settleRows();
-    this.annotations.clear(); this.cursorA = null; this.cursorB = null; this.cursorMode = false; this.followLiveEnd = true; this.lastLiveViewAt = -Infinity;
-    this.invalidateView(); this.applyViewport(0n, capture.store.length);
+    this.annotations.clear(); this.cursorA = null; this.cursorB = null; this.cursorMode = false;
+    const limit = this.viewLength(capture); let start = 0n, end = limit;
+    if (viewport) {
+      try {
+        const requestedStart = sampleFloor(viewport[0]), requestedEnd = sampleCeil(viewport[1]);
+        if (requestedStart >= 0n && requestedEnd > requestedStart && requestedEnd <= limit) { start = requestedStart; end = requestedEnd; }
+      } catch {}
+    }
+    this.applyViewport(start, end);
   }
   clearCapture(): void {
     this.capture = null; this.channels = []; this.analogChannels = []; this.rowOrder = [];
@@ -177,24 +182,13 @@ export class WaveformRenderer {
     this.schedule(); this.onChange();
   }
 
-  updateCapture(capture: Capture, force = false): void {
-    this.capture = capture;
-    if (this.followLiveEnd) {
-      const now = performance.now();
-      if (force || now - this.lastLiveViewAt >= 80) { this.lastLiveViewAt = now; this.applyViewport(0n, capture.store.length); }
-      else this.schedule();
-    }
-    else this.applyViewport(this.start, minSample(capture.store.length, this.end));
-  }
-  setViewport(startInput: SampleInput, endInput: SampleInput): void {
-    this.followLiveEnd = false;
-    this.applyViewport(startInput, endInput);
-  }
+  updateCapture(capture: Capture): void { this.capture = capture; this.schedule(); }
+  setViewport(startInput: SampleInput, endInput: SampleInput): void { this.applyViewport(startInput, endInput); }
   private applyViewport(startInput: SampleInput, endInput: SampleInput): void {
     if (!this.capture) return;
     let start: bigint, end: bigint;
     try { start = sampleFloor(startInput); end = sampleCeil(endInput); } catch { return; }
-    const length = this.capture.store.length, span = maxSample(1n, minSample(length, end - start));
+    const length = this.viewLength(this.capture), span = maxSample(1n, minSample(length, end - start));
     const nextStart = maxSample(0n, minSample(length - span, start)), nextEnd = nextStart + span, changed = nextStart !== this.start || nextEnd !== this.end;
     this.start = nextStart; this.end = nextEnd;
     this.onChange();
@@ -209,7 +203,7 @@ export class WaveformRenderer {
     const start = point - scaleSamples(next, bounded); this.setViewport(start, start + next);
   }
   pan(samples: SampleInput): void { const delta = samplePosition(samples); this.setViewport(this.start + delta, this.end + delta); }
-  fit(): void { if (this.capture) this.setViewport(0n, this.capture.store.length); }
+  fit(): void { if (this.capture) this.setViewport(0n, this.viewLength(this.capture)); }
   focus(ss: bigint, es: bigint): void { const pad = maxSample(32n, (es - ss) * 3n / 2n); this.setViewport(ss - pad, es + pad); }
   sampleAtX(x: number): bigint { return this.start + scaleSamples(this.end - this.start, Math.max(0, Math.min(1, (x - this.gutter) / (this.width - this.gutter - 16)))); }
   xAtSample(sample: SampleInput): number { return this.gutter + sampleRatio(samplePosition(sample) - this.start, this.end - this.start) * Math.max(1, this.width - this.gutter - 16); }
@@ -218,6 +212,7 @@ export class WaveformRenderer {
     const plotWidth = Math.max(1, this.width - this.gutter - 16), ticks = Math.max(2, Math.min(8, Math.floor(plotWidth / 115)));
     return Number(this.end - this.start) / ticks / this.capture.store.samplerate;
   }
+  private viewLength(capture: Capture | null = this.capture): bigint { return capture?.acquisition?.targetSamples ?? capture?.store.length ?? 0n; }
   private setCursor(x: number, which: 'a' | 'b' = 'a'): void {
     if (!this.capture) return;
     const sample = minSample(this.capture.store.length - 1n, this.sampleAtX(x));
@@ -323,7 +318,7 @@ export class WaveformRenderer {
   private moveOverview(event: PointerEvent): void {
     if (!this.capture) return;
     const rect = this.overview.getBoundingClientRect(), x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const center = scaleSamples(this.capture.store.length, x / Math.max(1, rect.width)), span = this.end - this.start, start = center - span / 2n;
+    const center = scaleSamples(this.viewLength(this.capture), x / Math.max(1, rect.width)), span = this.end - this.start, start = center - span / 2n;
     this.setViewport(start, start + span);
   }
   private selectAnnotation(x: number, y: number): void {
@@ -634,7 +629,7 @@ export class WaveformRenderer {
     const ctx = this.overview.getContext('2d')!; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = this.palette['overview-bg']; ctx.fillRect(0, 0, width, height);
     ctx.lineCap = 'round'; ctx.strokeStyle = this.palette['overview-line']; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(1, 7); ctx.lineTo(Math.max(1, width - 1), 7); ctx.stroke();
-    const x = sampleRatio(this.start, capture.store.length) * width, end = sampleRatio(this.end, capture.store.length) * width;
+    const length = this.viewLength(capture), x = sampleRatio(this.start, length) * width, end = sampleRatio(this.end, length) * width;
     const selectionWidth = Math.min(width, Math.max(10, end - x));
     const left = Math.max(0, Math.min(width - selectionWidth, (x + end - selectionWidth) / 2));
     ctx.fillStyle = this.palette['overview-selection']; ctx.fillRect(left, 1, selectionWidth, height - 2);
