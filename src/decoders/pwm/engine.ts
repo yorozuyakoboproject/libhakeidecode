@@ -70,9 +70,9 @@ export class PWMScanEngine implements DecoderEngine<PWMScanBatch> {
           if ((bits & 1) !== this.level) this.transitionNumber(wordPosition);
           let changes = (bits ^ (bits << 8)) & 0x01010100;
           while (changes) {
-            const changeBit = 31 - Math.clz32(changes);
+            const changeBit = 31 - Math.clz32(changes & -changes);
             this.transitionNumber(wordPosition + (changeBit >>> 3));
-            changes &= ~(1 << changeBit);
+            changes &= changes - 1;
           }
           this.level = ((bits >>> 24) & 1) as 0 | 1;
           if (this.cycles.length >= 3 * FLUSH_CYCLES) { const pending = this.flush(); if (pending) await pending; }
