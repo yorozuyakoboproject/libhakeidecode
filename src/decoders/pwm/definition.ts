@@ -7,8 +7,9 @@ import { formatPWMFrequency, formatPWMPeriod } from './format.js';
 const frame = (value: import('../definition.js').DecodeFrame): PWMFrame => value as PWMFrame;
 function annotationTexts(annotation: Annotation, context: AnnotationTextContext): readonly string[] {
   if (annotation.classIndex === 0) return [(annotation.value ?? 0).toFixed(context.decimals) + '%'];
-  if (annotation.classIndex === 1) return [formatPWMPeriod(annotation.value ?? Number(annotation.es - annotation.ss) / context.sampleRate)];
-  return [formatPWMFrequency(annotation.value ?? context.sampleRate / Number(annotation.es - annotation.ss))];
+  const seconds = Number(annotation.es - annotation.ss) / context.sampleRate;
+  if (annotation.classIndex === 1) return [formatPWMPeriod(seconds)];
+  return [formatPWMFrequency(seconds)];
 }
 
 export const pwmDefinition: DecoderDefinition = {
