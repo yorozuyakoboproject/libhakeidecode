@@ -1,7 +1,6 @@
 import { sampleIndex, type SampleInput } from '../libhakei/sample-index.js';
 import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore, type RleChannelData } from './data/rleStore.js';
-import { splitAroundGaps } from './data/gaps.js';
 import type { GapSpan } from './data/types.js';
 import { channelWidthForProbes, type ChannelCount } from './data/channel-count.js';
 import { UIError, type MessageKey } from './i18n.js';
@@ -14,20 +13,21 @@ import { validateDeviceConfiguration, type AcquisitionChunk, type AcquisitionDes
 import { MemoryBudget, MemoryBudgetError, SampleAllocationError, DEFAULT_CAPTURE_BUDGET_BYTES, recoverableMemoryError, type BudgetSnapshot } from './memory.js';
 import { WorkerSampleSource } from './acquisition-source.js';
 import { SharedWorkerSampleStore } from './shared-sample-store.js';
+import { WorkerCaptureStore } from './worker-store.js';
+export { channelStoreRange } from './data/channel-range.js';
 export interface SharedCaptureConsumerSource { readonly allocatedBytes: number; readonly publishedSamples: bigint; readonly publisherMetrics?: { calls: number; bytes: number; totalMs: number; maxMs: number }; readonly h417TransportMetrics?: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number }; readonly h417WorkerMetrics?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number }; connectConsumer(port: MessagePort): void }
 export interface StageTiming { calls: number; totalMs: number; maxMs: number }
 export interface CaptureDiagnostics {
   mainThreadAppend: StageTiming;
   mainThreadPublish: StageTiming;
   mainThreadUICallback: StageTiming;
-  ui: Record<'captureRefresh' | 'captureLabels' | 'memoryRefresh' | 'decodeScheduling' | 'decodeFrames' | 'decodeAnnotations' | 'decodeUI', StageTiming>;
+  ui: Record<'captureRefresh' | 'captureLabels' | 'memoryRefresh' | 'decodeScheduling', StageTiming>;
   store?: import('./data/planarStore.js').PlanarStoreTimings;
   h417Transport?: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number };
   h417Worker?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number };
   sharedPublisher?: { calls: number; bytes: number; totalMs: number; maxMs: number };
   sharedStorage?: { readerWaitMs: number; summaryMs: number; processCalls: number; queryMs: number; queryCalls: number; edgeMs: number; edgeCalls: number; packMs: number; packCalls: number; samples: bigint; groups: number };
   decodeWorker?: { sharedUnpackMs: number; decoderPushMs: number; runtimeBatchMs: number; outputPostMs: number; cooperativeYieldMs: number; cooperativeYieldCount: number };
-  decodeMainThread?: { restoreTotalMs: number; restoreMaxMs: number; callbackTotalMs: number; callbackMaxMs: number; batchCount: number; frames: number; annotations: number };
 }
 export interface AcquisitionResult {
   targetSamples: bigint; actualSamples: bigint;
@@ -36,11 +36,10 @@ export interface AcquisitionResult {
   memory: BudgetSnapshot;
   worker: boolean; buffers: number; maxQueued: number;
 }
-export type Store = PlanarSampleStore | RleSampleStore | SharedWorkerSampleStore;
+export type Store = PlanarSampleStore | RleSampleStore | SharedWorkerSampleStore | WorkerCaptureStore;
 export interface AnalogCaptureChannel { name: string; store: AnalogStore }
 export interface Capture { diagnostics?: CaptureDiagnostics; acquisition?: AcquisitionResult; sharedSource?: SharedCaptureConsumerSource; name: string; nameKey?: MessageKey; store: Store; labels: string[]; triggerSample: bigint; loadedMs: number; logicChannelCount?: number; analogChannels?: AnalogCaptureChannel[]; workspace?: WorkspaceSettings }
 
-const PACK_RANGE_LIMIT = 2 ** 26;
 export function validRate(n: number): number {
   if (!Number.isSafeInteger(n) || n < 1) throw new UIError('error.rate');
   return n;
@@ -48,25 +47,6 @@ export function validRate(n: number): number {
 export function validWidth(n: number): ChannelCount {
   if (![4, 8, 16, 32].includes(n)) throw new UIError('error.width');
   return n as ChannelCount;
-}
-
-export function channelStoreRange(store: Store, channel: number, start: bigint, end: bigint): Uint8Array {
-  if (!Number.isInteger(channel) || channel < 0 || channel >= store.channelCount) throw new RangeError('invalid channel');
-  if (start < 0n || end < start || end > store.length) throw new RangeError('invalid channel range');
-  if (end - start > BigInt(PACK_RANGE_LIMIT)) throw new RangeError('channel range is too large');
-  if ('channelRange' in store) return store.channelRange(channel, start, end);
-  const output = new Uint8Array(Number(end - start));
-  for (const [a, b] of splitAroundGaps(store.gaps(), start, end)) {
-    let position = a, level = store.sampleAt(channel, a);
-    for (const edge of store.edges(channel, a + 1n, b)) {
-      const next = edge < b ? edge : b;
-      if (level) output.fill(1, Number(position - start), Number(next - start));
-      position = next; level ^= 1;
-      if (position >= b) break;
-    }
-    if (position < b && level) output.fill(1, Number(position - start), Number(b - start));
-  }
-  return output;
 }
 
 export interface CaptureOptions {
@@ -96,8 +76,8 @@ function capturePlan(device: SampleDevice, configuration: DeviceConfiguration, o
   if (!Number.isSafeInteger(chunkSamples) || chunkSamples < 1 || chunkSamples > 2 ** 26) throw new RangeError('Invalid acquisition block size');
   if (!['channel-arrays', 'packed-logic'].includes(description.layout) || ![1, 2, 4, 8].includes(description.logicSampleBytes)
     || description.layout === 'packed-logic' && description.logicSampleBytes !== 1 || ![4, 8].includes(description.analogSampleBytes)) throw new Error('Unsupported acquisition format');
-  const worker = options.worker !== 'off' && typeof Worker !== 'undefined' && !!description.worker && !!description.managedBuffers
-    && (description.worker?.required || options.worker === 'on' || configuration.sampleCount >= 262_144);
+  const worker = options.worker !== 'off' && typeof Worker !== 'undefined' && !!description.worker && !!description.managedBuffers;
+  if (typeof window !== 'undefined' && !worker) throw new Error('Acquisition Worker is required in the browser');
   if ((description.worker?.required || options.worker === 'on') && !worker) throw new Error('Acquisition Worker unavailable');
   const buffers = worker ? options.buffers ?? 2 : 1;
   if (![1, 2, 3].includes(buffers)) throw new RangeError('Acquisition requires two or three Worker buffers');
@@ -138,7 +118,7 @@ export async function deviceCapture(device: SampleDevice, configuration: DeviceC
       for (let index = 0; index < plan.buffers; index++) buffers.push(budget.allocate(plan.bufferBytes, 'acquisition buffer'));
     }
     if (workerUsed) {
-      try { source = new WorkerSampleSource(plan.description, configuration, plan.chunkSamples, buffers, sourceSignal); }
+      try { source = new WorkerSampleSource(plan.description, configuration, plan.chunkSamples, buffers, sourceSignal, plan.description.layout === 'channel-arrays'); }
       catch (error) {
         if (plan.description.worker?.required || options.worker === 'on') throw error;
         workerUsed = false;
@@ -150,10 +130,12 @@ export async function deviceCapture(device: SampleDevice, configuration: DeviceC
       ? device.createPackedSource?.(configuration, { signal: sourceSignal, chunkSamples: plan.chunkSamples, ...(buffers.length ? { acquireBuffer: async () => buffers[0]! } : {}) })
         ?? (() => { throw new Error('Packed acquisition source unavailable'); })()
       : device.createSource(configuration, { signal: sourceSignal, chunkSamples: plan.chunkSamples, ...(buffers.length ? { acquireBuffer: async () => buffers[0]! } : {}) });
-    if (source instanceof WorkerSampleSource) { sharedSource = source; options.onSharedSource?.(source); }
+    if (source instanceof WorkerSampleSource && source.sharedCapture) { sharedSource = source; options.onSharedSource?.(source); }
     const capture = source instanceof WorkerSampleSource && source.sharedCapture
       ? await captureSharedWorkerSource(source, device.descriptor.name, configuration, signal, options, budget)
-      : await captureSampleSource(source, device.descriptor.name, signal, { ...options, budget, configuration, chunkSamples: plan.chunkSamples, trackSourceBuffers: !plan.description.managedBuffers, beforeFinalize: releasePipeline, onSharedSource: source => { sharedSource = source; options.onSharedSource?.(source); } });
+      : source instanceof WorkerSampleSource && source.captureStore
+        ? await captureLocalWorkerSource(source, device.descriptor.name, configuration, signal, options, budget)
+        : await captureSampleSource(source, device.descriptor.name, signal, { ...options, budget, configuration, chunkSamples: plan.chunkSamples, trackSourceBuffers: !plan.description.managedBuffers, beforeFinalize: releasePipeline, onSharedSource: source => { sharedSource = source; options.onSharedSource?.(source); } });
     capture.sharedSource = sharedSource;
     if (capture.store.samplerate !== configuration.sampleRate || capture.logicChannelCount !== configuration.logicChannels || capture.analogChannels!.length !== configuration.analogChannels
       || (capture.acquisition!.stopReason === 'complete' && capture.store.length !== sampleIndex(configuration.sampleCount))) {
@@ -165,7 +147,7 @@ export async function deviceCapture(device: SampleDevice, configuration: DeviceC
     capture.acquisition!.maxQueued = source instanceof WorkerSampleSource ? source.maxQueued : 0;
     result = capture; return capture;
   } finally {
-    if (source instanceof WorkerSampleSource) await source.return();
+    if (source instanceof WorkerSampleSource && !(result?.store === source.captureStore)) await source.return();
     releasePipeline();
     for (const free of release.reverse()) free();
     if (result?.acquisition) result.acquisition.memory = budget.snapshot();
@@ -175,17 +157,17 @@ export async function deviceCapture(device: SampleDevice, configuration: DeviceC
 async function captureSharedWorkerSource(source: WorkerSampleSource, name: string, configuration: DeviceConfiguration,
   signal: AbortSignal | undefined, options: CaptureOptions, budget: MemoryBudget): Promise<Capture> {
   const started = performance.now();
-  const store = new SharedWorkerSampleStore(source, configuration.logicChannels, configuration.sampleRate);
+  const labels = Array.from({ length: configuration.logicChannels }, (_, index) => 'D' + index);
+  const store = new SharedWorkerSampleStore(source, configuration.logicChannels, configuration.sampleRate, labels);
   const diagnostics: CaptureDiagnostics = {
     mainThreadAppend: { calls: 0, totalMs: 0, maxMs: 0 }, mainThreadPublish: { calls: 0, totalMs: 0, maxMs: 0 },
     mainThreadUICallback: { calls: 0, totalMs: 0, maxMs: 0 },
     ui: { captureRefresh: { calls: 0, totalMs: 0, maxMs: 0 }, captureLabels: { calls: 0, totalMs: 0, maxMs: 0 },
-      memoryRefresh: { calls: 0, totalMs: 0, maxMs: 0 }, decodeScheduling: { calls: 0, totalMs: 0, maxMs: 0 },
-      decodeFrames: { calls: 0, totalMs: 0, maxMs: 0 }, decodeAnnotations: { calls: 0, totalMs: 0, maxMs: 0 }, decodeUI: { calls: 0, totalMs: 0, maxMs: 0 } },
+      memoryRefresh: { calls: 0, totalMs: 0, maxMs: 0 }, decodeScheduling: { calls: 0, totalMs: 0, maxMs: 0 } },
   };
   const targetSamples = sampleIndex(configuration.sampleCount);
   let stopReason: AcquisitionResult['stopReason'] = 'complete', detail: string | undefined;
-  const capture: Capture = { name, sharedSource: source, diagnostics, labels: Array.from({ length: configuration.logicChannels }, (_, index) => `D${index}`),
+  const capture: Capture = { name, sharedSource: source, diagnostics, labels,
     triggerSample: 0n, loadedMs: 0, logicChannelCount: configuration.logicChannels, analogChannels: [], store,
     acquisition: { targetSamples, actualSamples: 0n, stopReason, memory: budget.snapshot(), worker: true, buffers: 2, maxQueued: source.maxQueued } };
   const publish = (notifyProgress: boolean): void => {
@@ -234,6 +216,62 @@ async function captureSharedWorkerSource(source: WorkerSampleSource, name: strin
   } finally { source.onSharedProgress = null; store.onProgress = null; }
 }
 
+async function captureLocalWorkerSource(source: WorkerSampleSource, name: string, configuration: DeviceConfiguration,
+  signal: AbortSignal | undefined, options: CaptureOptions, budget: MemoryBudget): Promise<Capture> {
+  const started = performance.now(), store = source.captureStore!;
+  const diagnostics: CaptureDiagnostics = {
+    mainThreadAppend: { calls: 0, totalMs: 0, maxMs: 0 }, mainThreadPublish: { calls: 0, totalMs: 0, maxMs: 0 },
+    mainThreadUICallback: { calls: 0, totalMs: 0, maxMs: 0 },
+    ui: { captureRefresh: { calls: 0, totalMs: 0, maxMs: 0 }, captureLabels: { calls: 0, totalMs: 0, maxMs: 0 },
+      memoryRefresh: { calls: 0, totalMs: 0, maxMs: 0 }, decodeScheduling: { calls: 0, totalMs: 0, maxMs: 0 } },
+  };
+  const targetSamples = sampleIndex(configuration.sampleCount);
+  let stopReason: AcquisitionResult['stopReason'] = 'complete', detail: string | undefined;
+  const labels = Array.from({ length: configuration.logicChannels }, (_, index) => `D${index}`);
+  const analogChannels: AnalogCaptureChannel[] = store.analogStores.map((analog, index) => ({ name: `A${index}`, store: analog }));
+  const capture: Capture = { name, diagnostics, labels, triggerSample: 0n, loadedMs: 0, logicChannelCount: configuration.logicChannels,
+    analogChannels, store, acquisition: { targetSamples, actualSamples: 0n, stopReason, memory: source.localMemorySnapshot, worker: true, buffers: 2, maxQueued: 0 } };
+  const publish = (notifyProgress: boolean): void => {
+    const metadata = store.metadata;
+    if (metadata.labels.length) capture.labels = [...metadata.labels];
+    if (metadata.logicChannelCount !== undefined) capture.logicChannelCount = metadata.logicChannelCount;
+    for (let index = 0; index < analogChannels.length; index++) analogChannels[index]!.name = metadata.analog[index]?.name ?? `A${index}`;
+    const samples = source.localLengthValue;
+    capture.loadedMs = performance.now() - started;
+    capture.acquisition = { targetSamples, actualSamples: samples, stopReason, ...(detail ? { error: detail } : {}),
+      memory: source.localMemorySnapshot, worker: true, buffers: 2, maxQueued: source.maxQueued };
+    if (notifyProgress && samples > 0n) options.onProgress?.(samples, source.localMemorySnapshot);
+    options.onCapture?.(capture);
+  };
+  source.onLocalProgress = () => publish(true);
+  publish(false);
+  try {
+    await source.waitForCompletion();
+    const result = source.localResult;
+    if (signal?.aborted) signal.throwIfAborted();
+    if (!result) throw new Error(source.errorMessage ?? 'Acquisition Worker returned no capture result');
+    if (options.stopSignal?.aborted && result.stopReason !== 'error') stopReason = 'stopped';
+    else if (source.errorMessage || result.stopReason === 'error') {
+      detail = source.errorMessage ?? result.error ?? 'Capture storage Worker failed';
+      stopReason = /allocation|out of memory|memory limit/i.test(detail) ? 'allocation-failed' : 'error';
+    } else if (result.stopReason === 'stopped') stopReason = 'stopped';
+    if (result.length === 0n) throw new Error(detail ?? 'Device returned no samples');
+    if (stopReason === 'complete' && result.length !== targetSamples) {
+      stopReason = 'error'; detail = `Capture ended at ${result.length} of ${targetSamples} samples`;
+    }
+    capture.loadedMs = performance.now() - started;
+    capture.acquisition = { targetSamples, actualSamples: result.length, stopReason, ...(detail ? { error: detail } : {}),
+      memory: { ...result.memory }, worker: true, buffers: 2, maxQueued: source.maxQueued };
+    diagnostics.store = result.timings;
+    publish(false);
+    options.onProgress?.(result.length, { ...result.memory });
+    return capture;
+  } catch (error) {
+    store.dispose();
+    throw error;
+  } finally { source.onLocalProgress = null; }
+}
+
 async function nextSample(iterator: AsyncIterator<AcquisitionChunk>, signal?: AbortSignal) {
   if (!signal) return iterator.next();
   signal.throwIfAborted();
@@ -273,11 +311,11 @@ export async function captureSampleSource(source: AsyncIterable<AcquisitionChunk
   const makeTiming = (): StageTiming => ({ calls: 0, totalMs: 0, maxMs: 0 });
   const diagnostics: CaptureDiagnostics = {
     mainThreadAppend: makeTiming(), mainThreadPublish: makeTiming(), mainThreadUICallback: makeTiming(),
-    ui: { captureRefresh: makeTiming(), captureLabels: makeTiming(), memoryRefresh: makeTiming(), decodeScheduling: makeTiming(), decodeFrames: makeTiming(), decodeAnnotations: makeTiming(), decodeUI: makeTiming() },
+    ui: { captureRefresh: makeTiming(), captureLabels: makeTiming(), memoryRefresh: makeTiming(), decodeScheduling: makeTiming() },
   };
   const recordTiming = (timing: StageTiming, elapsed: number): void => { timing.calls++; timing.totalMs += elapsed; timing.maxMs = Math.max(timing.maxMs, elapsed); };
   const iterator = source[Symbol.asyncIterator]();
-  if (source instanceof WorkerSampleSource) { sharedSource = source; options.onSharedSource?.(source); }
+  if (source instanceof WorkerSampleSource && source.sharedCapture) { sharedSource = source; options.onSharedSource?.(source); }
   const interruption = signal && options.stopSignal ? AbortSignal.any([signal, options.stopSignal]) : signal ?? options.stopSignal;
   const abort = (): void => { if (source instanceof WorkerSampleSource) void source.return(); };
   interruption?.addEventListener('abort', abort, { once: true });
@@ -467,7 +505,7 @@ async function* binaryChunks(file: File, chunkBytes: number, signal?: AbortSigna
     yield new Uint8Array(buffer);
   }
 }
-export async function importCapture(file: File, sampleRate: number, width: number,
+export async function importCaptureLocal(file: File, sampleRate: number, width: number,
   progress: (fraction: number) => void = () => {}, signal?: AbortSignal,
   pipelineOptions: CaptureImportPipelineOptions = {}): Promise<Capture> {
   const t = performance.now(); signal?.throwIfAborted();
@@ -536,5 +574,16 @@ export async function importCapture(file: File, sampleRate: number, width: numbe
     signal?.removeEventListener('abort', onAbort);
     if (pipe) {try {await pipe.drain();} catch {} pipe.dispose();}
   }
-  return { name: file.name, store, labels: Array.from({ length: channelCount }, (_, i) => `D${i}`), triggerSample: 0n, loadedMs: performance.now() - t };
+  return { name: file.name, store, labels: Array.from({ length: channelCount }, (_, i) => 'D' + i), triggerSample: 0n, loadedMs: performance.now() - t };
+}
+
+export async function importCapture(file: File, sampleRate: number, width: number,
+  progress: (fraction: number) => void = () => {}, signal?: AbortSignal,
+  pipelineOptions: CaptureImportPipelineOptions = {}): Promise<Capture> {
+  if (typeof Worker === 'undefined') {
+    if (typeof window !== 'undefined') throw new UIError('error.worker');
+    return importCaptureLocal(file, sampleRate, width, progress, signal, pipelineOptions);
+  }
+  const { importCaptureWorker } = await import('./capture-import-client.js');
+  return importCaptureWorker(file, sampleRate, width, progress, signal, pipelineOptions);
 }

@@ -1,11 +1,19 @@
 import type { AcquisitionChunk, DeviceConfiguration, SampleDevice } from '../libhakei/device.js';
+import { createSampleChunk } from '../libhakei/index.js';
 import type { SharedChunkProducer, SharedPublisherMetrics } from './shared-chunks.js';
 import type { SharedChunkAllocator } from './shared-chunk-allocator.js';
+import { PlanarSampleStore, type PlanarStoreTimings } from './data/planarStore.js';
+import { AnalogSampleStore } from './data/analogStore.js';
+import { channelWidthForProbes } from './data/channel-count.js';
+import { DEFAULT_CAPTURE_BUDGET_BYTES, MemoryBudget, type BudgetSnapshot } from './memory.js';
+import { WorkerStoreServer } from './worker-store-server.js';
 export type AcquisitionRequest =
-  | { type: 'start'; moduleUrl: string; exportName: string; initialization?: unknown; configuration: DeviceConfiguration; chunkSamples: number; buffers: ArrayBuffer[]; sharedSampleCount?: bigint; sharedChunkBytes?: number }
+  | { type: 'start'; moduleUrl: string; exportName: string; initialization?: unknown; configuration: DeviceConfiguration; chunkSamples: number; buffers: ArrayBuffer[]; sharedSampleCount?: bigint; sharedChunkBytes?: number; store?: { budgetBytes: number }; storePort?: MessagePort }
   | { type: 'subscribe'; port: MessagePort }
   | { type: 'recycle'; buffer: ArrayBuffer } | { type: 'stop' };
 export type AcquisitionResponse = { type: 'chunk'; chunk: AcquisitionChunk; buffer: ArrayBuffer }
+  | { type: 'local-progress'; length: bigint; memory: BudgetSnapshot }
+  | { type: 'local-done'; length: bigint; memory: BudgetSnapshot; stopReason: 'complete' | 'stopped' | 'error'; error?: string; timings?: PlanarStoreTimings }
   | { type: 'shared-progress'; allocatedBytes: number; publishedSamples: bigint; publisher?: SharedPublisherMetrics; h417Transport?: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number }; h417Worker?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number } }
   | { type: 'done' } | { type: 'error'; message: string } | { type: 'closed' };
 type Scope = { onmessage: ((event: MessageEvent<AcquisitionRequest>) => void) | null; postMessage(message: AcquisitionResponse, transfer?: Transferable[]): void };
@@ -36,6 +44,70 @@ scope.onmessage = ({ data }) => {
     let terminal: 'complete' | 'stopped' | 'error' = 'complete', failure = '';
     let h417Transport: Extract<AcquisitionChunk, { format: 'packed-logic' }>['h417Transport'];
     let h417Worker: Extract<AcquisitionChunk, { format: 'packed-logic' }>['h417Worker'];
+    let store: PlanarSampleStore | null = null, analogStores: AnalogSampleStore[] = [];
+    let logicIds: string[] = [], analogIds: string[] = [], padding: Uint8Array | null = null;
+    const budget = data.store ? new MemoryBudget(data.store.budgetBytes ?? DEFAULT_CAPTURE_BUDGET_BYTES) : null;
+    let lastProgressAt = -Infinity;
+    const storeServer = data.store ? new WorkerStoreServer(() => store ? { store, labels: logicIds, logicChannelCount: logicIds.length,
+      analogChannels: analogIds.map((id, index) => ({ name: id, store: analogStores[index]! })) } : null) : null;
+    const appendChunk = (input: AcquisitionChunk): number => {
+      if ('format' in input) {
+        if (input.format !== 'packed-logic' || input.encoding !== 'raw8' || !(input.data instanceof Uint8Array)
+          || typeof input.startSample !== 'bigint' || input.startSample < 0n || !Number.isSafeInteger(input.sampleRate) || input.sampleRate < 1
+          || !Number.isInteger(input.channelCount) || input.channelCount < 1 || input.channelCount > 8
+          || !Number.isSafeInteger(input.length) || input.length < 1 || input.length > input.data.length) throw new Error('Invalid packed logic chunk');
+        if (!store) {
+          logicIds = Array.from({ length: input.channelCount }, (_, index) => `D${index}`); analogIds = [];
+          store = new PlanarSampleStore({ channelCount: channelWidthForProbes(input.channelCount), samplerate: input.sampleRate,
+            transpose32: 'js', deferPyramid: true, stagePacked: true, keepPacked: true, ...(budget ? { budget } : {}) });
+          storeServer?.connect(data.storePort!);
+        }
+        const config = data.configuration;
+        if (input.sampleRate !== store.samplerate || input.startSample !== store.length || input.channelCount !== logicIds.length
+          || input.sampleRate !== config.sampleRate || input.channelCount !== config.logicChannels || config.analogChannels !== 0
+          || input.startSample + BigInt(input.length) > config.sampleCount) throw new Error('Device sample rate, channel layout or sample continuity changed during capture');
+        if (input.length > data.chunkSamples) throw new Error('Device exceeded its declared buffer capacity');
+        store.append(input.data.subarray(0, input.length));
+        return input.length;
+      }
+      const chunk = createSampleChunk(input);
+      if (!store) {
+        logicIds = Object.keys(chunk.channels); analogIds = Object.keys(chunk.analogChannels);
+        store = new PlanarSampleStore({ channelCount: channelWidthForProbes(Math.max(1, logicIds.length)), samplerate: chunk.sampleRate,
+          transpose32: 'js', ...(budget ? { budget } : {}) });
+        analogStores = analogIds.map(() => new AnalogSampleStore(chunk.sampleRate, budget ?? undefined));
+        storeServer?.connect(data.storePort!);
+      }
+      if (chunk.sampleRate !== store.samplerate || chunk.startSample !== store.length
+        || Object.keys(chunk.channels).join('\0') !== logicIds.join('\0') || Object.keys(chunk.analogChannels).join('\0') !== analogIds.join('\0')) throw new Error('Device sample rate, channel layout or sample continuity changed during capture');
+      const config = data.configuration;
+      if (chunk.sampleRate !== config.sampleRate || logicIds.length !== config.logicChannels || analogIds.length !== config.analogChannels || chunk.endSample > config.sampleCount) throw new Error('Device capture does not match the requested configuration');
+      if (chunk.length > data.chunkSamples) throw new Error('Device exceeded its declared buffer capacity');
+      for (const id of analogIds) {
+        const values = chunk.analogChannels[id]!;
+        if (!(values instanceof Float32Array)) for (let index = 0; index < values.length; index++) if (Math.abs(values[index]!) > 3.4028234663852886e38) throw new RangeError('Analog sample exceeds Float32 storage format');
+      }
+      const rollbacks: (() => void)[] = [];
+      try {
+        rollbacks.push(store.prepareAppend(chunk.length));
+        for (const analog of analogStores) rollbacks.push(analog.prepareAppend(chunk.length));
+      } catch (error) { for (const rollback of rollbacks.reverse()) rollback(); throw error; }
+      if (logicIds.length !== store.channelCount && (!padding || padding.length < chunk.length)) {
+        if (padding) budget?.release(padding.buffer);
+        padding = new Uint8Array(budget ? budget.allocate(chunk.length, 'padding channel') : new ArrayBuffer(chunk.length));
+      }
+      store.appendChannels(Array.from({ length: store.channelCount }, (_, index) => index < logicIds.length ? chunk.channels[logicIds[index]!]! : padding!.subarray(0, chunk.length)));
+      analogIds.forEach((id, index) => analogStores[index]!.appendValidated(chunk.analogChannels[id]!));
+      return chunk.length;
+    };
+    const reportLocal = (force = false): void => {
+      if (!store || !budget || !storeServer) return;
+      const now = performance.now();
+      if (!force && now - lastProgressAt < 100) return;
+      lastProgressAt = now;
+      storeServer.publish();
+      scope.postMessage({ type: 'local-progress', length: store.length, memory: budget.snapshot() });
+    };
     try {
       if (data.sharedSampleCount !== undefined) {
         const [{ SharedChunkProducer }, { SharedChunkAllocator }] = await Promise.all([import('./shared-chunks.js'), import('./shared-chunk-allocator.js')]);
@@ -71,9 +143,14 @@ scope.onmessage = ({ data }) => {
           h417Transport = result.value.h417Transport ?? h417Transport;
           h417Worker = result.value.h417Worker ?? h417Worker;
           await producer.append(result.value.data.subarray(0, result.value.length));
+        } else if (data.store) {
+          appendChunk(result.value);
+          reportLocal();
         }
         const buffer = borrowed; borrowed = null;
         if (producer) {
+          available.push(buffer);
+        } else if (data.store) {
           available.push(buffer);
         } else {
           scope.postMessage({ type: 'chunk', chunk: result.value, buffer }, [buffer]);
@@ -89,6 +166,14 @@ scope.onmessage = ({ data }) => {
       if (producer?.state === 'open') producer.finish(terminal, failure || undefined);
       if (producer) scope.postMessage({ type: 'shared-progress', allocatedBytes: producer.allocatedBytes, publishedSamples: producer.length, publisher: producer.publisherMetrics, ...(h417Transport ? { h417Transport } : {}), ...(h417Worker ? { h417Worker } : {}) });
       allocator?.close(); allocator = null;
+      const finalStore = store as PlanarSampleStore | null, finalPadding = padding as Uint8Array | null;
+      if (finalStore && budget) {
+        try { finalStore.finalizePyramid(); } catch (error) { if (terminal !== 'stopped') { terminal = 'error'; failure = error instanceof Error ? error.message : String(error); } }
+        storeServer?.publish();
+        scope.postMessage({ type: 'local-done', length: finalStore.length, memory: budget.snapshot(), stopReason: terminal,
+          ...(failure ? { error: failure } : {}), timings: finalStore.timings });
+      }
+      if (finalPadding) budget?.release(finalPadding.buffer);
       if (terminal === 'error') scope.postMessage({ type: 'error', message: failure || 'Acquisition failed' });
       else scope.postMessage({ type: 'done' });
       scope.postMessage({ type: 'closed' });

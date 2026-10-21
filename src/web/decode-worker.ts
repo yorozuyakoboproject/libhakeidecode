@@ -1,8 +1,12 @@
 import { createEdgeWindow, createPackedWindow, createValuesWindow } from '../libhakeidecode/signal.js';
+import { compareSamples } from '../libhakei/sample-index.js';
+import { decoderDefinition } from '../decoders/index.js';
 import { createDecodeRuntime } from './decode-runtime.js';
 import type { DecodeRuntime, DecodeRuntimeResult } from './decode-runtime.js';
+import { AnnotationIndex } from './event-index.js';
 import { SharedCaptureError, SharedChunkReader } from './shared-chunks.js';
-import type { DecodeBatchMessage, DecodeChunkRequest, DecodeEdgeChunkRequest, DecodeFinishRequest, DecodeGapRequest, DecodePackedReaderStartRequest, DecodeQueryAnnotationsRequest, DecodeReadFramesRequest, DecodeSharedStartRequest, DecodeStartRequest, DecodeStreamRequest, DecoderId, WorkerDecodeMessage } from './protocol.js';
+import type { DecodeChunkRequest, DecodeEdgeChunkRequest, DecodeFinishRequest, DecodeFrame, DecodeGapRequest, DecodePackedReaderStartRequest, DecodeQueryAnnotationsRequest, DecodeReadCsvRequest, DecodeReadFramesRequest, DecodeSharedStartRequest, DecodeStartRequest, DecodeStreamRequest, DecodeWorkerReaderStartRequest, DecoderId, WorkerDecodeMessage } from './protocol.js';
+import type { DecodeReadResponse } from './worker-store.js';
 
 type Scope = {
   onmessage: ((event: MessageEvent<DecodeStreamRequest>) => void) | null;
@@ -20,7 +24,10 @@ interface Session {
   channels: string[];
   gaps: DecodeStartRequest['gaps'];
   runtime: DecodeRuntime;
-  pagedOutput: boolean;
+  annotations: AnnotationIndex;
+  frames: DecodeFrame[];
+  framesSorted: boolean;
+  compareFrames: (a: DecodeFrame, b: DecodeFrame) => number;
   completed: boolean;
   lastProgressPost: number;
   sharedTask: Promise<void> | null;
@@ -30,7 +37,12 @@ interface Session {
   packedChannelCount: number;
   packedNextId: number;
   packedPending: Map<number, { resolve(data: Uint8Array): void; reject(error: Error): void }>;
-  outputAck: (() => void) | null;
+  workerPort: MessagePort | null;
+  workerChannels: Record<string, number> | null;
+  workerNextId: number;
+  workerPending: Map<number, { resolve(response: Extract<DecodeReadResponse, { type: 'decode-read-result' }>): void; reject(error: Error): void }>;
+  finishRequested: boolean;
+  finalLength: bigint;
   stages: { sharedUnpackMs: number; decoderPushMs: number; runtimeBatchMs: number; outputPostMs: number; cooperativeYieldMs: number; cooperativeYieldCount: number };
 }
 
@@ -50,9 +62,9 @@ function yieldWorkerTask(): Promise<void> {
   });
 }
 scope.onmessage = event => {
-  if (event.data.type === 'decode-output-ack') { const current = session, ack = current?.outputAck; if (current) current.outputAck = null; ack?.(); return; }
   if (event.data.type === 'decode-query-annotations') { try { queryAnnotations(event.data); } catch (error) { scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) }); } return; }
   if (event.data.type === 'decode-read-frames') { try { readFrames(event.data); } catch (error) { scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) }); } return; }
+  if (event.data.type === 'decode-read-csv') { try { readCsv(event.data); } catch (error) { scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) }); } return; }
   queue = queue.then(() => handle(event.data)).catch(error => {
     session = null;
     scope.postMessage({ type: 'error', message: error instanceof Error ? (error.stack ?? error.message) : String(error) });
@@ -63,16 +75,6 @@ function progress(s: Session): number { return s.length ? Math.min(1, Number(s.p
 function post(s: Session, message: WorkerDecodeMessage, transfer?: Transferable[]): void {
   const started = performance.now(); scope.postMessage(message, transfer); s.stages.outputPostMs += performance.now() - started;
 }
-function postBatch(s: Session, message: DecodeBatchMessage): Promise<void> {
-  return new Promise(resolve => {
-    const started = performance.now(); s.outputAck = resolve;
-    scope.postMessage(message); s.stages.outputPostMs += performance.now() - started;
-  });
-}
-function postPaged(s: Session, frames: number, annotations: number, resultBytes: number): void {
-  s.pagedOutput = true;
-  post(s, { type: 'decode-output-mode', mode: 'paged', frames, annotations, resultBytes });
-}
 function maybePostProgress(s: Session): void {
   const now = performance.now();
   if (now - s.lastProgressPost < 100 && s.processed < s.length) return;
@@ -82,28 +84,46 @@ function maybePostProgress(s: Session): void {
 }
 function start(request: DecodeStartRequest): void {
   if (!Number.isSafeInteger(request.sampleRate) || request.sampleRate < 1 || request.length < 0n) throw new Error('Invalid decode stream configuration');
+  const compareFrames = decoderDefinition(request.decoder).ui.compareFrames;
   const s = {
     decoder: request.decoder, sampleRate: request.sampleRate, length: request.length, processed: 0n, decodedSamples: 0n,
     started: performance.now(), channels: request.channels, gaps: request.gaps, runtime: null as unknown as DecodeRuntime,
-    pagedOutput: false, completed: false, lastProgressPost: 0, sharedTask: null, sharedReader: null,
-    packedPort: null, packedChannels: null, packedChannelCount: 0, packedNextId: 0, packedPending: new Map(), outputAck: null,
+    annotations: new AnnotationIndex(), frames: [], framesSorted: true,
+    compareFrames: compareFrames ? (a, b) => compareFrames(a, b) : (a, b) => compareSamples(a.ss, b.ss),
+    completed: false, lastProgressPost: 0, sharedTask: null, sharedReader: null,
+    packedPort: null, packedChannels: null, packedChannelCount: 0, packedNextId: 0, packedPending: new Map(),
+    workerPort: null, workerChannels: null, workerNextId: 0, workerPending: new Map(), finishRequested: false, finalLength: request.length,
     stages: { sharedUnpackMs: 0, decoderPushMs: 0, runtimeBatchMs: 0, outputPostMs: 0, cooperativeYieldMs: 0, cooperativeYieldCount: 0 },
   } as Session;
   session = s;
   s.runtime = createDecodeRuntime(request, {
-    postBatch: message => postBatch(s, message),
-    postPaged: (frames, annotations, resultBytes) => postPaged(s, frames, annotations, resultBytes),
+    postBatch: batch => {
+      s.annotations.append(batch.annotations);
+      for (const frame of batch.frames) s.frames.push(frame);
+      if (batch.frames.length) s.framesSorted = false;
+      return Promise.resolve();
+    },
+    postPaged: () => {},
   });
 }
 function queryAnnotations(request: DecodeQueryAnnotationsRequest): void {
   const s = session;
-  const annotations = s?.runtime.queryAnnotations?.(request.start, request.end, request.maxResults) ?? [];
+  const annotations = s?.runtime.queryAnnotations?.(request.start, request.end, request.maxResults) ?? s?.annotations.query(request.start, request.end, request.maxResults) ?? [];
   scope.postMessage({ type: 'decode-query-annotations-result', requestId: request.requestId, annotations });
 }
 function readFrames(request: DecodeReadFramesRequest): void {
   const s = session;
-  const frames = s?.runtime.readFrames?.(request.offset, request.count) ?? [];
+  const frames = s?.runtime.readFrames?.(request.offset, request.count) ?? s?.frames.slice(request.offset, request.offset + request.count) ?? [];
   scope.postMessage({ type: 'decode-read-frames-result', requestId: request.requestId, frames });
+}
+function readCsv(request: DecodeReadCsvRequest): void {
+  const s = session;
+  if (!s) { scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv: '' }); return; }
+  const definition = decoderDefinition(s.decoder);
+  const frames = s.runtime.readFrames?.(request.offset, request.count) ?? s.frames.slice(request.offset, request.offset + request.count);
+  const rows = frames.map(frame => definition.ui.csvRow(frame, request.sampleRate, request.triggerSample));
+  const csv = (request.includeHeader ? definition.ui.csvHeader + '\r\n' : '') + rows.join('\r\n');
+  scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv });
 }
 function startShared(s: Session, request: DecodeSharedStartRequest): void {
   if (request.channelCount < 1 || request.channelCount > 8) throw new Error('Shared packed capture supports 1..8 logic channels');
@@ -158,6 +178,60 @@ async function consumePacked(s: Session): Promise<void> {
     await pushPacked(s, start, packed, selected);
     maybePostProgress(s);
     start = end;
+  }
+}
+
+function startWorkerReader(s: Session, request: DecodeWorkerReaderStartRequest): void {
+  if (s.sharedTask) throw new Error('Decode source is already connected');
+  for (const [key, channel] of Object.entries(request.channels)) {
+    if (!s.channels.includes(key) || !Number.isInteger(channel) || channel < 0) throw new Error('Invalid Worker decode channel');
+  }
+  s.workerPort = request.port; s.workerChannels = request.channels;
+  request.port.addEventListener('message', ({ data }: MessageEvent<DecodeReadResponse>) => {
+    const pending = s.workerPending.get(data.id); if (!pending) return;
+    s.workerPending.delete(data.id);
+    if (data.type === 'decode-read-error') pending.reject(new Error(data.message));
+    else pending.resolve(data);
+  });
+  request.port.start();
+  s.sharedTask = consumeWorkerReader(s, request.edgeInput, request.edgeLimit);
+  void s.sharedTask.catch(error => {
+    for (const pending of s.workerPending.values()) pending.reject(error instanceof Error ? error : new Error(String(error)));
+    s.workerPending.clear(); s.workerPort?.close(); s.workerPort = null; session = null;
+    scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+  });
+}
+function requestWorkerRead(s: Session, startSample: bigint, endSample: bigint, edgeInput: string | undefined, edgeLimit: number): Promise<Extract<DecodeReadResponse, { type: 'decode-read-result' }>> {
+  const port = s.workerPort; if (!port) return Promise.reject(new Error('Worker sample reader is unavailable'));
+  const id = s.workerNextId++;
+  return new Promise((resolve, reject) => {
+    s.workerPending.set(id, { resolve, reject });
+    port.postMessage({ type: 'decode-read', id, startSample, endSample, channels: s.workerChannels!, ...(edgeInput === undefined ? {} : { edgeInput }), edgeLimit });
+  });
+}
+async function consumeWorkerReader(s: Session, edgeInput: string | undefined, edgeLimit: number): Promise<void> {
+  let cursor = 0n;
+  while (true) {
+    const limit = s.finishRequested && s.finalLength < s.length ? s.finalLength : s.length;
+    if (cursor >= limit) {
+      if (s.finishRequested) break;
+      await new Promise<void>(resolve => setTimeout(resolve, 20));
+      continue;
+    }
+    const end = cursor + 1_048_576n < limit ? cursor + 1_048_576n : limit;
+    const response = await requestWorkerRead(s, cursor, end, edgeInput, edgeLimit);
+    if (response.kind === 'wait') {
+      if (s.finishRequested && response.availableEnd <= cursor) break;
+      await new Promise<void>(resolve => setTimeout(resolve, 20));
+      continue;
+    }
+    if (response.kind === 'channels') {
+      await pushChunk(s, { type: 'decode-chunk', startSample: response.startSample, sampleRate: response.sampleRate, channels: response.channels });
+    } else {
+      await pushEdgeChunk(s, { type: 'decode-edge-chunk', startSample: response.startSample, endSample: response.endSample, parts: response.parts });
+    }
+    cursor = response.endSample;
+    maybePostProgress(s);
   }
 }
 async function consumeShared(s: Session, reader: SharedChunkReader, selected: Record<string, number>): Promise<void> {
@@ -251,9 +325,12 @@ async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest): Promi
   if (cursor < request.endSample) resetAtGap(s);
   s.processed = request.endSample; maybePostProgress(s);
 }
-async function finish(s: Session, _request: DecodeFinishRequest): Promise<void> {
+async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
+  s.finishRequested = true;
+  s.finalLength = request.length !== undefined && request.length < s.length ? request.length : s.length;
   if (s.sharedTask) await s.sharedTask;
   const output: DecodeRuntimeResult = await s.runtime.finish(1);
+  if (!s.framesSorted && s.frames.length) { s.frames.sort(s.compareFrames); s.framesSorted = true; }
   const stages = { ...s.stages };
   maybePostProgress(s);
   s.completed = true;
@@ -264,13 +341,14 @@ async function finish(s: Session, _request: DecodeFinishRequest): Promise<void> 
     result: output }, binaries.map(binary => binary.buffer));
 }
 async function handle(request: DecodeStreamRequest): Promise<void> {
-  if (request.type === 'decode-output-ack') return;
   if (request.type === 'decode-start') { start(request); return; }
   if (request.type === 'decode-query-annotations') { queryAnnotations(request); return; }
   if (request.type === 'decode-read-frames') { readFrames(request); return; }
+  if (request.type === 'decode-read-csv') { readCsv(request); return; }
   if (!session) throw new Error('Decode chunk received before decoder start');
   if (request.type === 'decode-shared-start') { startShared(session, request); return; }
   if (request.type === 'decode-packed-reader-start') { startPackedReader(session, request); return; }
+  if (request.type === 'decode-worker-reader-start') { startWorkerReader(session, request); return; }
   if (request.type === 'decode-chunk') { await pushChunk(session, request); scope.postMessage({ type: 'decode-ack' }); return; }
   if (request.type === 'decode-gap') { pushGap(session, request); return; }
   if (request.type === 'decode-edge-chunk') { await pushEdgeChunk(session, request); scope.postMessage({ type: 'decode-ack' }); return; }

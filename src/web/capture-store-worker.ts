@@ -1,3 +1,5 @@
+import { serializeSR } from './sr.js';
+import type { Capture } from './capture.js';
 import { SharedCaptureError, SharedChunkReader, SHARED_SUMMARY_GROUP_SAMPLES } from './shared-chunks.js';
 
 type Scope = {
@@ -9,11 +11,13 @@ const PAGE_GROUPS = 65_536;
 const RECORD_BYTES = 4;
 
 type StorageRequest =
-  | { type: 'start'; port: MessagePort; channelCount: number; sampleRate: number }
+  | { type: 'start'; port: MessagePort; channelCount: number; sampleRate: number; labels?: readonly string[] }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'pack'; id: number; startSample: bigint; endSample: bigint; channels: number }
   | { type: 'reader'; port: MessagePort }
+  | { type: 'export-sr'; id: number; workspace?: import('./workspace.js').WorkspaceSettings; triggerSample: bigint; acquisition?: import('./capture.js').AcquisitionResult }
+  | { type: 'cancel-export'; id: number }
   | { type: 'finish' };
 type StorageMetrics = { readerWaitMs: number; summaryMs: number; processCalls: number; queryMs: number; queryCalls: number; edgeMs: number; edgeCalls: number; packMs: number; packCalls: number; samples: bigint; groups: number };
 type StorageResponse =
@@ -21,14 +25,16 @@ type StorageResponse =
   | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array }
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'pack-result'; id: number; data: Uint8Array }
+  | { type: 'export-sr-result'; id: number; blob: Blob }
   | { type: 'done'; state: 'complete' | 'stopped' | 'error'; length: bigint; error?: string; summaryBytes: number; metrics: StorageMetrics }
-  | { type: 'error'; message: string };
+  | { type: 'error'; id?: number; message: string };
 
 type SummaryPage = { buffer: SharedArrayBuffer; view: Uint8Array };
 type StorageSession = {
   reader: SharedChunkReader;
   channelCount: number;
   sampleRate: number;
+  labels: string[];
   length: bigint;
   completeGroups: number;
   groupCount: number;
@@ -55,6 +61,7 @@ type StorageSession = {
 };
 let session: StorageSession | null = null;
 let finishing: Promise<void> | null = null;
+const exportControllers = new Map<number, AbortController>();
 
 function maskFor(channel: number): number { return 1 << channel; }
 function pageFor(s: StorageSession, group: number): Uint8Array {
@@ -236,17 +243,50 @@ async function handle(request: StorageRequest): Promise<void> {
   if (request.type === 'start') {
     if (session) throw new Error('Storage Worker already started');
     if (!Number.isInteger(request.channelCount) || request.channelCount < 1 || request.channelCount > 8 || !Number.isSafeInteger(request.sampleRate) || request.sampleRate < 1) throw new Error('Invalid shared storage configuration');
+    const labels = request.labels ? [...request.labels] : Array.from({ length: request.channelCount }, (_, index) => 'D' + index);
+    if (labels.length !== request.channelCount || labels.some(label => typeof label !== 'string')) throw new Error('Invalid shared channel labels');
     const reader = new SharedChunkReader(request.port);
-    const created: StorageSession = { reader, channelCount: request.channelCount, sampleRate: request.sampleRate, length: 0n, completeGroups: 0, groupCount: 0, ones: 0, zeros: 0, first: 0, last: 0, pages: new Map(), summaryBytes: 0, lastProgressAt: -Infinity, consumeDone: Promise.resolve(), state: 'open', reportedLength: 0n, readerWaitMs: 0, summaryMs: 0, processCalls: 0, queryMs: 0, queryCalls: 0, edgeMs: 0, edgeCalls: 0, packMs: 0, packCalls: 0 };
+    const created: StorageSession = { reader, channelCount: request.channelCount, sampleRate: request.sampleRate, labels, length: 0n, completeGroups: 0, groupCount: 0, ones: 0, zeros: 0, first: 0, last: 0, pages: new Map(), summaryBytes: 0, lastProgressAt: -Infinity, consumeDone: Promise.resolve(), state: 'open', reportedLength: 0n, readerWaitMs: 0, summaryMs: 0, processCalls: 0, queryMs: 0, queryCalls: 0, edgeMs: 0, edgeCalls: 0, packMs: 0, packCalls: 0 };
     session = created;
     created.consumeDone = consume(created); return;
   }
+  if (request.type === 'cancel-export') { exportControllers.get(request.id)?.abort(); return; }
   if (!session) throw new Error('Storage Worker is not started');
   if (request.type === 'reader') { connectPackedReader(session, request.port); return; }
   if (request.type === 'query') { answerQuery(session, request); return; }
   if (request.type === 'edges') { answerEdges(session, request); return; }
   if (request.type === 'pack') { answerPack(session, request); return; }
+  if (request.type === 'export-sr') { await exportSR(session, request); return; }
   if (!finishing) finishing = session.consumeDone;
   await finishing;
 }
-scope.onmessage = event => { void handle(event.data).catch(error => scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) })); };
+async function exportSR(s: StorageSession, request: Extract<StorageRequest, { type: 'export-sr' }>): Promise<void> {
+  const controller = new AbortController();
+  exportControllers.set(request.id, controller);
+  const length = s.length;
+  const store = {
+    channelCount: s.channelCount,
+    samplerate: s.sampleRate,
+    length,
+    gaps: () => [],
+    readPackedRange: async (startSample: bigint, endSample: bigint, channels = s.channelCount): Promise<Uint8Array> => {
+      const raw = s.reader.readRange(startSample, endSample);
+      if (!raw) throw new Error('Requested capture range is not committed');
+      const mask = (1 << channels) - 1;
+      if (mask !== 0xff) for (let index = 0; index < raw.length; index++) raw[index] &= mask;
+      return raw;
+    },
+  };
+  const capture = {
+    name: 'capture.sr', store: store as unknown as Capture['store'], labels: [...s.labels], triggerSample: request.triggerSample,
+    loadedMs: 0, logicChannelCount: s.channelCount, analogChannels: [],
+    ...(request.acquisition ? { acquisition: request.acquisition } : {}),
+  } as Capture;
+  try {
+    const blob = await serializeSR(capture, request.workspace, undefined, controller.signal);
+    if (!controller.signal.aborted) scope.postMessage({ type: 'export-sr-result', id: request.id, blob });
+  } finally {
+    exportControllers.delete(request.id);
+  }
+}
+scope.onmessage = event => { void handle(event.data).catch(error => scope.postMessage({ type: 'error', ...(typeof (event.data as { id?: number }).id === 'number' ? { id: (event.data as { id: number }).id } : {}), message: error instanceof Error ? error.message : String(error) })); };

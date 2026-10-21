@@ -1,4 +1,4 @@
-import { compareSamples, minSample, maxSample } from '../libhakei/sample-index.js';
+import { minSample, maxSample } from '../libhakei/sample-index.js';
 import { scaleSamples } from '../libhakei/sample-index.js';
 import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import { deviceCapture, importCapture, captureMemory, type Capture, type StageTiming } from './capture.js';
@@ -11,7 +11,7 @@ import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
 import { AnalogSampleStore } from './data/analogStore.js';
 import { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
-import type { DecodeBatchMessage, Frame, DecoderId } from './protocol.js';
+import type { DecoderId } from './protocol.js';
 import type { ProtocolSettings, WorkspaceSettings } from './workspace.js';
 import type { OptionDeclaration, OptionValue } from '../libhakeidecode/types.js';
 import './preferences.js';
@@ -27,19 +27,15 @@ function download(name: string, data: BlobPart, type: string): void { downloadBl
 export interface ProtocolInstance extends ProtocolSettings {
   client: DecodeClient;
   annotations: AnnotationIndex;
-  frames: Frame[];
   frameCount: number;
   annotationCount: number;
   resultBytes: number;
-  pagedResults: boolean;
   result: DecodeResult | null;
   state: 'ready' | 'decoding' | 'done' | 'cancelled' | 'error';
   progress: number;
   error: string | UIError | null;
   savedOptions: Record<DecoderId, Record<string, OptionValue>>;
   liveSession?: LiveDecodeSession;
-  liveBatchMetrics?: LiveDecodeSession['mainThreadBatches'];
-  liveBatchStages?: { frames: { calls: number; totalMs: number; maxMs: number }; annotations: { calls: number; totalMs: number; maxMs: number }; ui: { calls: number; totalMs: number; maxMs: number } };
 }
 const colors = ['#70d7a1', '#efbc6b', '#79adff', '#d091eb', '#72c9df', '#ec8291', '#b3ca78', '#aca6eb'];
 function addStageTiming(stage: StageTiming, elapsed: number): void {
@@ -52,10 +48,6 @@ function declarations(decoder: DecoderId): readonly OptionDeclaration[] {
     : Object.entries(options).map(([id, value]) => ({ id, default: value }));
 }
 function defaults(decoder: DecoderId): Record<string, OptionValue> { return Object.fromEntries(declarations(decoder).map(option => [option.id, option.default])); }
-function framesCSV(decoder: DecoderId, frames: Iterable<Frame>, sampleRate: number, triggerSample: bigint): string {
-  const definition = decoderDefinition(decoder), rows = Array.from(frames, frame => definition.ui.csvRow(frame, sampleRate, triggerSample));
-  return definition.ui.csvHeader + '\r\n' + rows.join('\r\n');
-}
 function binaryBytes(result: DecodeResult): number {
   return Object.values(result.result.binaries).reduce((sum, data) => sum + data.byteLength, 0);
 }
@@ -64,7 +56,6 @@ export class AnalyzerApp {
   selectedId: string | null = null;
   get selectedProtocol(): ProtocolInstance | null { return this.protocols.find(p => p.id === this.selectedId) ?? null; }
   get decoder(): DecoderId { return this.selectedProtocol?.decoder ?? decoderDefinitions[0]!.decoder.descriptor.id; }
-  get frames(): Frame[] { return this.selectedProtocol?.frames ?? []; }
   get result(): DecodeResult | null { return this.selectedProtocol?.result ?? null; }
   capture: Capture | null = null;
   state: 'ready' | 'loading' | 'decoding' | 'done' | 'cancelled' | 'error' = 'ready';
@@ -161,7 +152,8 @@ export class AnalyzerApp {
     return protocol;
   }
   private createProtocol(settings: ProtocolSettings): ProtocolInstance {
-    return { ...settings, decimalPlaces: settings.decimalPlaces ?? 3, options: { ...defaults(settings.decoder), ...settings.options }, mapping: { ...settings.mapping }, client: new DecodeClient(), annotations: new AnnotationIndex(), frames: [], frameCount: 0, annotationCount: 0, resultBytes: 0, pagedResults: false, result: null, state: 'ready', progress: 0, error: null, savedOptions: {} };
+    const client = new DecodeClient();
+    return { ...settings, decimalPlaces: settings.decimalPlaces ?? 3, options: { ...defaults(settings.decoder), ...settings.options }, mapping: { ...settings.mapping }, client, annotations: new PagedAnnotationIndex(client), frameCount: 0, annotationCount: 0, resultBytes: 0, result: null, state: 'ready', progress: 0, error: null, savedOptions: {} };
   }
   removeProtocol(id: string): void {
     this.commitForm(); const index = this.protocols.findIndex(p => p.id === id); if (index < 0) return;
@@ -288,10 +280,6 @@ export class AnalyzerApp {
   }
   private mappingFor(protocol: ProtocolSettings): Record<string, number> {
     return Object.fromEntries(decoderDefinition(protocol.decoder).ui.inputs.flatMap(input => protocol.mapping[input.key] === undefined ? [] : [[input.key, protocol.mapping[input.key]!]]));
-  }
-  private sortFrames(protocol: ProtocolInstance): void {
-    const compare = decoderDefinition(protocol.decoder).ui.compareFrames;
-    protocol.frames.sort(compare ? (a, b) => compare(a, b) : (a, b) => compareSamples(a.ss, b.ss));
   }
   stopCapture(): void {
     if (!this.captureStop || this.captureStop.signal.aborted) return;
@@ -452,37 +440,12 @@ export class AnalyzerApp {
       if (!protocol.liveSession) {
         this.clearProtocol(protocol); protocol.state = 'decoding';
         try {
-          let session!: LiveDecodeSession;
-          protocol.liveBatchMetrics = undefined;
-          protocol.liveBatchStages = { frames: { calls: 0, totalMs: 0, maxMs: 0 }, annotations: { calls: 0, totalMs: 0, maxMs: 0 }, ui: { calls: 0, totalMs: 0, maxMs: 0 } };
           const mapping = this.mappingFor(protocol);
-          session = protocol.client.startLive(capture, this.readOptions(protocol), mapping, batch => {
-            if (protocol.liveSession !== session) return;
-            const stages = protocol.liveBatchStages!, diagnostics = this.capture?.diagnostics;
-            let started = performance.now();
-            for (const frame of batch.frames) protocol.frames.push(frame);
-            protocol.frameCount += batch.frames.length; protocol.annotationCount += batch.annotations.length;
-            protocol.annotations.append(batch.annotations);
-            const frameElapsed = performance.now() - started;
-            addStageTiming(stages.frames, frameElapsed);
-            if (diagnostics) addStageTiming(diagnostics.ui.decodeFrames, frameElapsed);
-            started = performance.now();
-            const annotationElapsed = performance.now() - started; addStageTiming(stages.annotations, annotationElapsed);
-            if (diagnostics) addStageTiming(diagnostics.ui.decodeAnnotations, annotationElapsed);
-            protocol.progress = batch.progress;
-            started = performance.now(); this.renderer.schedule(); this.updateDecodeSummary();
-            const uiElapsed = performance.now() - started; addStageTiming(stages.ui, uiElapsed);
-            if (diagnostics) addStageTiming(diagnostics.ui.decodeUI, uiElapsed);
-          }, protocol.decoder, capture.sharedSource, (progress, frames, annotations, resultBytes) => {
+          const session = protocol.client.startLive(capture, this.readOptions(protocol), mapping, protocol.decoder, capture.sharedSource, (progress, frames, annotations, resultBytes) => {
             protocol.progress = progress; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
             if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(annotations);
             this.updateMemoryUsage(); this.updateDecodeSummary();
             if (protocol === this.selectedProtocol) { this.renderer.schedule(); }
-          }, (frames, annotations, resultBytes) => {
-            protocol.pagedResults = true; protocol.frames = []; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
-            const pagedAnnotations = new PagedAnnotationIndex(protocol.client); pagedAnnotations.setTotal(annotations); protocol.annotations = pagedAnnotations;
-            this.updateMemoryUsage(); this.updateDecodeSummary();
-            if (protocol === this.selectedProtocol) this.renderer.schedule();
           });
           protocol.liveSession = session; started = true;
         } catch (error) {
@@ -512,23 +475,10 @@ export class AnalyzerApp {
       try {
         const result = await session.finish(capture);
         if (protocol.liveSession !== session) return;
-        protocol.liveBatchMetrics = { ...session.mainThreadBatches };
-        if (capture.diagnostics) {
-          if (result.stats.stages) capture.diagnostics.decodeWorker = { ...result.stats.stages };
-          capture.diagnostics.decodeMainThread = {
-            restoreTotalMs: session.mainThreadBatches.restoreTotalMs,
-            restoreMaxMs: session.mainThreadBatches.restoreMaxMs,
-            callbackTotalMs: session.mainThreadBatches.callbackTotalMs,
-            callbackMaxMs: session.mainThreadBatches.callbackMaxMs,
-            batchCount: session.mainThreadBatches.count,
-            frames: session.mainThreadBatches.frames,
-            annotations: session.mainThreadBatches.annotations,
-          };
-        }
+        if (capture.diagnostics && result.stats.stages) capture.diagnostics.decodeWorker = { ...result.stats.stages };
         protocol.liveSession = undefined; protocol.result = result; protocol.frameCount = result.stats.frames; protocol.annotationCount = result.stats.annotations;
         protocol.resultBytes = Math.max(protocol.resultBytes, protocol.annotations.reservedBytes) + binaryBytes(result);
         if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(protocol.annotationCount);
-        this.sortFrames(protocol);
         protocol.state = 'done'; protocol.progress = 1;
         if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
       } catch (error) {
@@ -549,23 +499,18 @@ export class AnalyzerApp {
   private async exportCSV(): Promise<void> {
     const capture = this.capture, protocol = this.selectedProtocol;
     if (!capture || !protocol || !protocol.frameCount) return;
-    const definition = decoderDefinition(protocol.decoder), name = 'hakei-' + protocol.decoder + '.csv';
+    const name = 'hakei-' + protocol.decoder + '.csv';
     try {
-      if (!protocol.pagedResults) {
-        download(name, framesCSV(protocol.decoder, protocol.frames, capture.store.samplerate, capture.triggerSample), 'text/csv;charset=utf-8');
-        return;
-      }
       const picker = (window as Window & { showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable(): Promise<{ write(data: string): Promise<void>; close(): Promise<void>; abort(): Promise<void> }> }> }).showSaveFilePicker;
       const writable = picker ? await picker({ suggestedName: name, types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }] }).then(file => file.createWritable()) : null;
-      const parts: Blob[] = writable ? [] : [new Blob([definition.ui.csvHeader + '\r\n'])];
+      const parts: Blob[] = [];
       const pageSize = 20_000;
       try {
         for (let offset = 0; offset < protocol.frameCount; offset += pageSize) {
-          const frames = await protocol.client.readFrames(offset, Math.min(pageSize, protocol.frameCount - offset));
-          const csv = framesCSV(protocol.decoder, frames, capture.store.samplerate, capture.triggerSample);
-          const body = csv.slice(csv.indexOf('\r\n') + 2);
-          if (!body) continue;
-          if (writable) await writable.write(body + '\r\n'); else parts.push(new Blob([body + '\r\n']));
+          const csv = await protocol.client.readCsv(offset, Math.min(pageSize, protocol.frameCount - offset),
+            capture.store.samplerate, capture.triggerSample, offset === 0);
+          if (!csv) continue;
+          if (writable) await writable.write(csv + '\r\n'); else parts.push(new Blob([csv + '\r\n']));
         }
         if (writable) await writable.close(); else downloadBlob(name, new Blob(parts, { type: 'text/csv;charset=utf-8' }));
       } catch (error) { await writable?.abort(); throw error; }
@@ -595,25 +540,14 @@ export class AnalyzerApp {
       if (token !== (live ? this.decodeVersion : this.version)) return; this.clearProtocol(protocol); protocol.state = 'decoding'; this.updateDecodeSummary();
       try {
         const mapping = this.mappingFor(protocol);
-        const result = await protocol.client.run(capture, this.readOptions(protocol), mapping, batch => {
-          if (token !== (live ? this.decodeVersion : this.version)) return;
-          for (const frame of batch.frames) protocol.frames.push(frame);
-          protocol.frameCount += batch.frames.length; protocol.annotationCount += batch.annotations.length;
-          protocol.annotations.append(batch.annotations);
-          protocol.progress = batch.progress;
-          this.renderer.schedule(); this.updateDecodeSummary();
-        }, protocol.decoder, live ? sampleLimit : undefined, undefined, (progress, frames, annotations, resultBytes) => {
+        const result = await protocol.client.run(capture, this.readOptions(protocol), mapping, protocol.decoder, live ? sampleLimit : undefined, (progress, frames, annotations, resultBytes) => {
           protocol.progress = progress; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
           if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(annotations);
           this.updateMemoryUsage(); this.updateDecodeSummary(); if (protocol === this.selectedProtocol) this.renderer.schedule();
-        }, (frames, annotations, resultBytes) => {
-          protocol.pagedResults = true; protocol.frames = []; protocol.frameCount = frames; protocol.annotationCount = annotations; protocol.resultBytes = resultBytes;
-          const pagedAnnotations = new PagedAnnotationIndex(protocol.client); pagedAnnotations.setTotal(annotations); protocol.annotations = pagedAnnotations;
-          this.updateMemoryUsage(); this.updateDecodeSummary(); if (protocol === this.selectedProtocol) this.renderer.schedule();
-        }, true);
+        });
         if (token !== (live ? this.decodeVersion : this.version)) return; protocol.result = result; protocol.frameCount = result.stats.frames;
         protocol.annotationCount = result.stats.annotations; protocol.resultBytes = protocol.annotations.reservedBytes + binaryBytes(result);
-        this.sortFrames(protocol); protocol.state = 'done'; protocol.progress = 1;
+        protocol.state = 'done'; protocol.progress = 1;
         if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
       } catch (error) {
         if (token !== (live ? this.decodeVersion : this.version)) return; protocol.state = 'error'; protocol.error = error instanceof UIError ? error : errorLabel(error); failed = true; this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
@@ -635,14 +569,19 @@ export class AnalyzerApp {
     if (cancellingCapture) this.clearCaptureView();
     if (update) this.setStatus('cancelled', 'status.cancelled'); else if (this.state === 'loading' || this.state === 'decoding') this.state = 'ready';
   }
-  private clearProtocol(protocol: ProtocolInstance): void { protocol.frames = []; protocol.frameCount = 0; protocol.annotationCount = 0; protocol.resultBytes = 0; protocol.pagedResults = false; protocol.result = null; protocol.annotations.clear(); protocol.progress = 0; protocol.state = 'ready'; protocol.error = null; this.renderer.schedule(); this.updateDecodeSummary(); }
+  private clearProtocol(protocol: ProtocolInstance): void { protocol.frameCount = 0; protocol.annotationCount = 0; protocol.resultBytes = 0; protocol.result = null; protocol.annotations.clear(); protocol.progress = 0; protocol.state = 'ready'; protocol.error = null; this.renderer.schedule(); this.updateDecodeSummary(); }
   workspaceSettings(): WorkspaceSettings {
     this.commitForm(); const rowOrder = this.renderer.getRowOrder(); return { protocols: this.protocols.map(protocol => ({ id: protocol.id, decoder: protocol.decoder, name: protocol.name, color: protocol.color, decimalPlaces: protocol.decimalPlaces, options: { ...protocol.options }, mapping: this.mappingFor(protocol) })), selectedId: this.selectedId, cursor: this.renderer.cursorA, cursorA: this.renderer.cursorA, cursorB: this.renderer.cursorB, viewport: [this.renderer.start, this.renderer.end], channels: [...this.renderer.channels], rowOrder };
   }
   async saveCapture(): Promise<void> {
     if (!this.capture || this.saveAbort) return;
     const button = element<HTMLButtonElement>('save-capture'), capture = this.capture, workspace = this.workspaceSettings(), abort = new AbortController(); this.saveAbort = abort; button.disabled = true; this.renderStatus();
-    try { const blob = await serializeSR(capture, workspace, undefined, abort.signal); abort.signal.throwIfAborted(); download('capture.sr', blob, 'application/zip'); }
+    try {
+      const exporter = capture.store as unknown as { exportSR?: (workspace: WorkspaceSettings | undefined, triggerSample: bigint, acquisition: Capture['acquisition'], signal?: AbortSignal) => Promise<Blob> };
+      if (!exporter.exportSR && typeof window !== 'undefined') throw new UIError('error.worker');
+      const blob = exporter.exportSR ? await exporter.exportSR(workspace, capture.triggerSample, capture.acquisition, abort.signal) : await serializeSR(capture, workspace, undefined, abort.signal);
+      abort.signal.throwIfAborted(); download('capture.sr', blob, 'application/zip');
+    }
     catch (error) { if (!abort.signal.aborted) this.showMessage(error instanceof UIError ? error : errorLabel(error), true); }
     finally { if (this.saveAbort === abort) this.saveAbort = null; button.disabled = false; this.renderStatus(); }
   }
@@ -659,11 +598,11 @@ export class AnalyzerApp {
   }
   private updateDecodeSummary(): void {
     const protocol = this.selectedProtocol, definition = protocol ? decoderDefinition(protocol.decoder) : null;
-    element('frame-count').textContent = numberLabel(protocol?.frameCount ?? this.frames.length);
+    element('frame-count').textContent = numberLabel(protocol?.frameCount ?? 0);
     element('text-preview').textContent = this.result && definition?.ui.summary
       ? definition.ui.summary(this.result.result, protocol?.decimalPlaces ?? 3, (key, fallback) => hasMessage(key) ? t(key) : fallback) : '';
     const key = element<HTMLSelectElement>('binary-output').value;
-    element<HTMLButtonElement>('export-csv').disabled = !(protocol?.frameCount ?? this.frames.length);
+    element<HTMLButtonElement>('export-csv').disabled = !(protocol?.frameCount ?? 0);
     element<HTMLButtonElement>('export-binary').disabled = !this.result?.result.binaries[key];
   }
   showMessage(message: string | UIError | { key: MessageKey; params?: MessageParams }, error = false): void { this.displayedMessage = message; this.messageIsError = error; this.renderMessage(); }

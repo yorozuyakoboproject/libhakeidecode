@@ -3,7 +3,7 @@ import type { Annotation, DecoderId } from './protocol.js';
 import type { ProtocolSettings } from './workspace.js';
 import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import type { Capture } from './capture.js';
-import type { AnalogColumnView } from './data/analogStore.js';
+import type { AnalogColumnView, AnalogStore } from './data/analogStore.js';
 import type { ColumnView } from './data/types.js';
 import { AnnotationIndex } from './event-index.js';
 import { readPalette } from './theme.js';
@@ -13,6 +13,7 @@ const timeUnits = [
   [1e-15, 'fs'], [1e-12, 'ps'], [1e-9, 'ns'], [1e-6, 'µs'], [1e-3, 'ms'],
   [1, 's'], [1e3, 'ks'], [1e6, 'Ms'], [1e9, 'Gs'], [1e12, 'Ts'], [1e15, 'Ps'], [1e18, 'Es'],
 ] as const;
+const SAMPLE_POINT_GAP = 3, SAMPLE_POINT_RADIUS = 1.75, ANALOG_LINE_WIDTH = 1.5, ANALOG_LINE_MIN_PIXELS = .25, MIN_VIEW_SAMPLES = 2n;
 export function timeLabel(seconds: number, resolutionSeconds?: number, digits = 3): string {
   const basis = Math.abs(resolutionSeconds ?? (seconds || 1e-9));
   let index = 0;
@@ -74,6 +75,8 @@ export class WaveformRenderer {
   private queryMaxMs = 0;
   private width = 1000;
   private palette = readPalette();
+  private readonly frameCanvas = document.createElement('canvas');
+  private readonly frameContext = this.frameCanvas.getContext('2d')!;
   private readonly themeChanged = (): void => { this.palette = readPalette(); this.schedule(); };
   readonly gutter = 114;
   constructor(readonly canvas: HTMLCanvasElement, readonly overview: HTMLCanvasElement, readonly axisCanvas?: HTMLCanvasElement) {
@@ -183,7 +186,7 @@ export class WaveformRenderer {
     if (!this.capture) return;
     let start: bigint, end: bigint;
     try { start = sampleFloor(startInput); end = sampleCeil(endInput); } catch { return; }
-    const length = this.viewLength(this.capture), span = maxSample(1n, minSample(length, end - start));
+    const length = this.viewLength(this.capture), span = maxSample(minSample(MIN_VIEW_SAMPLES, length), minSample(length, end - start));
     const nextStart = maxSample(0n, minSample(length - span, start)), nextEnd = nextStart + span, changed = nextStart !== this.start || nextEnd !== this.end;
     this.start = nextStart; this.end = nextEnd;
     this.onChange();
@@ -355,7 +358,17 @@ export class WaveformRenderer {
     const width = Math.max(300, Math.floor(this.canvas.parentElement?.clientWidth || 1000));
     const bins = Math.max(1, width - this.gutter - 16), start = this.start, end = this.end, generation = this.viewGeneration;
     const tasks: Promise<void>[] = [];
-    if (store?.prepareView) tasks.push(store.prepareView(this.channels, start, end, bins));
+    if (store?.prepareView && end > start) tasks.push(store.prepareView(this.channels, start, end, bins));
+    for (const channel of this.analogChannels) {
+      const analog = capture.analogChannels?.[channel]?.store as (AnalogStore & { prepareView?: (start: bigint, end: bigint, bins: number) => Promise<void> }) | undefined;
+      if (!analog?.prepareView) continue;
+      const samples = this.sampleRange(analog.length, bins, ANALOG_LINE_MIN_PIXELS);
+      if (samples) tasks.push(analog.prepareView(samples.start, samples.end, samples.count));
+      else {
+        const availableEnd = minSample(analog.length, end);
+        if (availableEnd > start) tasks.push(analog.prepareView(start, availableEnd, this.availableBins(availableEnd, bins)));
+      }
+    }
     for (const protocol of this.protocols) tasks.push(protocol.annotations.prepareView(start, end, Math.max(1, Math.floor(bins * this.protocolRows(protocol) * 3))));
     if (!tasks.length) { this.viewReady = true; this.drawNow(); return; }
     this.viewRefreshDirty = false;
@@ -367,16 +380,9 @@ export class WaveformRenderer {
       if (Math.max(1, currentWidth - this.gutter - 16) !== bins) { this.schedule(); return; }
       const current = generation === this.viewGeneration && start === this.start && end === this.end;
       if (current) { this.viewReady = true; this.drawNow(); }
-      else this.drawPreparedFrame(start, end);
       if (!current || this.viewRefreshDirty) this.schedule();
     });
     this.viewRefresh = task;
-  }
-  private drawPreparedFrame(start: bigint, end: bigint): number {
-    const requestedStart = this.start, requestedEnd = this.end, ready = this.viewReady;
-    this.start = start; this.end = end; this.viewReady = true;
-    try { return this.drawNow(); }
-    finally { this.start = requestedStart; this.end = requestedEnd; this.viewReady = ready; }
   }
   drawNow(): number {
     if (!this.renderingEnabled) return 0;
@@ -387,12 +393,14 @@ export class WaveformRenderer {
     const scrolling = this.scrollDraggedRow(), layout = this.rowLayout();
     const height = Math.max(270, this.waveformTop() + layout.reduce((sum, row) => sum + row.height, 0)), dpr = window.devicePixelRatio || 1;
     this.canvas.style.height = height + 'px';
-    if (this.canvas.width !== Math.round(this.width * dpr) || this.canvas.height !== Math.round(height * dpr)) {
-      this.canvas.width = Math.round(this.width * dpr); this.canvas.height = Math.round(height * dpr);
-    }
-    const ctx = this.canvas.getContext('2d')!; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pixelWidth = Math.round(this.width * dpr), pixelHeight = Math.round(height * dpr);
+    if (this.canvas.width !== pixelWidth || this.canvas.height !== pixelHeight) { this.canvas.width = pixelWidth; this.canvas.height = pixelHeight; }
+    if (this.frameCanvas.width !== pixelWidth || this.frameCanvas.height !== pixelHeight) { this.frameCanvas.width = pixelWidth; this.frameCanvas.height = pixelHeight; }
+    const ctx = this.frameContext;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.setLineDash([]); ctx.lineCap = 'butt'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = this.palette['bg']; ctx.fillRect(0, 0, this.width, height);
-    if (!capture) return performance.now() - started;
+    if (!capture) { this.presentFrame(); return performance.now() - started; }
     const { store, triggerSample } = capture, plotWidth = Math.max(1, this.width - this.gutter - 16);
     const toX = (sample: bigint): number => this.gutter + sampleRatio(sample - this.start, this.end - this.start) * plotWidth;
     ctx.font = '11px ui-monospace, Consolas, monospace'; ctx.textBaseline = 'middle';
@@ -418,10 +426,16 @@ export class WaveformRenderer {
     this.drawCursor(ctx, height, !this.axisCanvas);
     this.drawAxis(capture, dpr);
     this.drawOverview(capture, dpr);
+    this.presentFrame();
     const animating = [...this.rowMotions.values()].some(motion => now - motion.started < this.motionDuration);
     if (animating || scrolling) this.schedule();
     else if (!this.rowDrag?.moved && this.rowSnapshot) { this.settleRows(); this.schedule(); }
     const elapsed = performance.now() - started; this.timings.push(elapsed); if (this.timings.length > 240) this.timings.shift(); return elapsed;
+  }
+  private presentFrame(): void {
+    const ctx = this.canvas.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(this.frameCanvas, 0, 0); ctx.globalCompositeOperation = 'source-over';
   }
   private drawTimelineRow(ctx: CanvasRenderingContext2D, row: TimelineLayoutRow, top: number, toX: (sample: bigint) => number, plotWidth: number): void {
     const snapshot = this.rowSnapshot, cached = snapshot?.rects.get(rowKey(row.entry));
@@ -440,10 +454,19 @@ export class WaveformRenderer {
     ctx.font = '600 12px system-ui, sans-serif'; ctx.fillText(`D${channel}`, 26, y + 12);
     ctx.fillStyle = this.palette['label']; ctx.font = '11px system-ui, sans-serif'; ctx.fillText(capture.labels[channel].slice(0, 12), 26, y + 28);
     const queryStarted = performance.now();
-    const view = store.query(channel, this.start, this.end, plotWidth);
+    const availableEnd = minSample(store.length, this.end);
+    if (availableEnd <= this.start) {
+      ctx.strokeStyle = this.palette['divider']; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, y + 46); ctx.lineTo(this.width, y + 46); ctx.stroke();
+      return;
+    }
+    const view = typeof (store as typeof store & { prepareView?: unknown }).prepareView === 'function'
+      ? store.query(channel, this.start, this.end, plotWidth)
+      : store.query(channel, this.start, availableEnd, this.availableBins(availableEnd, plotWidth));
     const exactEdges = this.end - this.start < plotWidth ? store.edges(channel, this.start, this.end) : undefined;
+    const samples = this.sampleRange(store.length, plotWidth);
     this.recordQuery?.(performance.now() - queryStarted);
     this.drawDigital(ctx, view, highY, lowY, color, exactEdges);
+    if (samples) this.drawDigitalPoints(ctx, view, highY, lowY, color);
     ctx.strokeStyle = this.palette['divider']; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, y + 46); ctx.lineTo(this.width, y + 46); ctx.stroke();
   }
   private drawAnalog(ctx: CanvasRenderingContext2D, channel: number, top: number, plotWidth: number): void {
@@ -453,31 +476,61 @@ export class WaveformRenderer {
     ctx.fillStyle = color; ctx.fillRect(14, y + 5, 3, 25);
     ctx.font = '600 12px system-ui, sans-serif'; ctx.fillText(`A${channel}`, 26, y + 12);
     ctx.fillStyle = this.palette['label']; ctx.font = '11px system-ui, sans-serif'; ctx.fillText(item.name.slice(0, 12), 26, y + 28);
-    const queryStarted = performance.now();
-    const view: AnalogColumnView = item.store.query(this.start, this.end, plotWidth);
-    this.recordQuery?.(performance.now() - queryStarted);
-    const scale = 22, center = y + 20;
-    ctx.fillStyle = color;
-    let first = 0, previousLow = 0, previousHigh = 0;
-    for (let i = 0; i <= view.bins; i++) {
-      const low = i < view.bins ? center - Math.max(-1, Math.min(1, view.low[i]!)) * scale : 0;
-      const high = i < view.bins ? center - Math.max(-1, Math.min(1, view.high[i]!)) * scale : 0;
-      if (i === 0) { previousLow = low; previousHigh = high; }
-      else if (i === view.bins || low !== previousLow || high !== previousHigh) {
-        ctx.fillRect(this.gutter + first, previousHigh, i - first, previousLow - previousHigh);
-        first = i; previousLow = low; previousHigh = high;
+    const queryStarted = performance.now(), scale = 22, center = y + 20;
+    const pointY = (value: number): number => center - Math.max(-1, Math.min(1, value)) * scale;
+    ctx.fillStyle = color; ctx.strokeStyle = color;
+    const samples = this.sampleRange(item.store.length, plotWidth, ANALOG_LINE_MIN_PIXELS);
+    if (samples) {
+      const points: AnalogColumnView = item.store.query(samples.start, samples.end, samples.count);
+      this.recordQuery?.(performance.now() - queryStarted);
+      ctx.lineWidth = ANALOG_LINE_WIDTH; ctx.beginPath();
+      let lastY = 0;
+      for (let i = 0; i < points.bins; i++) {
+        const x = this.xAtSample(points.startSample + BigInt(i)), sampleY = pointY(points.low[i]!);
+        if (i) ctx.lineTo(x, sampleY);
+        else { ctx.moveTo(this.gutter, sampleY); ctx.lineTo(x, sampleY); }
+        lastY = sampleY;
+      }
+      if (samples.end === this.end) ctx.lineTo(this.width - 16, lastY);
+      ctx.stroke();
+      if (plotWidth / Number(this.end - this.start) >= SAMPLE_POINT_GAP) {
+        ctx.beginPath();
+        for (let i = 0; i < points.bins; i++) {
+          const x = this.xAtSample(points.startSample + BigInt(i)), sampleY = pointY(points.low[i]!);
+          ctx.moveTo(x + SAMPLE_POINT_RADIUS, sampleY); ctx.arc(x, sampleY, SAMPLE_POINT_RADIUS, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+    } else if (this.start < minSample(item.store.length, this.end)) {
+      const availableEnd = minSample(item.store.length, this.end);
+      const view: AnalogColumnView = item.store.query(this.start, availableEnd, this.availableBins(availableEnd, plotWidth));
+      this.recordQuery?.(performance.now() - queryStarted);
+      const viewSpan = view.endSample - view.startSample;
+      const xAt = (index: number): number => this.xAtSample(view.startSample + viewSpan * BigInt(index) / BigInt(view.bins));
+      let first = 0, previousLow = 0, previousHigh = 0;
+      for (let i = 0; i <= view.bins; i++) {
+        const low = i < view.bins ? pointY(view.low[i]!) : 0;
+        const high = i < view.bins ? pointY(view.high[i]!) : 0;
+        if (i === 0) { previousLow = low; previousHigh = high; }
+        else if (i === view.bins || low !== previousLow || high !== previousHigh) {
+          const rawHeight = previousLow - previousHigh, height = Math.max(ANALOG_LINE_WIDTH, rawHeight);
+          ctx.fillRect(xAt(first), previousHigh - (height - rawHeight) / 2, xAt(i) - xAt(first), height);
+          first = i; previousLow = low; previousHigh = high;
+        }
       }
     }
     ctx.strokeStyle = this.palette['divider']; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, y + 46); ctx.lineTo(this.width, y + 46); ctx.stroke();
   }
   private drawDigital(ctx: CanvasRenderingContext2D, view: ColumnView, highY: number, lowY: number, color: string, exactEdges?: bigint[]): void {
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1; ctx.beginPath();
+    const viewSpan = view.endSample - view.startSample;
+    const xAt = (index: number): number => this.xAtSample(view.startSample + viewSpan * BigInt(index) / BigInt(view.bins));
     for (const high of [true, false]) {
       const y = high ? highY : lowY; let first = -1;
       for (let i = 0; i <= view.bins; i++) {
         const active = i < view.bins && !(view.packed[i] & 8) && (high ? view.high[i] === 1 : view.low[i] === 0);
         if (active && first < 0) first = i;
-        if (!active && first >= 0) { ctx.moveTo(this.gutter + first, y); ctx.lineTo(this.gutter + i, y); first = -1; }
+        if (!active && first >= 0) { ctx.moveTo(xAt(first), y); ctx.lineTo(xAt(i), y); first = -1; }
       }
     }
     if (exactEdges) {
@@ -494,15 +547,30 @@ export class WaveformRenderer {
       for (let i = 0; i <= view.bins; i++) {
         const active = i < view.bins && !(view.packed[i] & 8) && view.edge[i] === 1;
         if (active && first < 0) first = i;
-        if (!active && first >= 0) { ctx.fillRect(this.gutter + first, highY, i - first, lowY - highY); first = -1; }
+        if (!active && first >= 0) { ctx.fillRect(xAt(first), highY, xAt(i) - xAt(first), lowY - highY); first = -1; }
       }
     }
-    ctx.fillStyle = this.palette['gap']; let first = -1;
-    for (let i = 0; i <= view.bins; i++) {
-      const active = i < view.bins && !!(view.packed[i] & 8);
-      if (active && first < 0) first = i;
-      if (!active && first >= 0) { ctx.fillRect(this.gutter + first, highY - 4, i - first, 30); first = -1; }
+  }
+  private drawDigitalPoints(ctx: CanvasRenderingContext2D, view: ColumnView, highY: number, lowY: number, color: string): void {
+    if (!view.points?.length) return;
+    ctx.fillStyle = color; ctx.beginPath();
+    for (let i = 0; i < view.points.length; i++) {
+      const sample = view.startSample + BigInt(i);
+      if (sample < this.start || sample >= this.end) continue;
+      const x = this.xAtSample(sample), y = view.points[i] ? highY : lowY;
+      ctx.moveTo(x + SAMPLE_POINT_RADIUS, y); ctx.arc(x, y, SAMPLE_POINT_RADIUS, 0, Math.PI * 2);
     }
+    ctx.fill();
+  }
+  private sampleRange(length: bigint, plotWidth: number, gap = SAMPLE_POINT_GAP): { start: bigint; end: bigint; count: number } | null {
+    const start = maxSample(0n, this.start), end = minSample(length, this.end), limit = BigInt(Math.floor(plotWidth / gap));
+    if (end <= start || this.end - this.start > limit) return null;
+    return { start, end, count: Number(end - start) };
+  }
+  private availableBins(availableEnd: bigint, plotWidth: number): number {
+    const span = this.end - this.start;
+    if (span <= 0n || availableEnd <= this.start) return 1;
+    return Math.max(1, Number(BigInt(plotWidth) * (availableEnd - this.start) / span));
   }
   private drawCursor(ctx: CanvasRenderingContext2D, height: number, label: boolean): void {
     if (!this.capture) return;

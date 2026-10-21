@@ -1,6 +1,11 @@
 import type { AcquisitionChunk, AcquisitionDescription, DeviceConfiguration } from '../libhakei/device.js';
 import type { AcquisitionResponse, AcquisitionRequest } from './acquisition-worker.js';
 import { DEFAULT_SHARED_CHUNK_BYTES } from './shared-chunks.js';
+import { DEFAULT_CAPTURE_BUDGET_BYTES, type BudgetSnapshot } from './memory.js';
+import { channelWidthForProbes } from './data/channel-count.js';
+import { WorkerCaptureStore } from './worker-store.js';
+
+export interface LocalCaptureResult { length: bigint; memory: BudgetSnapshot; stopReason: 'complete' | 'stopped' | 'error'; error?: string; timings?: import('./data/planarStore.js').PlanarStoreTimings }
 
 export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChunk> {
   private readonly worker: Worker;
@@ -23,20 +28,36 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   private sharedPublisher = { calls: 0, bytes: 0, totalMs: 0, maxMs: 0 };
   private sharedH417Transport: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number } | undefined;
   private sharedH417Worker: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number } | undefined;
+  private localLength = 0n;
+  private localMemory: BudgetSnapshot = { limitBytes: DEFAULT_CAPTURE_BUDGET_BYTES, usedBytes: 0, peakBytes: 0, allocations: 0 };
+  private localDone: LocalCaptureResult | null = null;
+  readonly captureStore?: WorkerCaptureStore;
+  onLocalProgress: (() => void) | null = null;
   readonly capacity: number;
   maxQueued = 0;
-  constructor(description: AcquisitionDescription, configuration: DeviceConfiguration, chunkSamples: number, buffers: ArrayBuffer[], private readonly signal?: AbortSignal) {
+  constructor(description: AcquisitionDescription, configuration: DeviceConfiguration, chunkSamples: number, buffers: ArrayBuffer[], private readonly signal?: AbortSignal, storeCapture = false) {
     this.completion = new Promise<void>(resolve => { this.completionResolve = resolve; });
     this.capacity = buffers.length;
     this.shared = description.layout === 'packed-logic';
     if (description.worker?.required && this.shared && typeof SharedArrayBuffer === 'undefined')
       throw new Error('H417 shared capture requires cross-origin isolation (COOP same-origin and COEP require-corp)');
     this.worker = new Worker(new URL('./acquisition-worker.js', import.meta.url), { type: 'module' });
+    let storePort: MessagePort | undefined;
+    if (storeCapture) {
+      const channel = new MessageChannel(); storePort = channel.port1;
+      const labels = Array.from({ length: configuration.logicChannels }, (_, index) => `D${index}`);
+      const analogNames = Array.from({ length: configuration.analogChannels }, (_, index) => `A${index}`);
+      this.captureStore = WorkerCaptureStore.empty(this.worker, channel.port2, channelWidthForProbes(Math.max(1, configuration.logicChannels)),
+        configuration.sampleRate, labels, analogNames);
+    }
     this.worker.onmessage = ({ data }: MessageEvent<AcquisitionResponse>) => {
       if (data.type === 'chunk') {
         this.queue.push(data); this.maxQueued = Math.max(this.maxQueued, this.queue.length);
         if (this.queue.length > this.capacity) { this.error = new Error('Acquisition worker exceeded its buffer capacity'); this.stop(); }
       } else if (data.type === 'shared-progress') { this.sharedAllocatedBytes = data.allocatedBytes; this.sharedPublishedSamples = data.publishedSamples; if (data.publisher) this.sharedPublisher = { ...data.publisher }; if (data.h417Transport) this.sharedH417Transport = { ...data.h417Transport }; if (data.h417Worker) this.sharedH417Worker = { ...data.h417Worker }; this.onSharedProgress?.(); }
+      else if (data.type === 'local-progress') { this.localLength = data.length; this.localMemory = { ...data.memory }; this.onLocalProgress?.(); }
+      else if (data.type === 'local-done') { this.localLength = data.length; this.localMemory = { ...data.memory };
+        this.localDone = { length: data.length, memory: { ...data.memory }, stopReason: data.stopReason, ...(data.error ? { error: data.error } : {}), ...(data.timings ? { timings: data.timings } : {}) }; }
       else if (data.type === 'error') this.error = new Error(data.message);
       else if (data.type === 'closed') { this.closed = true; this.closeWake?.(); this.resolveCompletion(); }
       else { this.finished = true; this.resolveCompletion(); }
@@ -45,8 +66,10 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
     this.worker.onerror = event => { event.preventDefault(); this.error = new Error(event.message); this.closed = true; this.closeWake?.(); this.resolveCompletion(); this.wake?.(); this.wake = null; };
     this.worker.onmessageerror = () => { this.error = new Error('Acquisition message could not be read'); this.stop(); this.wake?.(); this.wake = null; };
     try { this.worker.postMessage({ type: 'start', ...description.worker!, configuration, chunkSamples, buffers,
-      ...(this.shared ? { sharedSampleCount: BigInt(configuration.sampleCount), sharedChunkBytes: DEFAULT_SHARED_CHUNK_BYTES } : {}) } satisfies AcquisitionRequest, buffers); }
-    catch (error) { this.worker.terminate(); throw error; }
+      ...(storeCapture ? { store: { budgetBytes: DEFAULT_CAPTURE_BUDGET_BYTES }, storePort: storePort! } : {}),
+      ...(this.shared ? { sharedSampleCount: BigInt(configuration.sampleCount), sharedChunkBytes: DEFAULT_SHARED_CHUNK_BYTES } : {}) } satisfies AcquisitionRequest,
+      storePort ? [...buffers, storePort] : buffers); }
+    catch (error) { this.captureStore?.dispose(); this.worker.terminate(); throw error; }
     signal?.addEventListener('abort', this.abort, { once: true });
     if (signal?.aborted) this.stop();
   }
@@ -57,6 +80,9 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   get h417WorkerMetrics(): { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number } | undefined { return this.sharedH417Worker ? { ...this.sharedH417Worker } : undefined; }
   get sharedCapture(): boolean { return this.shared; }
   get errorMessage(): string | undefined { return this.error?.message; }
+  get localLengthValue(): bigint { return this.localLength; }
+  get localMemorySnapshot(): BudgetSnapshot { return { ...this.localMemory }; }
+  get localResult(): LocalCaptureResult | null { return this.localDone ? { ...this.localDone, memory: { ...this.localDone.memory } } : null; }
   waitForCompletion(): Promise<void> { return this.completion; }
 
   connectConsumer(port: MessagePort): void {

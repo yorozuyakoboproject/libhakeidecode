@@ -16,11 +16,11 @@ type ViewRequest =
   | { type: 'query-many'; id: number; channels: readonly number[]; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'finish' };
-type ViewChannelResult = { channel: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array };
+type ViewChannelResult = { channel: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array; points?: Uint8Array };
 type ViewResponse =
   | { type: 'progress'; length: bigint; summaryBytes: number }
-  | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array }
-  | { type: 'query-many-result'; id: number; startSample: bigint; endSample: bigint; bins: number; results: readonly ViewChannelResult[] }
+  | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; availableEnd: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array; points?: Uint8Array }
+  | { type: 'query-many-result'; id: number; startSample: bigint; endSample: bigint; availableEnd: bigint; bins: number; results: readonly ViewChannelResult[] }
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'done'; state: 'complete' | 'stopped' | 'error'; length: bigint; error?: string; summaryBytes: number }
   | { type: 'error'; message: string };
@@ -139,6 +139,11 @@ function sampleAt(s: ViewSession, position: bigint): number {
   if (value === null) throw new Error(`Shared sample ${position} is not committed`);
   return value;
 }
+function exactPoints(data: Uint8Array, bit: number): Uint8Array {
+  const points = new Uint8Array(data.length);
+  for (let index = 0; index < data.length; index++) points[index] = data[index]! & bit ? 1 : 0;
+  return points;
+}
 function alignUp(position: bigint, step: bigint): bigint {
   const remainder = position % step;
   return remainder ? position + step - remainder : position;
@@ -241,7 +246,8 @@ function scanRangeNumber(s: ViewSession, state: RangeState, bit: number, start: 
 }
 function answerQueryNumbers(s: ViewSession, request: Extract<ViewRequest, { type: 'query' }>, begin: bigint, finish: bigint): void {
   const start = Number(begin), end = Number(finish), availableEnd = Math.min(end, Number(s.length));
-  const low = new Uint8Array(request.bins).fill(1), high = new Uint8Array(request.bins), edge = new Uint8Array(request.bins), packed = new Uint8Array(request.bins).fill(2);
+  const low = new Uint8Array(request.bins).fill(1), high = new Uint8Array(request.bins), edge = new Uint8Array(request.bins), packed = new Uint8Array(request.bins).fill(8);
+  let points: Uint8Array | undefined;
   if (start < availableEnd) {
     const width = end - start, bit = maskFor(request.channel), state: RangeState = { low: 1, high: 0, edge: 0, previous: 0 };
     const approximate = width / request.bins >= SHARED_SUMMARY_GROUP_SAMPLES;
@@ -257,9 +263,13 @@ function answerQueryNumbers(s: ViewSession, request: Extract<ViewRequest, { type
       low[index] = state.low; high[index] = state.high; edge[index] = state.edge;
       packed[index] = state.high | (state.low << 1) | (state.edge << 2);
     }
+    if (availableEnd - start <= request.bins) {
+      const data = s.reader.readRange(begin, BigInt(availableEnd));
+      if (data) points = exactPoints(data, bit);
+    }
   }
-  const resultEnd = availableEnd > start ? availableEnd : start;
-  scope.postMessage({ type: 'query-result', id: request.id, channel: request.channel, startSample: begin, endSample: BigInt(resultEnd), bins: request.bins, low, high, edge, packed }, [low.buffer, high.buffer, edge.buffer, packed.buffer]);
+  scope.postMessage({ type: 'query-result', id: request.id, channel: request.channel, startSample: begin, endSample: BigInt(end), availableEnd: BigInt(availableEnd), bins: request.bins, low, high, edge, packed, ...(points ? { points } : {}) },
+    [low.buffer, high.buffer, edge.buffer, packed.buffer, ...(points ? [points.buffer] : [])]);
 }
 function addSamplesAtMany(s: ViewSession, states: RangeState[], bits: readonly number[], start: number, end: number): void {
   if (start >= end) return;
@@ -321,7 +331,7 @@ function scanRangeMany(s: ViewSession, states: RangeState[], bits: readonly numb
 function answerQueryManyNumbers(s: ViewSession, request: Extract<ViewRequest, { type: 'query-many' }>, begin: bigint, finish: bigint): void {
   const start = Number(begin), end = Number(finish), availableEnd = Math.min(end, Number(s.length)), bits = request.channels.map(maskFor);
   const results: ViewChannelResult[] = request.channels.map(channel => ({ channel,
-    low: new Uint8Array(request.bins).fill(1), high: new Uint8Array(request.bins), edge: new Uint8Array(request.bins), packed: new Uint8Array(request.bins).fill(2) }));
+    low: new Uint8Array(request.bins).fill(1), high: new Uint8Array(request.bins), edge: new Uint8Array(request.bins), packed: new Uint8Array(request.bins).fill(8) }));
   if (start < availableEnd) {
     const width = end - start, states: RangeState[] = bits.map(() => ({ low: 1, high: 0, edge: 0, previous: 0 }));
     const approximate = width / request.bins >= SHARED_SUMMARY_GROUP_SAMPLES;
@@ -344,10 +354,14 @@ function answerQueryManyNumbers(s: ViewSession, request: Extract<ViewRequest, { 
         result.packed[index] = state.high | (state.low << 1) | (state.edge << 2);
       }
     }
+    if (availableEnd - start <= request.bins) {
+      const data = s.reader.readRange(begin, BigInt(availableEnd));
+      if (data) for (let channel = 0; channel < results.length; channel++) results[channel]!.points = exactPoints(data, bits[channel]!);
+    }
   }
-  const resultEnd = availableEnd > start ? availableEnd : start, transfer: Transferable[] = [];
-  for (const result of results) transfer.push(result.low.buffer, result.high.buffer, result.edge.buffer, result.packed.buffer);
-  scope.postMessage({ type: 'query-many-result', id: request.id, startSample: begin, endSample: BigInt(resultEnd), bins: request.bins, results }, transfer);
+  const transfer: Transferable[] = [];
+  for (const result of results) transfer.push(result.low.buffer, result.high.buffer, result.edge.buffer, result.packed.buffer, ...(result.points ? [result.points.buffer] : []));
+  scope.postMessage({ type: 'query-many-result', id: request.id, startSample: begin, endSample: BigInt(end), availableEnd: BigInt(availableEnd), bins: request.bins, results }, transfer);
 }
 function answerQuery(s: ViewSession, request: Extract<ViewRequest, { type: 'query' }>): void {
   if (!Number.isInteger(request.channel) || request.channel < 0 || request.channel >= s.channelCount) throw new RangeError('channel out of range');
@@ -356,7 +370,8 @@ function answerQuery(s: ViewSession, request: Extract<ViewRequest, { type: 'quer
   const end = request.endSample > start ? request.endSample : start;
   if (end <= MAX_SAFE_SAMPLE && s.length <= MAX_SAFE_SAMPLE) { answerQueryNumbers(s, request, start, end); return; }
   const availableEnd = end > s.length ? s.length : end;
-  const low = new Uint8Array(request.bins).fill(1), high = new Uint8Array(request.bins), edge = new Uint8Array(request.bins), packed = new Uint8Array(request.bins).fill(2);
+  const low = new Uint8Array(request.bins).fill(1), high = new Uint8Array(request.bins), edge = new Uint8Array(request.bins), packed = new Uint8Array(request.bins).fill(8);
+  let points: Uint8Array | undefined;
   if (start < availableEnd) {
     const width = end - start, divisor = BigInt(request.bins);
     for (let index = 0; index < request.bins; index++) {
@@ -369,9 +384,13 @@ function answerQuery(s: ViewSession, request: Extract<ViewRequest, { type: 'quer
       low[index] = state.low; high[index] = state.high; edge[index] = state.edge;
       packed[index] = state.high | (state.low << 1) | (state.edge << 2);
     }
+    if (availableEnd - start <= BigInt(request.bins)) {
+      const data = s.reader.readRange(start, availableEnd);
+      if (data) points = exactPoints(data, maskFor(request.channel));
+    }
   }
-  const resultEnd = availableEnd > start ? availableEnd : start;
-  scope.postMessage({ type: 'query-result', id: request.id, channel: request.channel, startSample: start, endSample: resultEnd, bins: request.bins, low, high, edge, packed }, [low.buffer, high.buffer, edge.buffer, packed.buffer]);
+  scope.postMessage({ type: 'query-result', id: request.id, channel: request.channel, startSample: start, endSample: end, availableEnd, bins: request.bins, low, high, edge, packed, ...(points ? { points } : {}) },
+    [low.buffer, high.buffer, edge.buffer, packed.buffer, ...(points ? [points.buffer] : [])]);
 }
 function answerQueryMany(s: ViewSession, request: Extract<ViewRequest, { type: 'query-many' }>): void {
   if (!request.channels.length || request.channels.some(channel => !Number.isInteger(channel) || channel < 0 || channel >= s.channelCount)

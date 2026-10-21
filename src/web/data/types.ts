@@ -9,6 +9,7 @@ export interface ColumnView {
   readonly high: Uint8Array;
   readonly edge: Uint8Array;
   readonly packed: Uint8Array;
+  readonly points?: Uint8Array;
 }
 
 export const GAP_BIT = 8;

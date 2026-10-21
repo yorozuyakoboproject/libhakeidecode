@@ -1,37 +1,41 @@
 import type { SampleInput } from '../libhakei/sample-index.js';
 import type { ColumnView, GapSpan, MemoryReport, SampleStore } from './data/types.js';
-import type { SharedCaptureConsumerSource } from './capture.js';
+import type { AcquisitionResult, SharedCaptureConsumerSource } from './capture.js';
 import type { SharedCaptureState } from './shared-chunks.js';
+import type { WorkspaceSettings } from './workspace.js';
 
 type Request =
-  | { type: 'start'; port: MessagePort; channelCount: number; sampleRate: number }
+  | { type: 'start'; port: MessagePort; channelCount: number; sampleRate: number; labels?: readonly string[] }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'pack'; id: number; startSample: bigint; endSample: bigint; channels: number }
   | { type: 'reader'; port: MessagePort }
+  | { type: 'export-sr'; id: number; workspace?: WorkspaceSettings; triggerSample: bigint; acquisition?: AcquisitionResult }
+  | { type: 'cancel-export'; id: number }
   | { type: 'finish' };
 type Response =
   | { type: 'progress'; length: bigint; groups: number; summaryBytes: number }
   | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array }
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'pack-result'; id: number; data: Uint8Array }
+  | { type: 'export-sr-result'; id: number; blob: Blob }
   | { type: 'done'; state: SharedCaptureState; length: bigint; error?: string; summaryBytes: number; metrics: { readerWaitMs: number; summaryMs: number; processCalls: number; queryMs: number; queryCalls: number; edgeMs: number; edgeCalls: number; packMs: number; packCalls: number; samples: bigint; groups: number } }
-  | { type: 'error'; message: string };
+  | { type: 'error'; id?: number; message: string };
 type ViewRequest =
   | { type: 'start'; port: MessagePort; channelCount: number }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'query-many'; id: number; channels: readonly number[]; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'finish' };
-type ViewChannelResult = { channel: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array };
+type ViewChannelResult = { channel: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array; points?: Uint8Array };
 type ViewResponse =
   | { type: 'progress'; length: bigint; summaryBytes: number }
-  | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array }
-  | { type: 'query-many-result'; id: number; startSample: bigint; endSample: bigint; bins: number; results: readonly ViewChannelResult[] }
+  | { type: 'query-result'; id: number; channel: number; startSample: bigint; endSample: bigint; availableEnd: bigint; bins: number; low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array; points?: Uint8Array }
+  | { type: 'query-many-result'; id: number; startSample: bigint; endSample: bigint; availableEnd: bigint; bins: number; results: readonly ViewChannelResult[] }
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'done'; state: 'complete' | 'stopped' | 'error'; length: bigint; error?: string; summaryBytes: number }
   | { type: 'error'; message: string };
-type RemoteView = { view: ColumnView; edges: bigint[] | null };
+type RemoteView = { view: ColumnView; edges: bigint[] | null; availableEnd: bigint };
 type Pending = { resolve(value: Response): void; reject(error: Error): void };
 type PendingView = { resolve(value: ViewResponse): void; reject(error: Error): void };
 const keyFor = (channel: number, start: bigint, end: bigint, bins: number): string => `${channel}:${start}:${end}:${bins}`;
@@ -64,8 +68,9 @@ export class SharedWorkerSampleStore implements SampleStore {
   private viewFailure: Error | null = null;
   private disposed = false;
 
-  constructor(source: SharedCaptureConsumerSource, channelCount: number, samplerate: number) {
+  constructor(source: SharedCaptureConsumerSource, channelCount: number, samplerate: number, labels: readonly string[] = Array.from({ length: channelCount }, (_, index) => 'D' + index)) {
     this.channelCount = channelCount; this.samplerate = samplerate;
+    if (labels.length !== channelCount) throw new Error('Invalid shared channel labels');
     this.worker = new Worker(new URL('./capture-store-worker.js', import.meta.url), { type: 'module' });
     this.viewWorker = new Worker(new URL('./capture-view-worker.js', import.meta.url), { type: 'module' });
     this.done = new Promise((resolve, reject) => { this.doneResolve = resolve; this.doneReject = reject; });
@@ -83,7 +88,13 @@ export class SharedWorkerSampleStore implements SampleStore {
         this.latestSummaryBytes = data.summaryBytes; this.sequence++;
         this.doneResolve(data); this.onProgress?.(); return;
       }
-      if (data.type === 'error') { this.failStorage(new Error(data.message)); return; }
+      if (data.type === 'error') {
+        if (typeof data.id === 'number') {
+          const pending = this.pending.get(data.id); if (!pending) return;
+          this.pending.delete(data.id); pending.reject(new Error(data.message)); return;
+        }
+        this.failStorage(new Error(data.message)); return;
+      }
       const pending = this.pending.get(data.id); if (!pending) return;
       this.pending.delete(data.id); pending.resolve(data);
     };
@@ -107,7 +118,7 @@ export class SharedWorkerSampleStore implements SampleStore {
     const storageChannel = new MessageChannel();
     const viewChannel = new MessageChannel();
     try {
-      this.worker.postMessage({ type: 'start', port: storageChannel.port1, channelCount, sampleRate: samplerate } satisfies Request, [storageChannel.port1]);
+      this.worker.postMessage({ type: 'start', port: storageChannel.port1, channelCount, sampleRate: samplerate, labels: [...labels] } satisfies Request, [storageChannel.port1]);
       this.viewWorker.postMessage({ type: 'start', port: viewChannel.port1, channelCount } satisfies ViewRequest, [viewChannel.port1]);
       source.connectConsumer(storageChannel.port2);
       source.connectConsumer(viewChannel.port2);
@@ -132,8 +143,8 @@ export class SharedWorkerSampleStore implements SampleStore {
     if (!unique.length) return;
     const fresh = (channel: number): RemoteView | undefined => {
       const key = keyFor(channel, start, end, bins);
-      const cached = this.views.get(key), availableEnd = end < this.latestLength ? end : this.latestLength;
-      return cached && cached.view.endSample >= availableEnd && (!includeEdges || cached.edges !== null) ? cached : undefined;
+      const cached = this.views.get(key), requiredEnd = end < this.latestLength ? end : this.latestLength;
+      return cached && cached.availableEnd >= requiredEnd && (!includeEdges || cached.edges !== null) ? cached : undefined;
     };
     const missing = unique.filter(channel => !fresh(channel));
     if (!missing.length) return;
@@ -141,29 +152,29 @@ export class SharedWorkerSampleStore implements SampleStore {
     const pending = this.pendingViews.get(pendingKey);
     if (pending) { await pending; return; }
     const task = (async (): Promise<void> => {
-      const loaded = new Map<number, ColumnView>();
+      const loaded = new Map<number, { view: ColumnView; availableEnd: bigint }>();
       if (missing.length > 1 && end <= MAX_SAFE_SAMPLE && this.latestLength <= MAX_SAFE_SAMPLE) {
         const response = await this.requestView({ type: 'query-many', id: this.nextId++, channels: missing, startSample: start, endSample: end, bins });
         if (response.type !== 'query-many-result') throw new Error('Invalid shared viewport batch response');
-        for (const result of response.results) loaded.set(result.channel, { channel: result.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
-          low: result.low, high: result.high, edge: result.edge, packed: result.packed });
+        for (const result of response.results) loaded.set(result.channel, { availableEnd: response.availableEnd, view: { channel: result.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
+            low: result.low, high: result.high, edge: result.edge, packed: result.packed, ...(result.points ? { points: result.points } : {}) } });
       } else {
         await Promise.all(missing.map(async channel => {
           const response = await this.requestView({ type: 'query', id: this.nextId++, channel, startSample: start, endSample: end, bins });
           if (response.type !== 'query-result') throw new Error('Invalid shared viewport response');
-          loaded.set(channel, { channel: response.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
-            low: response.low, high: response.high, edge: response.edge, packed: response.packed });
+          loaded.set(channel, { availableEnd: response.availableEnd, view: { channel: response.channel, startSample: response.startSample, endSample: response.endSample, bins: response.bins,
+            low: response.low, high: response.high, edge: response.edge, packed: response.packed, ...(response.points ? { points: response.points } : {}) } });
         }));
       }
-      await Promise.all([...loaded.values()].map(async view => {
-        const key = keyFor(view.channel, start, end, bins), previousEdges = this.views.get(key)?.edges ?? null;
-        let edges: bigint[] | null = previousEdges;
+      await Promise.all([...loaded.values()].map(async ({ view, availableEnd }) => {
+        const key = keyFor(view.channel, start, end, bins);
+        let edges: bigint[] | null = null;
         if (includeEdges && edges === null) {
           const edgeResponse = await this.requestView({ type: 'edges', id: this.nextId++, channel: view.channel, startSample: start, endSample: end });
           if (edgeResponse.type !== 'edges-result') throw new Error('Invalid shared viewport edge response');
           edges = edgeResponse.edges;
         }
-        this.views.set(key, { view, edges });
+        this.views.set(key, { view, edges, availableEnd });
         while (this.views.size > 96) this.views.delete(this.views.keys().next().value!);
       }));
     })();
@@ -174,7 +185,7 @@ export class SharedWorkerSampleStore implements SampleStore {
   query(channel: number, startInput: SampleInput, endInput: SampleInput, bins: number): ColumnView {
     const start = BigInt(startInput), end = BigInt(endInput), key = keyFor(channel, start, end, bins), prepared = this.views.get(key);
     if (prepared) return prepared.view;
-    return { channel, startSample: start, endSample: end, bins, low: new Uint8Array(bins).fill(1), high: new Uint8Array(bins), edge: new Uint8Array(bins), packed: new Uint8Array(bins).fill(2) };
+    return { channel, startSample: start, endSample: end, bins, low: new Uint8Array(bins).fill(1), high: new Uint8Array(bins), edge: new Uint8Array(bins), packed: new Uint8Array(bins).fill(8) };
   }
   edges(channel: number, startInput: SampleInput, endInput: SampleInput): bigint[] {
     const start = BigInt(startInput), end = BigInt(endInput), prepared = this.views.get(keyFor(channel, start, end, Math.max(1, Math.floor(Number(end - start)))));
@@ -192,6 +203,24 @@ export class SharedWorkerSampleStore implements SampleStore {
     const response = await this.request({ type: 'pack', id: this.nextId++, startSample, endSample, channels });
     if (response.type !== 'pack-result') throw new Error('Invalid shared packed-data response');
     return response.data;
+  }
+  exportSR(workspace: WorkspaceSettings | undefined, triggerSample: bigint, acquisition: AcquisitionResult | undefined, signal?: AbortSignal): Promise<Blob> {
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.disposed) return Promise.reject(new DOMException('Shared capture store disposed', 'AbortError'));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      let settled = false, onAbort = (): void => {};
+      const cleanup = (): void => { signal?.removeEventListener('abort', onAbort); };
+      const finish = (action: () => void): void => { if (settled) return; settled = true; cleanup(); action(); };
+      onAbort = (): void => { this.worker.postMessage({ type: 'cancel-export', id } satisfies Request); finish(() => reject(new DOMException('Export aborted', 'AbortError'))); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(id, {
+        resolve: response => finish(() => response.type === 'export-sr-result' ? resolve(response.blob) : reject(new Error('Invalid SR export response'))),
+        reject: error => finish(() => reject(error)),
+      });
+      try { this.worker.postMessage({ type: 'export-sr', id, ...(workspace ? { workspace } : {}), triggerSample, ...(acquisition ? { acquisition } : {}) } satisfies Request); }
+      catch (error) { this.pending.delete(id); finish(() => reject(error instanceof Error ? error : new Error(String(error)))); }
+    });
   }
   connectPackedReader(port: MessagePort): void { this.worker.postMessage({ type: 'reader', port } satisfies Request, [port]); }
   async finishStorage(): Promise<Extract<Response, { type: 'done' }>> {
