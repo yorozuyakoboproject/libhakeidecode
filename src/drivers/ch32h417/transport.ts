@@ -101,7 +101,8 @@ export class H417Transport {
   }
   private async readLoop(): Promise<void> {
     const parser = new FrameParser(this.packet, frame => this.receive(frame));
-    const read = () => { this.counters.reads++; return this.device.transferIn(EP_IN, USB_READ_BYTES).then(value => ({ value }), error => ({ error })); };
+    const frameBytes = this.packet + BLOCK_BYTES, readBytes = USB_READ_BYTES - USB_READ_BYTES % frameBytes;
+    const read = () => { this.counters.reads++; return this.device.transferIn(EP_IN, readBytes).then(value => ({ value }), error => ({ error })); };
     const inflight = Array.from({ length: USB_READ_DEPTH }, read);
     while (!this.closed) {
       const result = await inflight.shift()!;
