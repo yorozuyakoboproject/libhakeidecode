@@ -2,6 +2,8 @@ import { defaultDeviceConfiguration, numericChoices, supportsNumericValue,
   type DeviceConfiguration, type NumericCapability, type SampleDevice } from '../libhakei/device.js';
 import { hasMessage, numberLabel, t, translateDOM, type MessageKey } from './i18n.js';
 
+const SELECTED_DEVICE_KEY = 'hakei.device';
+const AUTO_CONNECT_DEVICE_ID = 'ch32h417';
 const fields = [
   ['sampleRate', 'sample-rate', 'capture.rate'],
   ['sampleCount', 'sample-limit', 'capture.sampleLimit'],
@@ -21,6 +23,8 @@ export class DeviceControls {
       const option = document.createElement('option'); option.value = device.descriptor.id;
       this.caption(option, `device.name.${device.descriptor.id}`, device.descriptor.name); select.append(option);
     }
+    const remembered = this.rememberedDevice();
+    if (remembered) select.value = remembered;
     for (const device of devices) device.onConnectionChange = () => {
       if (device === this.device) { this.refreshConnection(); this.onConnectionChange?.(); }
     };
@@ -39,13 +43,19 @@ export class DeviceControls {
       void this.device.disconnect?.().finally(() => { this.connectionError = ''; this.refreshConnection(); this.onConnectionChange?.(); });
     });
     this.selectDevice();
-    select.addEventListener('change', () => { this.selectDevice(); this.onChange?.(); });
+    let previousDevice = select.value;
+    select.addEventListener('change', () => {
+      const currentDevice = select.value;
+      this.rememberDevice(); this.selectDevice(); this.onChange?.();
+      if (previousDevice !== AUTO_CONNECT_DEVICE_ID && currentDevice === AUTO_CONNECT_DEVICE_ID) void this.restoreAuthorizedDevices();
+      previousDevice = currentDevice;
+    });
     form.addEventListener('change', event => {
       if (event.target === select) return;
       this.rememberSampling();
       this.refreshCapabilities((event.target as HTMLElement).id); this.onChange?.();
     });
-    void this.restoreAuthorizedDevices();
+    if (remembered === AUTO_CONNECT_DEVICE_ID) void this.restoreAuthorizedDevices();
   }
   private control<T extends HTMLInputElement | HTMLSelectElement = HTMLInputElement>(id: string): T {
     const node = this.form.querySelector<T>(`#${id}`); if (!node) throw new Error(`Missing device control: ${id}`); return node;
@@ -64,6 +74,15 @@ export class DeviceControls {
   }
   private caption(node: HTMLElement, key: string, fallback: string): void {
     if (hasMessage(key)) { node.dataset.i18n = key; node.textContent = t(key); } else node.textContent = fallback;
+  }
+  private rememberedDevice(): string | undefined {
+    try {
+      const id = localStorage.getItem(SELECTED_DEVICE_KEY);
+      return this.devices.some(device => device.descriptor.id === id) ? id! : undefined;
+    } catch { return undefined; }
+  }
+  private rememberDevice(): void {
+    try { localStorage.setItem(SELECTED_DEVICE_KEY, this.control<HTMLSelectElement>('device-select').value); } catch {}
   }
   private selectDevice(): void {
     const configuration = defaultDeviceConfiguration(this.device.descriptor);
@@ -103,24 +122,14 @@ export class DeviceControls {
     status.textContent = this.connectionError || t(this.connecting ? 'device.connecting' : device.connected ? 'device.connected' : 'device.disconnected');
   }
   private async restoreAuthorizedDevices(): Promise<void> {
-    const candidates = this.devices.filter(device => !!device.restore);
-    if (!candidates.length) return;
+    const device = this.devices.find(item => item.descriptor.id === AUTO_CONNECT_DEVICE_ID && !!item.restore);
+    if (!device || device.connected) return;
     this.connecting = true; this.refreshConnection();
     try {
-      for (const device of candidates) {
-        try {
-          const restored = await device.restore!();
-          if (!restored || !device.connected) continue;
-          const select = this.control<HTMLSelectElement>('device-select');
-          select.value = device.descriptor.id;
-          this.selectDevice();
-          this.connectionError = '';
-          this.onConnectionChange?.();
-          break;
-        } catch (error) {
-          if (device === this.device) this.connectionError = error instanceof Error ? error.message : String(error);
-        }
-      }
+      const restored = await device.restore!();
+      if (restored && device.connected) this.connectionError = '';
+    } catch (error) {
+      if (device === this.device) this.connectionError = error instanceof Error ? error.message : String(error);
     } finally {
       this.connecting = false; this.refreshConnection(); this.onConnectionChange?.();
     }
