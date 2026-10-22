@@ -4,12 +4,11 @@ import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import { deviceCapture, importCapture, captureMemory, type Capture, type StageTiming } from './capture.js';
 import { MemoryBudgetError, type BudgetSnapshot } from './memory.js';
 import { DeviceControls } from './device-controls.js';
-import { sampleDevices } from '../drivers/index.js';
-import { serializeSR } from './sr.js';
+import { driverDefinitions } from '../drivers/index.js';
+import { DeviceClient } from './device-client.js';
 import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
 import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
-import { AnalogSampleStore } from './data/analogStore.js';
-import { AnnotationIndex } from './event-index.js';
+import type { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
 import type { DecoderId } from './protocol.js';
 import type { ProtocolSettings, WorkspaceSettings } from './workspace.js';
@@ -23,7 +22,6 @@ function downloadBlob(name: string, blob: Blob): void {
   const url = URL.createObjectURL(blob); const anchor = document.createElement('a');
   anchor.href = url; anchor.download = name; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-function download(name: string, data: BlobPart, type: string): void { downloadBlob(name, new Blob([data], { type })); }
 export interface ProtocolInstance extends ProtocolSettings {
   client: DecodeClient;
   annotations: AnnotationIndex;
@@ -42,20 +40,24 @@ function addStageTiming(stage: StageTiming, elapsed: number): void {
   stage.calls++; stage.totalMs += elapsed; stage.maxMs = Math.max(stage.maxMs, elapsed);
 }
 function declarations(decoder: DecoderId): readonly OptionDeclaration[] {
-  const options = decoderDefinition(decoder).decoder.descriptor.options;
+  const options = decoderDefinition(decoder).descriptor.options;
   if (!options) return [];
   return Array.isArray(options) ? options as readonly OptionDeclaration[]
     : Object.entries(options).map(([id, value]) => ({ id, default: value }));
 }
 function defaults(decoder: DecoderId): Record<string, OptionValue> { return Object.fromEntries(declarations(decoder).map(option => [option.id, option.default])); }
+function decoderName(decoder: DecoderId): string {
+  const key = 'decoder.' + decoder + '.name';
+  return hasMessage(key) ? t(key) : decoderDefinition(decoder).descriptor.name ?? decoder;
+}
 function binaryBytes(result: DecodeResult): number {
-  return Object.values(result.result.binaries).reduce((sum, data) => sum + data.byteLength, 0);
+  return Object.values(result.result.binarySizes).reduce((sum, bytes) => sum + bytes, 0);
 }
 export class AnalyzerApp {
   protocols: ProtocolInstance[] = [];
   selectedId: string | null = null;
   get selectedProtocol(): ProtocolInstance | null { return this.protocols.find(p => p.id === this.selectedId) ?? null; }
-  get decoder(): DecoderId { return this.selectedProtocol?.decoder ?? decoderDefinitions[0]!.decoder.descriptor.id; }
+  get decoder(): DecoderId { return this.selectedProtocol?.decoder ?? decoderDefinitions[0]!.descriptor.id; }
   get result(): DecodeResult | null { return this.selectedProtocol?.result ?? null; }
   capture: Capture | null = null;
   state: 'ready' | 'loading' | 'decoding' | 'done' | 'cancelled' | 'error' = 'ready';
@@ -63,7 +65,7 @@ export class AnalyzerApp {
   private version = 0;
   private decodeVersion = 0;
   private nextId = 0;
-  readonly deviceControls = new DeviceControls(element<HTMLFormElement>('device-form'), sampleDevices);
+  readonly deviceControls = new DeviceControls(element<HTMLFormElement>('device-form'), driverDefinitions.map(definition => new DeviceClient(definition)));
   private captureAbort: AbortController | null = null;
   private captureStop: AbortController | null = null;
   private acquisitionMemory: BudgetSnapshot | null = null;
@@ -84,7 +86,7 @@ export class AnalyzerApp {
     element<HTMLSelectElement>('decoder-type').addEventListener('change', () => this.changeDecoder(element<HTMLSelectElement>('decoder-type').value));
     element<HTMLInputElement>('protocol-name').addEventListener('input', () => {
       const protocol = this.selectedProtocol; if (!protocol) return;
-      protocol.name = element<HTMLInputElement>('protocol-name').value.trim().slice(0, 80) || protocol.decoder.toUpperCase(); this.renderProtocolList(); this.renderer.schedule();
+      protocol.name = element<HTMLInputElement>('protocol-name').value.trim().slice(0, 80) || decoderName(protocol.decoder); this.renderProtocolList(); this.renderer.schedule();
     });
     element<HTMLInputElement>('protocol-color').addEventListener('input', () => {
       const protocol = this.selectedProtocol; if (!protocol) return;
@@ -121,11 +123,7 @@ export class AnalyzerApp {
     });
     element('cursor-clear').addEventListener('click', () => { this.renderer.cursorA = null; this.renderer.cursorB = null; this.renderer.cursorMode = false; this.updateViewport(); this.renderer.schedule(); });
     element('export-csv').addEventListener('click', () => { void this.exportCSV(); });
-    element('export-binary').addEventListener('click', () => {
-      const key = element<HTMLSelectElement>('binary-output').value, data = this.result?.result.binaries[key];
-      if (!data) return;
-      download('hakei-' + this.decoder + '-' + key + '.bin', data.slice().buffer, 'application/octet-stream');
-    });
+    element('export-binary').addEventListener('click', () => { void this.exportBinary(); });
     element('save-capture').addEventListener('click', () => { void this.saveCapture(); });
     document.addEventListener('keydown', event => {
       if ((event.target as HTMLElement)?.matches('input,select,textarea')) return;
@@ -138,15 +136,18 @@ export class AnalyzerApp {
     for (const id of ['add-decoder-type', 'decoder-type']) {
       const select = element<HTMLSelectElement>(id); select.replaceChildren();
       for (const definition of decoderDefinitions) {
-        const option = document.createElement('option'); option.value = definition.decoder.descriptor.id;
-        option.textContent = definition.decoder.descriptor.name ?? definition.decoder.descriptor.id; select.append(option);
+        const option = document.createElement('option'); option.value = definition.descriptor.id;
+        const key = 'decoder.' + definition.descriptor.id + '.name';
+        if (hasMessage(key)) { option.dataset.i18n = key; option.textContent = t(key); }
+        else option.textContent = decoderName(definition.descriptor.id);
+        select.append(option);
       }
     }
   }
   addProtocol(decoder: DecoderId, decode = true): ProtocolInstance {
     if (this.protocols.length >= 100) { this.showMessage({ key: 'message.protocolLimit' }); return this.protocols[this.protocols.length - 1]; }
     const count = this.protocols.filter(p => p.decoder === decoder).length;
-    const protocol = this.createProtocol({ id: `protocol-${++this.nextId}-${crypto.randomUUID()}`, decoder, name: decoder.toUpperCase() + (count ? ` ${count + 1}` : ''), color: colors[this.nextId % colors.length], options: defaults(decoder), mapping: {} });
+    const protocol = this.createProtocol({ id: `protocol-${++this.nextId}-${crypto.randomUUID()}`, decoder, name: decoderName(decoder) + (count ? ` ${count + 1}` : ''), color: colors[this.nextId % colors.length], options: defaults(decoder), mapping: {} });
     this.commitForm(); this.protocols.push(protocol); this.syncTraces(); this.selectProtocol(protocol.id, false);
     if (decode) { if (this.captureAbort) this.scheduleLiveDecode(); else void this.runProtocols([protocol]); }
     return protocol;
@@ -180,7 +181,7 @@ export class AnalyzerApp {
       const button = document.createElement('button'); button.type = 'button'; button.className = 'protocol-item' + (protocol.id === this.selectedId ? ' selected' : ''); button.dataset.protocolId = protocol.id; button.setAttribute('aria-pressed', String(protocol.id === this.selectedId));
       const dot = document.createElement('i'); dot.style.backgroundColor = protocol.color;
       const name = document.createElement('span'); name.textContent = protocol.name; name.title = protocol.name;
-      const kind = document.createElement('small'); kind.textContent = protocol.decoder.toUpperCase(); button.append(dot, name, kind); button.addEventListener('click', () => this.selectProtocol(protocol.id)); list.append(button);
+      const kind = document.createElement('small'); kind.dataset.i18n = 'decoder.' + protocol.decoder + '.name'; kind.textContent = decoderName(protocol.decoder); button.append(dot, name, kind); button.addEventListener('click', () => this.selectProtocol(protocol.id)); list.append(button);
     }
   }
   private createOptions(): void {
@@ -189,10 +190,10 @@ export class AnalyzerApp {
     let advanced = 0;
     for (const option of declarations(protocol.decoder)) {
       const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span');
-      if (hasMessage('option.' + option.id)) caption.dataset.i18n = 'option.' + option.id;
+      if (hasMessage('decoder.' + protocol.decoder + '.option.' + option.id)) caption.dataset.i18n = 'decoder.' + protocol.decoder + '.option.' + option.id;
       caption.textContent = option.desc ?? option.id; label.append(caption);
       let input: HTMLInputElement | HTMLSelectElement;
-      if (option.values) { input = document.createElement('select'); for (const value of option.values) { const item = document.createElement('option'); item.value = String(value); item.textContent = String(value); if (hasMessage('value.' + value)) item.dataset.i18n = 'value.' + value; input.append(item); } }
+      if (option.values) { input = document.createElement('select'); for (const value of option.values) { const item = document.createElement('option'); item.value = String(value); item.textContent = String(value); if (hasMessage('decoder.' + protocol.decoder + '.value.' + value)) item.dataset.i18n = 'decoder.' + protocol.decoder + '.value.' + value; input.append(item); } }
       else {
         input = document.createElement('input'); input.type = typeof option.default === 'number' ? 'number' : 'text';
         input.step = option.step === 'any' ? 'any' : String(option.step ?? 1);
@@ -201,7 +202,7 @@ export class AnalyzerApp {
         input.required = !!option.required;
       }
       input.id = 'option-' + option.id; input.value = String(protocol.options[option.id] ?? option.default);
-      if (hasMessage('option.' + option.id)) input.dataset.i18nAttrs = 'aria-label:option.' + option.id;
+      if (hasMessage('decoder.' + protocol.decoder + '.option.' + option.id)) input.dataset.i18nAttrs = 'aria-label:decoder.' + protocol.decoder + '.option.' + option.id;
       label.append(input);
       if (primary.has(option.id)) element('decoder-options').append(label);
       else { element('advanced-options').append(label); advanced++; }
@@ -246,7 +247,7 @@ export class AnalyzerApp {
     this.populateMapping();
   }
   changeDecoder(decoder: DecoderId): void {
-    const protocol = this.selectedProtocol; if (!protocol || !decoderDefinitions.some(definition => definition.decoder.descriptor.id === decoder) || decoder === protocol.decoder) return;
+    const protocol = this.selectedProtocol; if (!protocol || !decoderDefinitions.some(definition => definition.descriptor.id === decoder) || decoder === protocol.decoder) return;
     this.commitForm(); if (this.captureAbort) this.cancelDecodeOnly(); else this.cancelDecodes(protocol); protocol.savedOptions[protocol.decoder] = { ...protocol.options }; protocol.decoder = decoder; protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
     const previous = protocol.mapping, next: Record<string, number> = {}, inputs = decoderDefinition(decoder).ui.inputs;
     for (const input of inputs) if (previous[input.key] !== undefined) next[input.key] = previous[input.key]!;
@@ -259,7 +260,7 @@ export class AnalyzerApp {
     if (definition.ui.descriptionKey && hasMessage(definition.ui.descriptionKey)) description.dataset.i18n = definition.ui.descriptionKey;
     else delete description.dataset.i18n;
     description.textContent = definition.ui.descriptionKey && hasMessage(definition.ui.descriptionKey)
-      ? t(definition.ui.descriptionKey) : definition.ui.description ?? definition.decoder.descriptor.desc ?? '';
+      ? t(definition.ui.descriptionKey) : definition.ui.description ?? definition.descriptor.desc ?? '';
     element('decoder-display-options').hidden = !definition.ui.decimals;
     const binary = element<HTMLSelectElement>('binary-output'); binary.replaceChildren();
     for (const output of definition.ui.binaryOutputs ?? []) {
@@ -274,7 +275,7 @@ export class AnalyzerApp {
     if (!protocol) return {};
     return Object.fromEntries(declarations(protocol.decoder).map(option => {
       const value = protocol.options[option.id] ?? option.default;
-      if (typeof option.default === 'number' && (!String(value).trim() || !Number.isFinite(Number(value)))) throw new UIError('error.option', { option: { key: ('option.' + option.id) as MessageKey } });
+      if (typeof option.default === 'number' && (!String(value).trim() || !Number.isFinite(Number(value)))) throw new UIError('error.option', { option: { key: ('decoder.' + protocol.decoder + '.option.' + option.id) as MessageKey } });
       return [option.id, typeof option.default === 'number' ? Number(value) : typeof option.default === 'boolean' ? String(value) === 'true' : value];
     }));
   }
@@ -287,6 +288,7 @@ export class AnalyzerApp {
   }
   async startCapture(): Promise<void> {
     if (this.captureAbort) { this.stopCapture(); return; }
+    if (!this.deviceControls.ready) return;
     if (!element<HTMLFormElement>('device-form').reportValidity()) return;
     this.commitForm(); this.cancelTask(false);
     const previous = this.capture;
@@ -335,7 +337,7 @@ export class AnalyzerApp {
       });
       if (token !== this.version) { this.releaseCapture(capture); return; }
       this.captureAbort = null; this.captureStop = null; this.acquisitionMemory = null;
-      if (hasMessage(`device.name.${device.descriptor.id}`)) capture.nameKey = `device.name.${device.descriptor.id}` as MessageKey;
+      if (hasMessage(`driver.${device.descriptor.id}.name`)) capture.nameKey = `driver.${device.descriptor.id}.name` as MessageKey;
       if (!this.capture) this.setCapture(capture, false, true, initialView(capture));
       else { this.capture = capture; this.flushLiveCaptureView(); this.updateCaptureLabels(); }
       this.setStatus('ready', 'status.ready'); this.updateMemoryUsage();
@@ -394,7 +396,6 @@ export class AnalyzerApp {
   private releaseCapture(capture: Capture | null): void {
     if (!capture) return;
     if ('dispose' in capture.store && typeof capture.store.dispose === 'function') capture.store.dispose();
-    for (const channel of capture.analogChannels ?? []) if (channel.store instanceof AnalogSampleStore) channel.store.dispose();
   }
   private clearCaptureView(): void {
     this.capture = null; this.renderer.clearCapture();
@@ -578,12 +579,20 @@ export class AnalyzerApp {
     const button = element<HTMLButtonElement>('save-capture'), capture = this.capture, workspace = this.workspaceSettings(), abort = new AbortController(); this.saveAbort = abort; button.disabled = true; this.renderStatus();
     try {
       const exporter = capture.store as unknown as { exportSR?: (workspace: WorkspaceSettings | undefined, triggerSample: bigint, acquisition: Capture['acquisition'], signal?: AbortSignal) => Promise<Blob> };
-      if (!exporter.exportSR && typeof window !== 'undefined') throw new UIError('error.worker');
-      const blob = exporter.exportSR ? await exporter.exportSR(workspace, capture.triggerSample, capture.acquisition, abort.signal) : await serializeSR(capture, workspace, undefined, abort.signal);
-      abort.signal.throwIfAborted(); download('capture.sr', blob, 'application/zip');
+      if (!exporter.exportSR) throw new UIError('error.worker');
+      const blob = await exporter.exportSR(workspace, capture.triggerSample, capture.acquisition, abort.signal);
+      abort.signal.throwIfAborted(); downloadBlob('capture.sr', blob);
     }
     catch (error) { if (!abort.signal.aborted) this.showMessage(error instanceof UIError ? error : errorLabel(error), true); }
     finally { if (this.saveAbort === abort) this.saveAbort = null; button.disabled = false; this.renderStatus(); }
+  }
+  private async exportBinary(): Promise<void> {
+    const protocol = this.selectedProtocol, key = element<HTMLSelectElement>('binary-output').value;
+    if (!protocol?.result || protocol.result.result.binarySizes[key] === undefined) return;
+    try {
+      const blob = await protocol.client.readBinary(key);
+      if (blob) downloadBlob('hakei-' + protocol.decoder + '-' + key + '.bin', blob);
+    } catch (error) { this.showMessage(error instanceof UIError ? error : errorLabel(error), true); }
   }
   private setStatus(state: AnalyzerApp['state'], key: MessageKey, params: MessageParams = {}): void { this.state = state; this.statusMessage = { key, params }; this.renderStatus(); }
   private renderStatus(): void {
@@ -591,7 +600,7 @@ export class AnalyzerApp {
     const run = element<HTMLButtonElement>('run-capture');
     const runKey = this.captureAbort ? this.captureStop?.signal.aborted ? 'device.stopping' : 'device.stop' : 'device.run';
     run.dataset.i18n = runKey; run.textContent = t(runKey); run.formNoValidate = !!this.captureAbort;
-    run.disabled = this.captureAbort ? !!this.captureStop?.signal.aborted : this.state === 'loading' || this.deviceControls.device.connected === false;
+    run.disabled = this.captureAbort ? !!this.captureStop?.signal.aborted : this.state === 'loading' || !this.deviceControls.ready;
     this.deviceControls.setBusy(!!this.captureAbort);
     element<HTMLButtonElement>('save-capture').disabled = !this.capture || !!this.saveAbort;
     element<HTMLButtonElement>('cancel').disabled = this.state !== 'decoding' && this.state !== 'loading' && !this.saveAbort;
@@ -603,7 +612,7 @@ export class AnalyzerApp {
       ? definition.ui.summary(this.result.result, protocol?.decimalPlaces ?? 3, (key, fallback) => hasMessage(key) ? t(key) : fallback) : '';
     const key = element<HTMLSelectElement>('binary-output').value;
     element<HTMLButtonElement>('export-csv').disabled = !(protocol?.frameCount ?? 0);
-    element<HTMLButtonElement>('export-binary').disabled = !this.result?.result.binaries[key];
+    element<HTMLButtonElement>('export-binary').disabled = this.result?.result.binarySizes[key] === undefined;
   }
   showMessage(message: string | UIError | { key: MessageKey; params?: MessageParams }, error = false): void { this.displayedMessage = message; this.messageIsError = error; this.renderMessage(); }
   private renderMessage(): void { const value = this.displayedMessage, node = element('message'); const message = typeof value === 'string' ? value : value instanceof UIError ? errorLabel(value) : t(value.key, value.params); node.textContent = message; node.hidden = !message; node.classList.toggle('error', this.messageIsError); }
@@ -618,7 +627,7 @@ export class AnalyzerApp {
   }
   private retainedDataBytes(): number {
     return (this.capture ? captureMemory(this.capture).totalBytes : 0) + this.protocols.reduce((sum, protocol) => sum + protocol.resultBytes + protocol.annotations.reservedBytes
-      + (protocol.result ? Object.values(protocol.result.result.binaries).reduce((bytes, data) => bytes + data.byteLength, 0) : 0), 0);
+      + (protocol.result ? binaryBytes(protocol.result) : 0), 0);
   }
   private updateMemoryUsage(): void {
     const shared = this.capture?.sharedSource;

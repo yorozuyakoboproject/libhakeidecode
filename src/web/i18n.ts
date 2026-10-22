@@ -1,12 +1,17 @@
+import { decoderDefinitions } from '../decoders/index.js';
+import { driverDefinitions } from '../drivers/index.js';
+import { ComponentError, type ComponentLocale } from '../components.js';
+import type { DecoderMessageKey } from '../generated/decoders.js';
+import type { DriverMessageKey } from '../generated/drivers.js';
+
 export const en = {
-  "device.name.ch32h417": "CH32H417 Logic Analyzer",
   "device.connect": "Connect USB",
   "device.disconnect": "Disconnect",
   "device.connecting": "Connecting…",
-  "device.connected": "Connected · finite acquisition · D0–D7",
+  "device.configuring": "Updating device settings…",
+  "device.connected": "Connected",
   "device.disconnected": "Connect the device before capture",
   "device.select": "Capture device",
-  "device.name.demo": "Demo device",
   "device.settings": "Device settings",
   "device.run": "▶ Run capture",
   "device.stop": "■ Stop capture",
@@ -27,12 +32,6 @@ export const en = {
   "capture.reason.complete": "complete",
   "device.logicChannels": "Logic channels",
   "device.analogChannels": "Analog channels",
-  "device.option.logicPattern": "Logic pattern",
-  "device.option.analogPattern": "Analog pattern",
-  "device.option.frequencyHz": "Signal frequency (Hz)",
-  "device.option.amplitude": "Amplitude",
-  "device.option.offset": "Offset",
-  "device.option.seed": "Seed",
   "capture.empty": "No capture yet",
   "capture.sampleLimit": "Sample count",
   "capture.importSettings": "Binary import settings",
@@ -53,15 +52,6 @@ export const en = {
   "error.srLimit": ".sr sessions are limited to 256 MiB of combined digital and analog sample data",
   "message.protocolLimit": "At most 100 protocol instances can be added",
   "decoder.protocol": "Protocol",
-  "pwm.description": "Pulse-width modulation",
-  "pwm.channel": "Input channel",
-  "pwm.duty": "Duty cycle",
-  "pwm.period": "Period",
-  "pwm.frequency": "Frequency",
-  "pwm.summary": "Mean duty: {duty}%",
-  "option.polarity": "Active polarity",
-  "value.active-high": "High active",
-  "value.active-low": "Low active",
 
   "app.title": "Hakei · Logic Analyzer",
   "nav.workbench": "Workbench",
@@ -76,16 +66,6 @@ export const en = {
   "capture.rateAria": "Binary sample rate",
   "capture.channels": "Binary channels",
   "capture.open": "↥ Open file",
-  "capture.pattern.sine": "Sine",
-  "capture.pattern.square": "Square",
-  "capture.pattern.triangle": "Triangle",
-  "capture.pattern.sawtooth": "Sawtooth",
-  "capture.pattern.random": "Random",
-  "capture.pattern.constant": "Constant",
-  "capture.pattern.clock": "Clock",
-  "capture.pattern.incremental": "Incremental",
-  "capture.pattern.walking-one": "Walking one",
-  "capture.pattern.walking-zero": "Walking zero",
   "capture.hint": ".sr uses its own sample rate and channel names; BIN uses the binary import settings.",
   "capture.save": "↓ Save .sr",
   "channels.section": "Digital channels",
@@ -93,10 +73,7 @@ export const en = {
   "channels.showAnalog": "Show A{channel}",
   "channels.none": "Not connected",
   "decoder.section": "Protocol decoding",
-  "decoder.description": "Asynchronous serial bus",
   "decoder.supported": "Supported",
-  "decoder.rx": "RX channel",
-  "decoder.tx": "TX channel",
   "decoder.advanced": "Advanced options",
   "footer.summary": "Digital capture · Protocol decode · Offline files",
   "capture.workspace": "CAPTURE WORKSPACE",
@@ -126,34 +103,6 @@ export const en = {
   "action.cancel": "Cancel task",
   "message.decodeFirst": "Decode before exporting binary data",
   "message.truncated": "The result limit was reached. Displayed results or binary exports are truncated; the original capture is still available.",
-  "option.baudrate": "Baud rate",
-  "option.data_bits": "Data bits",
-  "option.parity": "Parity",
-  "option.stop_bits": "Stop bits",
-  "option.bit_order": "Bit order",
-  "option.format": "Display format",
-  "option.invert_rx": "Invert RX",
-  "option.invert_tx": "Invert TX",
-  "option.sample_point": "Sample point (%)",
-  "option.rx_packet_delim": "RX delimiter (decimal)",
-  "option.tx_packet_delim": "TX delimiter (decimal)",
-  "option.rx_packet_len": "RX packet length",
-  "option.tx_packet_len": "TX packet length",
-  "value.none": "None",
-  "value.odd": "Odd",
-  "value.even": "Even",
-  "value.zero": "Always 0",
-  "value.one": "Always 1",
-  "value.ignore": "Ignore",
-  "value.lsb-first": "LSB first",
-  "value.msb-first": "MSB first",
-  "value.yes": "Yes",
-  "value.no": "No",
-  "value.ascii": "ASCII",
-  "value.dec": "Decimal",
-  "value.hex": "Hexadecimal",
-  "value.oct": "Octal",
-  "value.bin": "Binary",
   "error.option": "Invalid {option}",
   "error.rate": "Sample rate must be a positive integer in Hz",
   "error.width": "The UI supports 4, 8, 16 or 32 digital channels",
@@ -175,25 +124,19 @@ export const en = {
   "error.worker": "Could not start the decoder Worker",
   "error.cancelled": "Decoding cancelled",
   "error.decoder": "Decoder error: {detail}",
-  "annotation.frameError": "Frame error",
-  "annotation.parityError": "Parity error",
-  "annotation.invalidStart": "Invalid start bit",
-  "annotation.invalidStop": "Invalid stop bit",
-  "annotation.warning": "Warning",
 } as const;
-export type MessageKey = keyof typeof en;
-export type Locale = 'zh-CN' | 'en';
+export type MessageKey = keyof typeof en | DecoderMessageKey | DriverMessageKey;
+export type Locale = ComponentLocale;
 export type MessageValue = string | number | { key: MessageKey; params?: MessageParams };
 export type MessageParams = Record<string, MessageValue>;
-export const zh: Record<MessageKey, string> = {
-  "device.name.ch32h417": "CH32H417 逻辑分析仪",
+export const zh: Record<keyof typeof en, string> = {
   "device.connect": "连接 USB 设备",
   "device.disconnect": "断开连接",
   "device.connecting": "正在连接…",
-  "device.connected": "已连接 · 有限点数采集 · D0–D7",
+  "device.configuring": "正在更新设备配置…",
+  "device.connected": "已连接",
   "device.disconnected": "请先连接设备再开始采集",
   "device.select": "采集设备",
-  "device.name.demo": "Demo 设备",
   "device.settings": "设备设置",
   "device.run": "▶ 开始采集",
   "device.stop": "■ 结束采集",
@@ -214,12 +157,6 @@ export const zh: Record<MessageKey, string> = {
   "capture.reason.complete": "完整采集",
   "device.logicChannels": "数字通道数",
   "device.analogChannels": "模拟通道数",
-  "device.option.logicPattern": "数字信号模式",
-  "device.option.analogPattern": "模拟信号模式",
-  "device.option.frequencyHz": "信号频率（Hz）",
-  "device.option.amplitude": "幅度",
-  "device.option.offset": "偏置",
-  "device.option.seed": "随机种子",
   "capture.empty": "尚未采集",
   "capture.sampleLimit": "采样点数",
   "capture.importSettings": "二进制导入设置",
@@ -240,15 +177,6 @@ export const zh: Record<MessageKey, string> = {
   "error.srLimit": ".sr 会话的数字与模拟采样数据合计上限为 256 MiB",
   "message.protocolLimit": "最多可添加 100 个协议实例",
   "decoder.protocol": "协议",
-  "pwm.description": "脉冲宽度调制",
-  "pwm.channel": "输入通道",
-  "pwm.duty": "占空比",
-  "pwm.period": "周期",
-  "pwm.frequency": "频率",
-  "pwm.summary": "平均占空比：{duty}%",
-  "option.polarity": "有效极性",
-  "value.active-high": "高电平有效",
-  "value.active-low": "低电平有效",
 
   "app.title": "Hakei · 逻辑分析仪",
   "nav.workbench": "工作台",
@@ -263,16 +191,6 @@ export const zh: Record<MessageKey, string> = {
   "capture.rateAria": "二进制采样率",
   "capture.channels": "二进制通道数",
   "capture.open": "↥ 打开文件",
-  "capture.pattern.sine": "正弦",
-  "capture.pattern.square": "方波",
-  "capture.pattern.triangle": "三角波",
-  "capture.pattern.sawtooth": "锯齿波",
-  "capture.pattern.random": "随机",
-  "capture.pattern.constant": "恒定",
-  "capture.pattern.clock": "时钟",
-  "capture.pattern.incremental": "递增",
-  "capture.pattern.walking-one": "单一热码",
-  "capture.pattern.walking-zero": "单零热码",
   "capture.hint": ".sr 自动读取采样率和通道名称；BIN 使用二进制导入设置。",
   "capture.save": "↓ 保存 .sr",
   "channels.section": "数字通道",
@@ -280,10 +198,7 @@ export const zh: Record<MessageKey, string> = {
   "channels.showAnalog": "显示 A{channel}",
   "channels.none": "未连接",
   "decoder.section": "协议解码",
-  "decoder.description": "异步串行总线",
   "decoder.supported": "已支持",
-  "decoder.rx": "RX 通道",
-  "decoder.tx": "TX 通道",
   "decoder.advanced": "高级选项",
   "footer.summary": "数字采样 · 协议解码 · 离线文件",
   "capture.workspace": "采样工作台",
@@ -313,34 +228,6 @@ export const zh: Record<MessageKey, string> = {
   "action.cancel": "取消任务",
   "message.decodeFirst": "解码完成后可导出二进制数据",
   "message.truncated": "结果达到缓存上限，显示或二进制导出已截断；原始采样仍可查看。",
-  "option.baudrate": "波特率",
-  "option.data_bits": "数据位",
-  "option.parity": "校验",
-  "option.stop_bits": "停止位",
-  "option.bit_order": "位序",
-  "option.format": "显示格式",
-  "option.invert_rx": "反相 RX",
-  "option.invert_tx": "反相 TX",
-  "option.sample_point": "采样点 (%)",
-  "option.rx_packet_delim": "RX 分包字符（十进制）",
-  "option.tx_packet_delim": "TX 分包字符（十进制）",
-  "option.rx_packet_len": "RX 分包长度",
-  "option.tx_packet_len": "TX 分包长度",
-  "value.none": "无",
-  "value.odd": "奇校验",
-  "value.even": "偶校验",
-  "value.zero": "恒为 0",
-  "value.one": "恒为 1",
-  "value.ignore": "忽略",
-  "value.lsb-first": "低位优先",
-  "value.msb-first": "高位优先",
-  "value.yes": "是",
-  "value.no": "否",
-  "value.ascii": "ASCII",
-  "value.dec": "十进制",
-  "value.hex": "十六进制",
-  "value.oct": "八进制",
-  "value.bin": "二进制",
   "error.option": "无效的 {option}",
   "error.rate": "采样率必须是正整数 Hz",
   "error.width": "前端支持 4、8、16 或 32 个数字通道",
@@ -362,13 +249,12 @@ export const zh: Record<MessageKey, string> = {
   "error.worker": "解码 Worker 启动失败",
   "error.cancelled": "解码已取消",
   "error.decoder": "解码器错误：{detail}",
-  "annotation.frameError": "帧错误",
-  "annotation.parityError": "校验错误",
-  "annotation.invalidStart": "起始位无效",
-  "annotation.invalidStop": "停止位无效",
-  "annotation.warning": "警告",
 };
-export const messages: Record<Locale, Record<MessageKey, string>> = { en, 'zh-CN': zh };
+export const messages = { en: { ...en }, 'zh-CN': { ...zh } } as Record<Locale, Record<MessageKey, string>>;
+for (const component of [...decoderDefinitions, ...driverDefinitions]) {
+  Object.assign(messages.en, component.messages.en);
+  Object.assign(messages['zh-CN'], component.messages.en, component.messages['zh-CN']);
+}
 let locale: Locale = 'zh-CN';
 export function getLocale(): Locale { return locale; }
 export function setLocale(value: Locale): void { locale = value; }
@@ -380,9 +266,9 @@ export function resolveLocale(saved: string | null, languages: readonly string[]
   }
   return 'en';
 }
-export function hasMessage(key: string): key is MessageKey { return Object.hasOwn(en, key); }
+export function hasMessage(key: string): key is MessageKey { return Object.hasOwn(messages.en, key); }
 export function t(key: MessageKey, params: MessageParams = {}): string {
-  return messages[locale][key].replace(/\{(\w+)\}/g, (match, name: string) => {
+  return (messages[locale][key] ?? messages.en[key] ?? key).replace(/\{(\w+)\}/g, (match, name: string) => {
     if (!Object.hasOwn(params, name)) return match;
     const value = params[name]; return typeof value === 'object' ? t(value.key, value.params) : String(value);
   });
@@ -393,6 +279,7 @@ export class UIError extends Error {
 }
 export function errorLabel(error: unknown): string {
   if (error instanceof UIError) return t(error.key, error.params);
+  if (error instanceof ComponentError && hasMessage(error.key)) return t(error.key, error.params);
   return t('error.decoder', { detail: error instanceof Error ? error.message : String(error) });
 }
 export function translateDOM(root: ParentNode = document): void {

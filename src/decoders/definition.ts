@@ -1,4 +1,5 @@
-import type { DecoderClass, OptionValue, SignalWindow } from '../libhakeidecode/index.js';
+import type { DecoderDescriptor, OptionValue, SignalWindow } from '../libhakeidecode/types.js';
+import type { ComponentMessages } from '../components.js';
 
 export interface Annotation { ss: bigint; es: bigint; classIndex: number; texts: readonly string[]; value?: number }
 export interface DecodeFrame { readonly ss: bigint; readonly es: bigint }
@@ -10,6 +11,10 @@ export interface DecodeRuntimeResult {
   readonly annotations: number;
   readonly truncated: boolean;
   readonly binaryTruncated: boolean;
+}
+export interface DecodeResultSummary extends Omit<DecodeRuntimeResult, 'binaries'> {
+  readonly binarySizes: Readonly<Record<string, number>>;
+  readonly previews: Readonly<Record<string, Uint8Array>>;
 }
 export interface DecodeRuntimeHost {
   postBatch(batch: DecodeBatch): Promise<void>;
@@ -47,15 +52,19 @@ export interface DecoderUiDefinition {
   readonly decimals?: boolean;
   readonly edgeInput?: string;
   readonly binaryOutputs?: readonly DecoderBinaryDefinition[];
-  summary?(result: DecodeRuntimeResult, decimals: number, text: (key: string, fallback: string) => string): string;
-  readonly csvHeader: string;
-  csvRow(frame: DecodeFrame, sampleRate: number, triggerSample: bigint): string;
-  compareFrames?(a: DecodeFrame, b: DecodeFrame): number;
+  summary?(result: DecodeResultSummary, decimals: number, text: (key: string, fallback: string) => string): string;
   annotationTexts?(annotation: Annotation, context: AnnotationTextContext): readonly string[];
   isErrorClass?(classIndex: number): boolean;
 }
 export interface DecoderDefinition {
-  readonly decoder: DecoderClass;
+  readonly descriptor: DecoderDescriptor;
+  readonly messages: ComponentMessages;
   readonly ui: DecoderUiDefinition;
+}
+export interface DecoderWorkerDefinition {
+  readonly id: string;
   createRuntime(context: DecodeRuntimeContext): DecodeRuntime;
+  readonly csvHeader: string;
+  csvRow(frame: DecodeFrame, sampleRate: number, triggerSample: bigint): string;
+  compareFrames?(left: DecodeFrame, right: DecodeFrame): number;
 }

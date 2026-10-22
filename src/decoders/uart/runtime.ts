@@ -1,5 +1,6 @@
-import { OUTPUT_BINARY, OUTPUT_PROTOCOL } from '../../libhakeidecode/index.js';
+import { generatorPlugin, OUTPUT_BINARY, OUTPUT_PROTOCOL } from '../../libhakeidecode/index.js';
 import type { OutputEvent } from '../../libhakeidecode/index.js';
+import { UARTDecoder } from './index.js';
 import { EventRuntime } from '../event-runtime.js';
 import type { EventRuntimeApi } from '../event-runtime.js';
 import type { DecodeFrame, DecodeRuntime, DecodeRuntimeContext } from '../definition.js';
@@ -16,7 +17,7 @@ export function createUARTRuntime(context: DecodeRuntimeContext): DecodeRuntime 
       pending[direction] = null;
     }
   };
-  return new EventRuntime<UARTFrame>('uart', context, {
+  return new EventRuntime<UARTFrame>(generatorPlugin(UARTDecoder), context, {
     event(event: OutputEvent, runtime): void {
       if (event.type === OUTPUT_PROTOCOL) {
         const packet = event.data as UARTProtocolPacket;

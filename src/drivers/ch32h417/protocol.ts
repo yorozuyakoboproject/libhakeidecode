@@ -1,10 +1,11 @@
-export const USB_VID = 0x0721, USB_PID = 0x2333, APP_PROTOCOL = 15;
+import { SS_RATES } from './descriptor.js';
+export { USB_VID, USB_PID, SS_RATES } from './descriptor.js';
+export const APP_PROTOCOL = 15;
 export const INTERFACE = 1, EP_OUT = 5, EP_IN = 6;
 export const MAGIC = 0x414c3448, VERSION = 1, HEADER_BYTES = 32, BLOCK_BYTES = 16_384;
 export const MAX_FRAME_BYTES = BLOCK_BYTES + 1024;
 export const Command = { caps: 1, config: 2, start: 3, stop: 4, status: 5, keepalive: 6 } as const;
 export const DATA = 0x40, END = 0x41, RESPONSE = 0x80;
-export const SS_RATES = [6_250_000, 8_000_000, 10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 80_000_000, 100_000_000, 200_000_000] as const;
 export interface Frame { type: number; requestId: number; session: number; sequence: number; firstSample: bigint; payload: Uint8Array; }
 export interface Capabilities { packetBytes: 512 | 1024; blockBytes: number; heartbeatMs: number; channels: number; rates: number[]; }
 export interface DeviceStatus { error: number; state: number; channels: number; speed: number; sampleRate: number; samples: bigint; }

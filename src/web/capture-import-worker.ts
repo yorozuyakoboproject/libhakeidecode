@@ -1,4 +1,5 @@
-import { importCaptureLocal, type Capture, type CaptureImportPipelineOptions } from './capture.js';
+import { importCaptureLocal } from './capture-import.js';
+import type { Capture, CaptureImportPipelineOptions } from './capture.js';
 import { UIError, type MessageKey, type MessageParams } from './i18n.js';
 import { WorkerStoreServer } from './worker-store-server.js';
 import type { StoreMetadata } from './worker-store.js';

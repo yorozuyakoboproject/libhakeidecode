@@ -1,5 +1,6 @@
 .cache/
 dist/
+src/generated/
 node_modules/
 *.tgz
 __pycache__/

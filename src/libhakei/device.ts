@@ -31,15 +31,20 @@ export interface DeviceConfiguration {
   readonly options: Readonly<Record<string, string | number>>;
 }
 
-export interface AcquisitionDescription {
-  readonly layout: 'channel-arrays' | 'packed-logic';
+export interface DeviceConfigurationState {
+  readonly configuration: DeviceConfiguration;
+  readonly capabilities: DeviceCapabilities;
+}
+interface AcquisitionBuffers {
   readonly logicSampleBytes: 1 | 2 | 4 | 8;
   readonly analogSampleBytes: 4 | 8;
   readonly chunkSamples: number;
   readonly workingBytes?: number;
-  readonly managedBuffers?: boolean;
-  readonly worker?: { readonly moduleUrl: string; readonly exportName: string; readonly required?: boolean; readonly initialization?: unknown };
 }
+export interface ChannelArrayAcquisitionDescription extends AcquisitionBuffers { readonly layout: 'channel-arrays' }
+export interface PackedLogicAcquisitionDescription extends AcquisitionBuffers { readonly layout: 'packed-logic'; readonly logicSampleBytes: 1 }
+export type AcquisitionDescription = ChannelArrayAcquisitionDescription | PackedLogicAcquisitionDescription;
+export type DriverDiagnostics = Readonly<Record<string, number>>;
 
 export interface PackedLogicChunk {
   readonly format: 'packed-logic';
@@ -49,8 +54,6 @@ export interface PackedLogicChunk {
   readonly length: number;
   readonly encoding: 'raw8';
   readonly data: Uint8Array;
-  readonly h417Transport?: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number };
-  readonly h417Worker?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number };
 }
 export type AcquisitionChunk = import('./index.js').SampleChunkInput | PackedLogicChunk;
 export interface SampleSourceContext {
@@ -58,22 +61,34 @@ export interface SampleSourceContext {
   readonly chunkSamples?: number;
 
   readonly acquireBuffer?: () => Promise<ArrayBuffer>;
+  readonly reportDiagnostics?: (diagnostics: DriverDiagnostics) => void;
 }
-export interface SampleDevice {
+export interface ManagedSampleSourceContext extends SampleSourceContext { readonly acquireBuffer: () => Promise<ArrayBuffer> }
+interface DeviceBase {
   readonly descriptor: DeviceDescriptor;
 
   readonly connected?: boolean;
 
-  restore?(): Promise<boolean>;
-  connect?(): Promise<void>;
+  restore?(initialization?: unknown): Promise<boolean>;
+  connect?(initialization?: unknown): Promise<void>;
   disconnect?(): Promise<void>;
   onConnectionChange?: (() => void) | null;
 
+  readonly initialization?: unknown;
+
   getCapabilities(configuration: DeviceConfiguration): DeviceCapabilities;
-  getAcquisitionDescription?(configuration: DeviceConfiguration): AcquisitionDescription;
-  createSource(configuration: DeviceConfiguration, context?: SampleSourceContext): SampleSource;
-  createPackedSource?(configuration: DeviceConfiguration, context?: SampleSourceContext): AsyncIterable<PackedLogicChunk>;
 }
+export interface ChannelArrayDevice extends DeviceBase {
+  readonly layout: 'channel-arrays';
+  getAcquisitionDescription(configuration: DeviceConfiguration): ChannelArrayAcquisitionDescription;
+  createSource(configuration: DeviceConfiguration, context: ManagedSampleSourceContext): SampleSource;
+}
+export interface PackedLogicDevice extends DeviceBase {
+  readonly layout: 'packed-logic';
+  getAcquisitionDescription(configuration: DeviceConfiguration): PackedLogicAcquisitionDescription;
+  createPackedSource(configuration: DeviceConfiguration, context: ManagedSampleSourceContext): AsyncIterable<PackedLogicChunk>;
+}
+export type SampleDevice = ChannelArrayDevice | PackedLogicDevice;
 export function supportsNumericValue(capability: NumericCapability<number | bigint>, value: number | bigint): boolean {
   try {
     const n = sampleIndex(value);
@@ -104,6 +119,31 @@ export function defaultDeviceConfiguration(descriptor: DeviceDescriptor): Device
     logicChannels: caps.logicChannels.default, analogChannels: caps.analogChannels.default,
     options: Object.fromEntries(descriptor.options.map(option => [option.id, option.default])) };
 }
+function validDeviceOption(option: DeviceOption, value: unknown): boolean {
+  return option.kind === 'choice' ? typeof value === 'string' && option.values.includes(value)
+    : typeof value === 'number' && Number.isFinite(value)
+      && (option.min === undefined || value >= option.min) && (option.max === undefined || value <= option.max)
+      && (option.step === undefined || Math.abs((value - (option.min ?? 0)) / option.step - Math.round((value - (option.min ?? 0)) / option.step)) < 1e-8);
+}
+export function resolveDeviceConfiguration(device: SampleDevice, requested: DeviceConfiguration): DeviceConfigurationState {
+  let configuration = { ...requested, options: Object.fromEntries(device.descriptor.options.map(option =>
+    [option.id, validDeviceOption(option, requested.options[option.id]) ? requested.options[option.id]! : option.default])) };
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const capabilities = device.getCapabilities(configuration);
+    const adjusted = { ...configuration };
+    adjusted.sampleRate = supportsNumericValue(capabilities.sampleRate, configuration.sampleRate) ? configuration.sampleRate : capabilities.sampleRate.default;
+    adjusted.sampleCount = supportsNumericValue(capabilities.sampleCount, configuration.sampleCount) ? configuration.sampleCount : capabilities.sampleCount.default;
+    adjusted.logicChannels = supportsNumericValue(capabilities.logicChannels, configuration.logicChannels) ? configuration.logicChannels : capabilities.logicChannels.default;
+    adjusted.analogChannels = supportsNumericValue(capabilities.analogChannels, configuration.analogChannels) ? configuration.analogChannels : capabilities.analogChannels.default;
+    if (adjusted.sampleRate === configuration.sampleRate && adjusted.sampleCount === configuration.sampleCount
+      && adjusted.logicChannels === configuration.logicChannels && adjusted.analogChannels === configuration.analogChannels) {
+      validateDeviceConfiguration(device, adjusted);
+      return { configuration: adjusted, capabilities };
+    }
+    configuration = adjusted;
+  }
+  throw new Error('Device configuration dependencies do not converge');
+}
 export function validateDeviceConfiguration(device: SampleDevice, configuration: DeviceConfiguration): void {
   const caps = device.getCapabilities(configuration);
   for (const key of ['sampleRate', 'sampleCount', 'logicChannels', 'analogChannels'] as const) {
@@ -114,10 +154,6 @@ export function validateDeviceConfiguration(device: SampleDevice, configuration:
   }
   for (const option of device.descriptor.options) {
     const value = configuration.options[option.id];
-    const valid = option.kind === 'choice' ? typeof value === 'string' && option.values.includes(value)
-      : typeof value === 'number' && Number.isFinite(value)
-        && (option.min === undefined || value >= option.min) && (option.max === undefined || value <= option.max)
-        && (option.step === undefined || Math.abs((value - (option.min ?? 0)) / option.step - Math.round((value - (option.min ?? 0)) / option.step)) < 1e-8);
-    if (!valid) throw new RangeError(`Unsupported ${option.id}: ${value}`);
+    if (!validDeviceOption(option, value)) throw new RangeError(`Unsupported ${option.id}: ${value}`);
   }
 }

@@ -1,5 +1,6 @@
+import type { ComponentFailure } from '../components.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
-import type { Annotation, DecodeFrame, DecodeRuntimeResult } from '../decoders/definition.js';
+import type { Annotation, DecodeFrame, DecodeRuntimeResult, DecodeResultSummary } from '../decoders/definition.js';
 import type { GapSpan } from './data/types.js';
 
 export type DecoderId = string;
@@ -10,8 +11,8 @@ export interface DecodeStats {
   stages?: { sharedUnpackMs: number; decoderPushMs: number; runtimeBatchMs: number; outputPostMs: number; cooperativeYieldMs: number; cooperativeYieldCount: number };
 }
 export type DecodeMessage =
-  | { type: 'done'; decoder: DecoderId; stats: DecodeStats; result: DecodeRuntimeResult }
-  | { type: 'error'; message: string };
+  | { type: 'done'; decoder: DecoderId; stats: DecodeStats; result: DecodeResultSummary }
+  | ({ type: 'error' } & ComponentFailure);
 export interface DecodeProgressMessage { type: 'decode-progress'; progress: number; frames: number; annotations: number; samples: bigint; resultBytes: number }
 export interface DecodeQueryAnnotationsRequest { type: 'decode-query-annotations'; requestId: number; start: bigint; end: bigint; maxResults: number }
 export interface DecodeQueryAnnotationsResult { type: 'decode-query-annotations-result'; requestId: number; annotations: Annotation[] }
@@ -19,9 +20,11 @@ export interface DecodeReadFramesRequest { type: 'decode-read-frames'; requestId
 export interface DecodeReadFramesResult { type: 'decode-read-frames-result'; requestId: number; frames: Frame[] }
 export interface DecodeReadCsvRequest { type: 'decode-read-csv'; requestId: number; offset: number; count: number; sampleRate: number; triggerSample: bigint; includeHeader: boolean }
 export interface DecodeReadCsvResult { type: 'decode-read-csv-result'; requestId: number; csv: string }
+export interface DecodeReadBinaryRequest { type: 'decode-read-binary'; requestId: number; key: string }
+export interface DecodeReadBinaryResult { type: 'decode-read-binary-result'; requestId: number; blob: Blob | null }
 
 export type PWMPosition = number | bigint;
-export type WorkerDecodeMessage = DecodeMessage | DecodeProgressMessage | DecodeQueryAnnotationsResult | DecodeReadFramesResult | DecodeReadCsvResult | { type: 'decode-ack' };
+export type WorkerDecodeMessage = DecodeMessage | DecodeProgressMessage | DecodeQueryAnnotationsResult | DecodeReadFramesResult | DecodeReadCsvResult | DecodeReadBinaryResult | { type: 'decode-ack' };
 export interface DecodeStartRequest {
   type: 'decode-start'; decoder: DecoderId; sampleRate: number; length: bigint; channels: string[]; gaps: GapSpan[];
   options: Record<string, OptionValue>; paged?: 'always' | 'auto' | 'never';
@@ -34,4 +37,4 @@ export interface DecodeGapRequest { type: 'decode-gap'; startSample: bigint; end
 export interface DecodeEdgePart { startSample: bigint; endSample: bigint; initial: 0 | 1; edges: bigint[] }
 export interface DecodeEdgeChunkRequest { type: 'decode-edge-chunk'; startSample: bigint; endSample: bigint; parts: DecodeEdgePart[] }
 export interface DecodeFinishRequest { type: 'decode-finish'; length?: bigint }
-export type DecodeStreamRequest = DecodeStartRequest | DecodeSharedStartRequest | DecodePackedReaderStartRequest | DecodeWorkerReaderStartRequest | DecodeChunkRequest | DecodeGapRequest | DecodeEdgeChunkRequest | DecodeFinishRequest | DecodeQueryAnnotationsRequest | DecodeReadFramesRequest | DecodeReadCsvRequest;
+export type DecodeStreamRequest = DecodeStartRequest | DecodeSharedStartRequest | DecodePackedReaderStartRequest | DecodeWorkerReaderStartRequest | DecodeChunkRequest | DecodeGapRequest | DecodeEdgeChunkRequest | DecodeFinishRequest | DecodeQueryAnnotationsRequest | DecodeReadFramesRequest | DecodeReadCsvRequest | DecodeReadBinaryRequest;

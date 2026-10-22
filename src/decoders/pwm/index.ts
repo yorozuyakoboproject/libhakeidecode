@@ -1,7 +1,8 @@
+import { descriptor } from './descriptor.js';
 import { sampleRatio } from '../../libhakei/sample-index.js';
 
-import { Decoder, OUTPUT_ANN, OUTPUT_BINARY, OUTPUT_META, OutputStreams, SRD_CONF_SAMPLERATE, registry } from '../../libhakeidecode/index.js';
-import type { DecoderContext, DecoderDescriptor, DecoderEngine, DecoderEngineContext, DecoderPlugin, LogicGenerator, OutputEvent } from '../../libhakeidecode/index.js';
+import { Decoder, OUTPUT_ANN, OUTPUT_BINARY, OUTPUT_META, OutputStreams, SRD_CONF_SAMPLERATE } from '../../libhakeidecode/index.js';
+import type { DecoderContext, DecoderEngine, DecoderEngineContext, DecoderPlugin, LogicGenerator, OutputEvent } from '../../libhakeidecode/index.js';
 import { PWMScanEngine } from './engine.js';
 import type { PWMScanBatch } from './engine.js';
 import { formatPWMDuty, formatPWMFrequency, formatPWMPeriod } from './format.js';
@@ -9,16 +10,7 @@ export interface PWMOptions {   polarity: string; }
 export const PWM_ANN = Object.freeze({ DUTY_CYCLE: 0, PERIOD: 1, FREQUENCY: 2 });
 export { formatPWMDuty, formatPWMFrequency, formatPWMPeriod } from './format.js';
 export class PWMDecoder extends Decoder<PWMOptions> {
-  static descriptor: DecoderDescriptor = {
-    apiVersion: 3, id: 'pwm', name: 'PWM', longname: 'Pulse-width modulation',
-    desc: 'Analog level encoded in duty cycle percentage.',
-    inputs: ['logic'], outputs: [], tags: ['Encoding'],
-    channels: [{ id: 'data', name: 'Data', desc: 'Data line' }],
-    options: [{ id: 'polarity', desc: 'Polarity', default: 'active-high', values: ['active-low', 'active-high'] }],
-    annotations: [['duty-cycle', 'Duty cycle'], ['period', 'Period'], ['frequency', 'Frequency']],
-    annotationRows: [['duty-cycle-vals', 'Duty cycles', [0]], ['periods', 'Periods', [1]], ['frequency-vals', 'Frequencies', [2]]],
-    binary: [['raw', 'RAW file']],
-  };
+  static descriptor = descriptor;
   samplerate: number | null = null;
   ss_block: bigint | null = null;
   es_block: bigint | null = null;
@@ -113,6 +105,5 @@ export const pwmPlugin: DecoderPlugin<PWMOptions, readonly OutputEvent[]> = {
   descriptor: PWMDecoder.descriptor,
   createEngine: context => new PWMEventEngine(context),
 };
-registry.registerPlugin(pwmPlugin);
 export { PWMScanEngine, createPWMScanEngine } from './engine.js';
 export type { PWMScanBatch, PWMPosition } from './engine.js';

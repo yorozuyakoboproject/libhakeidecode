@@ -31,7 +31,7 @@ export function frequencyLabel(hz: number, digits = 3): string {
 export interface TimelineLayoutRow { entry: TimelineRow; top: number; height: number }
 export interface ProtocolTrace extends ProtocolSettings { annotations: AnnotationIndex }
 export class WaveformRenderer {
-  decoder: DecoderId = decoderDefinitions[0]!.decoder.descriptor.id;
+  decoder: DecoderId = decoderDefinitions[0]!.descriptor.id;
   capture: Capture | null = null;
   protocols: ProtocolTrace[] = [];
   selectedProtocolId: string | null = null;

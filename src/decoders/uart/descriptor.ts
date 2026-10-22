@@ -1,0 +1,40 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3, id: 'uart', name: 'UART', longname: 'Universal Asynchronous Receiver/Transmitter',
+  desc: 'Asynchronous, serial bus.', inputs: ['logic'], outputs: ['uart'], tags: ['Embedded/industrial'],
+  optionalChannels: [
+    { id: 'rx', name: 'RX', desc: 'UART receive line' },
+    { id: 'tx', name: 'TX', desc: 'UART transmit line' },
+  ],
+  options: [
+    { id: 'baudrate', desc: 'Baud rate', default: 115200, min: 1, required: true },
+    { id: 'data_bits', desc: 'Data bits', default: 8, values: [5, 6, 7, 8, 9] },
+    { id: 'parity', desc: 'Parity', default: 'none', values: ['none', 'odd', 'even', 'zero', 'one', 'ignore'] },
+    { id: 'stop_bits', desc: 'Stop bits', default: 1, values: [0, 0.5, 1, 1.5, 2] },
+    { id: 'bit_order', desc: 'Bit order', default: 'lsb-first', values: ['lsb-first', 'msb-first'] },
+    { id: 'format', desc: 'Data format', default: 'hex', values: ['ascii', 'dec', 'hex', 'oct', 'bin'] },
+    { id: 'invert_rx', desc: 'Invert RX', default: 'no', values: ['yes', 'no'] },
+    { id: 'invert_tx', desc: 'Invert TX', default: 'no', values: ['yes', 'no'] },
+    { id: 'sample_point', desc: 'Sample point (%)', default: 50, min: 1, max: 99, step: 'any', required: true },
+    { id: 'rx_packet_delim', desc: 'RX packet delimiter (decimal)', default: -1 },
+    { id: 'tx_packet_delim', desc: 'TX packet delimiter (decimal)', default: -1 },
+    { id: 'rx_packet_len', desc: 'RX packet length', default: -1 },
+    { id: 'tx_packet_len', desc: 'TX packet length', default: -1 },
+  ],
+  annotations: [
+    ['rx-data', 'RX data'], ['tx-data', 'TX data'], ['rx-start', 'RX start bit'], ['tx-start', 'TX start bit'],
+    ['rx-parity-ok', 'RX parity OK bit'], ['tx-parity-ok', 'TX parity OK bit'],
+    ['rx-parity-err', 'RX parity error bit'], ['tx-parity-err', 'TX parity error bit'],
+    ['rx-stop', 'RX stop bit'], ['tx-stop', 'TX stop bit'], ['rx-warning', 'RX warning'], ['tx-warning', 'TX warning'],
+    ['rx-data-bit', 'RX data bit'], ['tx-data-bit', 'TX data bit'], ['rx-break', 'RX break'], ['tx-break', 'TX break'],
+    ['rx-packet', 'RX packet'], ['tx-packet', 'TX packet'],
+  ],
+  annotationRows: [
+    ['rx-data-bits', 'RX bits', [12]], ['rx-data-vals', 'RX data', [0, 2, 4, 6, 8]],
+    ['rx-warnings', 'RX warnings', [10]], ['rx-breaks', 'RX breaks', [14]], ['rx-packets', 'RX packets', [16]],
+    ['tx-data-bits', 'TX bits', [13]], ['tx-data-vals', 'TX data', [1, 3, 5, 7, 9]],
+    ['tx-warnings', 'TX warnings', [11]], ['tx-breaks', 'TX breaks', [15]], ['tx-packets', 'TX packets', [17]],
+  ],
+  binary: [['rx', 'RX dump'], ['tx', 'TX dump'], ['rxtx', 'RX/TX dump']],
+};

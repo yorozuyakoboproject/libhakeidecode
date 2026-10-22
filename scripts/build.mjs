@@ -2,8 +2,10 @@ import { cp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { generateComponents, validateComponents } from './generate-components.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const components = await generateComponents();
 const target = resolve(root, 'dist');
 const child = relative(root, target);
 if (child !== 'dist' || isAbsolute(child)) throw new Error('Build target must be the workspace dist directory.');
@@ -14,6 +16,7 @@ const result = await new Promise((accept, reject) => {
   compiler.once('exit', accept);
 });
 if (result !== 0) process.exit(typeof result === 'number' ? result : 1);
+await validateComponents(components);
 await cp(resolve(root, 'web'), target, { recursive: true });
 for (const name of await readdir(target)) {
   if (!name.endsWith('.html')) continue;

@@ -1,6 +1,8 @@
+import { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
+export { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
 import { sampleIndex, minSample, samplePhase, type SampleInput } from '../../libhakei/sample-index.js';
 import { createSampleChunk, type SampleChunk, type SampleChunkInput, type SampleSource } from '../../libhakei/index.js';
-import { validateDeviceConfiguration, validateNumericValue, type DeviceConfiguration, type DeviceDescriptor, type SampleDevice, type SampleSourceContext } from '../../libhakei/device.js';
+import { validateDeviceConfiguration, validateNumericValue, type DeviceConfiguration, type ChannelArrayDevice, type ManagedSampleSourceContext, type SampleSourceContext } from '../../libhakei/device.js';
 
 export type DemoPattern = 'sine' | 'square' | 'triangle' | 'sawtooth' | 'random' | 'constant' |
   'clock' | 'incremental' | 'walking-one' | 'walking-zero';
@@ -29,32 +31,17 @@ const PATTERNS = new Set<DemoPattern>([
   'incremental', 'walking-one', 'walking-zero',
 ]);
 
-export const DEMO_DEVICE_DESCRIPTOR = {
-  id: 'demo', name: 'Demo device',
-  capabilities: {
-    sampleRate: { kind: 'range', min: 1, max: 1_000_000_000, step: 1, default: 200_000 },
-    sampleCount: { kind: 'range', min: 1n, max: (1n << 64n) - 1n, step: 1n, default: 200_000n },
-    logicChannels: { kind: 'list', values: [4, 8, 16, 32], default: 8 },
-    analogChannels: { kind: 'list', values: [0, 1, 2, 4], default: 2 },
-  },
-  options: [
-    { id: 'logicPattern', name: 'Logic pattern', kind: 'choice', values: ['square', 'clock', 'random', 'incremental', 'walking-one', 'walking-zero'], default: 'square' },
-    { id: 'analogPattern', name: 'Analog pattern', kind: 'choice', values: ['sine', 'square', 'triangle', 'sawtooth', 'random', 'constant'], default: 'sine' },
-    { id: 'frequencyHz', name: 'Signal frequency (Hz)', kind: 'number', min: 1, max: 1_000_000_000, default: 1_000 },
-    { id: 'amplitude', name: 'Amplitude', kind: 'number', min: 0, default: 1 },
-    { id: 'offset', name: 'Offset', kind: 'number', default: 0 },
-    { id: 'seed', name: 'Seed', kind: 'number', min: 0, max: 0xffffffff, step: 1, default: 1 },
-  ],
-} as const satisfies DeviceDescriptor;
 
-export class DemoDevice implements SampleDevice {
+
+export class DemoDevice implements ChannelArrayDevice {
+  readonly layout = 'channel-arrays';
   readonly descriptor = DEMO_DEVICE_DESCRIPTOR;
   getCapabilities(_configuration: DeviceConfiguration) { return this.descriptor.capabilities; }
   getAcquisitionDescription(_configuration: DeviceConfiguration) {
     return { layout: 'channel-arrays' as const, logicSampleBytes: 1 as const, analogSampleBytes: 4 as const,
-      chunkSamples: 65_536, workingBytes: 0, managedBuffers: true, worker: { moduleUrl: import.meta.url, exportName: 'DemoDevice' } };
+      chunkSamples: 65_536, workingBytes: 0 };
   }
-  createSource(configuration: DeviceConfiguration, context?: SampleSourceContext): SampleSource {
+  createSource(configuration: DeviceConfiguration, context: ManagedSampleSourceContext): SampleSource {
     validateDeviceConfiguration(this, configuration);
     const { sampleRate, sampleCount, logicChannels, analogChannels, options } = configuration;
     return new DemoDriver({ sampleRate, length: sampleCount, channels: [

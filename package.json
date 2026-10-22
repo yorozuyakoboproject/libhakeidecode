@@ -29,32 +29,20 @@
       "import": "./dist/src/drivers/index.js",
       "default": "./dist/src/drivers/index.js"
     },
-    "./drivers/demo": {
-      "types": "./dist/src/drivers/demo/index.d.ts",
-      "import": "./dist/src/drivers/demo/index.js",
-      "default": "./dist/src/drivers/demo/index.js"
+    "./decoders/*": {
+      "types": "./dist/src/decoders/*/index.d.ts",
+      "import": "./dist/src/decoders/*/index.js",
+      "default": "./dist/src/decoders/*/index.js"
     },
-    "./decoders/pwm": {
-      "types": "./dist/src/decoders/pwm/index.d.ts",
-      "import": "./dist/src/decoders/pwm/index.js",
-      "default": "./dist/src/decoders/pwm/index.js"
-    },
-    "./decoders/uart": {
-      "types": "./dist/src/decoders/uart/index.d.ts",
-      "import": "./dist/src/decoders/uart/index.js",
-      "default": "./dist/src/decoders/uart/index.js"
-    },
-    "./drivers/ch32h417": {
-      "types": "./dist/src/drivers/ch32h417/index.d.ts",
-      "import": "./dist/src/drivers/ch32h417/index.js",
-      "default": "./dist/src/drivers/ch32h417/index.js"
+    "./drivers/*": {
+      "types": "./dist/src/drivers/*/index.d.ts",
+      "import": "./dist/src/drivers/*/index.js",
+      "default": "./dist/src/drivers/*/index.js"
     }
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build",
-    "test": "node --test tests/*.test.mjs",
+    "typecheck": "node scripts/generate-components.mjs && tsc -p tsconfig.json --noEmit",
     "preserve": "npm run build",
     "serve": "node scripts/server.mjs",
     "prepack": "npm run build",

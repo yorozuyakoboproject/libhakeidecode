@@ -1,4 +1,5 @@
-import { channelStoreRange, type Capture, type SharedCaptureConsumerSource } from './capture.js';
+import { restoreComponentError } from '../components.js';
+import type { Capture, SharedCaptureConsumerSource } from './capture.js';
 import { SharedWorkerSampleStore } from './shared-sample-store.js';
 import { WorkerCaptureStore } from './worker-store.js';
 import type { Annotation, DecodeMessage, DecoderId, Frame, WorkerDecodeMessage } from './protocol.js';
@@ -6,11 +7,9 @@ import { decoderDefinition } from '../decoders/index.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
 import { t, UIError } from './i18n.js';
 export type DecodeResult = Extract<DecodeMessage, { type: 'done' }>;
-const DECODE_SAMPLE_WINDOW = 8_000_000n;
-const LIVE_DECODE_SAMPLE_WINDOW = 1_000_000n;
 const DECODE_EDGE_WINDOW_LIMIT = 100_000;
-const yieldTask = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
 type ChannelMapping = Record<string, number | undefined>;
+type QueryResult = Annotation[] | Frame[] | string | Blob | null;
 function mappedChannels(decoder: DecoderId, mapping: ChannelMapping): [string, number][] {
   const definition = decoderDefinition(decoder), entries = definition.ui.inputs.flatMap(input => {
     const index = mapping[input.key]; return index === undefined ? [] : [[input.key, index] as [string, number]];
@@ -29,7 +28,7 @@ export class DecodeClient {
   private acknowledge: (() => void) | null = null;
   private generation = 0;
   private requestId = 0;
-  private readonly pendingQueries = new Map<number, { resolve(value: Annotation[] | Frame[] | string): void; reject(error: Error): void }>();
+  private readonly pendingQueries = new Map<number, { resolve(value: QueryResult): void; reject(error: Error): void }>();
   cancel(): void {
     this.generation++;
     this.acknowledge?.(); this.acknowledge = null;
@@ -46,30 +45,33 @@ export class DecodeClient {
   readCsv(offset: number, count: number, sampleRate: number, triggerSample: bigint, includeHeader: boolean): Promise<string> {
     return this.query({ type: 'decode-read-csv', requestId: this.nextRequestId(), offset, count, sampleRate, triggerSample, includeHeader }) as Promise<string>;
   }
+  readBinary(key: string): Promise<Blob | null> {
+    return this.query({ type: 'decode-read-binary', requestId: this.nextRequestId(), key }) as Promise<Blob | null>;
+  }
   private nextRequestId(): number { return ++this.requestId; }
   private query(request: { type: 'decode-query-annotations'; requestId: number; start: bigint; end: bigint; maxResults: number }
     | { type: 'decode-read-frames'; requestId: number; offset: number; count: number }
-    | { type: 'decode-read-csv'; requestId: number; offset: number; count: number; sampleRate: number; triggerSample: bigint; includeHeader: boolean }): Promise<Annotation[] | Frame[] | string> {
+    | { type: 'decode-read-csv'; requestId: number; offset: number; count: number; sampleRate: number; triggerSample: bigint; includeHeader: boolean }
+    | { type: 'decode-read-binary'; requestId: number; key: string }): Promise<QueryResult> {
     const worker = this.worker;
-    if (!worker) return Promise.resolve([]);
+    if (!worker) return Promise.reject(new Error('Decoder Worker is unavailable'));
     return new Promise((resolve, reject) => { this.pendingQueries.set(request.requestId, { resolve, reject }); worker.postMessage(request); });
   }
   private routeAuxMessage(message: WorkerDecodeMessage): boolean {
-    if (message.type === 'decode-query-annotations-result' || message.type === 'decode-read-frames-result' || message.type === 'decode-read-csv-result') {
+    if (message.type === 'decode-query-annotations-result' || message.type === 'decode-read-frames-result' || message.type === 'decode-read-csv-result' || message.type === 'decode-read-binary-result') {
       const pending = this.pendingQueries.get(message.requestId); if (!pending) return true;
       this.pendingQueries.delete(message.requestId); pending.resolve(message.type === 'decode-query-annotations-result' ? message.annotations
-        : message.type === 'decode-read-frames-result' ? message.frames : message.csv); return true;
+        : message.type === 'decode-read-frames-result' ? message.frames : message.type === 'decode-read-csv-result' ? message.csv : message.blob); return true;
     }
     return false;
   }
   startLive(capture: Capture, options: Record<string, OptionValue>, mapping: ChannelMapping, decoder: DecoderId, sharedSource?: SharedCaptureConsumerSource, onProgress?: (progress: number, frames: number, annotations: number, resultBytes: number) => void): LiveDecodeSession {
     this.cancel();
-    const generation = this.generation;
+    if (!sharedSource && !(capture.store instanceof WorkerCaptureStore)) throw new UIError('error.worker');
     const channelIndexes = mappedChannels(decoder, mapping), edgeInput = decoderDefinition(decoder).ui.edgeInput;
     const worker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
     this.worker = worker;
-    let cursor = 0n, desired = 0n, currentCapture = capture;
-    let pumping: Promise<void> | null = null, failure: Error | null = null, finishRequested = false, finishPosted = false, settled = false;
+    let failure: Error | null = null, finishPosted = false, settled = false;
     let resolveResult!: (result: DecodeResult) => void, rejectResult!: (error: Error) => void;
     const result = new Promise<DecodeResult>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
     void result.catch(() => {});
@@ -88,7 +90,7 @@ export class DecodeClient {
         if (settled) return;
         settled = true; this.acknowledge?.(); this.acknowledge = null; if (this.worker === worker) this.reject = null; resolveResult(event.data);
       } else if (event.data.type === 'error') {
-        const error = new Error(event.data.message);
+        const error = restoreComponentError(event.data);
         if (settled) { cleanup(); for (const pending of this.pendingQueries.values()) pending.reject(error); this.pendingQueries.clear(); }
         else reject(error);
       }
@@ -109,82 +111,21 @@ export class DecodeClient {
       workerStore.connectDecodeReader(channel.port2);
     }
 
-    const postChunk = (message: { type: 'decode-chunk' | 'decode-edge-chunk'; startSample: bigint; [key: string]: unknown }, transfer: Transferable[] = []): Promise<void> => new Promise((resolve, rejectChunk) => {
-      this.acknowledge = resolve;
-      try { worker.postMessage(message, transfer); }
-      catch (error) { this.acknowledge = null; rejectChunk(error); }
-    });
-    const sendKnown = async (source: Capture, start: bigint, end: bigint): Promise<void> => {
-      const edgeIndex = edgeInput === undefined ? undefined : mapping[edgeInput];
-      if (edgeInput !== undefined && edgeIndex !== undefined) {
-        const index = edgeIndex;
-        const edgeCount = source.store.edgeCount(index, start, end);
-        if (edgeCount <= DECODE_EDGE_WINDOW_LIMIT) {
-          const edges = source.store.edges(index, start, end);
-          await postChunk({ type: 'decode-edge-chunk', startSample: start, endSample: end,
-            parts: [{ startSample: start, endSample: end, initial: source.store.sampleAt(index, start) as 0 | 1, edges }] });
-          return;
-        }
-        const data = channelStoreRange(source.store, index, start, end);
-        await postChunk({ type: 'decode-chunk', startSample: start, sampleRate: source.store.samplerate, channels: { [edgeInput]: data } }, [data.buffer]);
-        return;
-      }
-      const channels: Record<string, Uint8Array> = {};
-      for (const [key, index] of channelIndexes) channels[key] = channelStoreRange(source.store, index, start, end);
-      await postChunk({ type: 'decode-chunk', startSample: start, sampleRate: source.store.samplerate, channels }, Object.values(channels).map(data => data.buffer));
-    };
-    const pump = (): Promise<void> => {
-      if (sharedSource || workerStore) return Promise.resolve();
-      if (pumping) return pumping;
-      const task = (async (): Promise<void> => {
-        while (!failure && generation === this.generation && cursor < desired) {
-          const source = currentCapture, available = source.store.length < desired ? source.store.length : desired;
-          if (cursor >= available) break;
-          const gap = source.store.gaps().find(item => item.endSample > cursor && item.startSample < available);
-          if (gap && gap.startSample <= cursor) {
-            const end = gap.endSample < available ? gap.endSample : available;
-            worker.postMessage({ type: 'decode-gap', startSample: cursor, endSample: end }); cursor = end;
-          } else {
-            let end = cursor + LIVE_DECODE_SAMPLE_WINDOW;
-            if (end > available) end = available;
-            if (gap && gap.startSample < end) end = gap.startSample;
-            if (end <= cursor) throw new Error('Live decoder made no progress');
-            await sendKnown(source, cursor, end); cursor = end;
-          }
-          await yieldTask();
-        }
-        if (!failure && generation === this.generation && finishRequested && !finishPosted && cursor >= desired) {
-          finishPosted = true; worker.postMessage({ type: 'decode-finish' });
-        }
-      })().catch(error => {
-        const normalized = error instanceof Error ? error : new Error(String(error)); reject(normalized); throw normalized;
-      }).finally(() => {
-        if (pumping === task) pumping = null;
-        if (!failure && generation === this.generation && !settled && (cursor < desired || finishRequested && !finishPosted)) void pump().catch(() => {});
-      });
-      pumping = task;
-      return task;
-    };
-    const update = (nextCapture: Capture): void => {
-      currentCapture = nextCapture;
-      const targetSamples = nextCapture.acquisition?.targetSamples ?? nextCapture.store.length;
-      desired = nextCapture.store.length < targetSamples ? nextCapture.store.length : targetSamples;
-    };
     return {
-      advance: nextCapture => { if (failure) return Promise.reject(failure); if (settled) return Promise.resolve(); update(nextCapture); return pump(); },
+      advance: () => failure ? Promise.reject(failure) : Promise.resolve(),
       finish: nextCapture => {
         if (failure) return Promise.reject(failure);
-        if (!settled) { update(nextCapture); finishRequested = true;
-          if (sharedSource || workerStore) { if (!finishPosted) { finishPosted = true; worker.postMessage({ type: 'decode-finish', length: nextCapture.store.length }); } }
-          else void pump().catch(() => {}); }
+        if (!settled && !finishPosted) { finishPosted = true; worker.postMessage({ type: 'decode-finish', length: nextCapture.store.length }); }
         return result;
       },
     };
   }
+
   run(capture: Capture, options: Record<string, OptionValue>, mapping: ChannelMapping, decoder: DecoderId, sampleLimit?: bigint, onProgress?: (progress: number, frames: number, annotations: number, resultBytes: number) => void): Promise<DecodeResult> {
     this.cancel();
     const packedStore = capture.store instanceof SharedWorkerSampleStore ? capture.store : null;
     const workerStore = capture.store instanceof WorkerCaptureStore ? capture.store : null;
+    if (!packedStore && !workerStore) throw new UIError('error.worker');
     if (packedStore && sampleLimit !== undefined) throw new UIError('error.worker');
     const generation = this.generation;
     return new Promise((resolve, reject) => {
@@ -199,11 +140,6 @@ export class DecodeClient {
           const worker = activeWorker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
           this.worker = worker; this.reject = reject;
           const cleanup = (): void => { worker.terminate(); if (this.worker === worker) { this.worker = null; this.reject = null; } };
-          const postChunk = (message: { type: 'decode-chunk' | 'decode-edge-chunk' } & Record<string, unknown>, transfer: Transferable[] = []): Promise<void> => new Promise((resolve, rejectChunk) => {
-            this.acknowledge = resolve;
-            try { worker.postMessage(message, transfer); }
-            catch (error) { this.acknowledge = null; rejectChunk(error); }
-          });
           worker.onmessage = (event: MessageEvent<WorkerDecodeMessage>) => {
             if (this.worker !== worker) return;
             if (this.routeAuxMessage(event.data)) return;
@@ -211,7 +147,7 @@ export class DecodeClient {
             else if (event.data.type === 'decode-progress') onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.resultBytes);
             else if (event.data.type === 'done') { this.acknowledge?.(); this.acknowledge = null; if (this.worker === worker) this.reject = null; resolve(event.data); }
             else if (event.data.type === 'error') {
-              this.acknowledge?.(); this.acknowledge = null; cleanup(); const error = new Error(event.data.message);
+              this.acknowledge?.(); this.acknowledge = null; cleanup(); const error = restoreComponentError(event.data);
               for (const pending of this.pendingQueries.values()) pending.reject(error); this.pendingQueries.clear(); reject(error);
             }
           };
@@ -233,43 +169,6 @@ export class DecodeClient {
             worker.postMessage({ type: 'decode-finish', length });
             return;
           }
-          const sendKnown = async (start: bigint, end: bigint): Promise<void> => {
-            const window = DECODE_SAMPLE_WINDOW;
-            for (let offset = start; offset < end; offset += window) {
-              if (generation !== this.generation) return;
-              const chunkEnd = offset + window < end ? offset + window : end;
-              const edgeIndex = edgeInput === undefined ? undefined : mapping[edgeInput];
-              if (edgeInput !== undefined && edgeIndex !== undefined) {
-                const index = edgeIndex;
-                const edgeCount = capture.store.edgeCount(index, offset, chunkEnd);
-                if (edgeCount <= DECODE_EDGE_WINDOW_LIMIT) {
-                  const edges = capture.store.edges(index, offset, chunkEnd);
-                  await postChunk({ type: 'decode-edge-chunk', startSample: offset, endSample: chunkEnd,
-                    parts: [{ startSample: offset, endSample: chunkEnd, initial: capture.store.sampleAt(index, offset) as 0 | 1, edges }] });
-                  if (generation !== this.generation) return;
-                  continue;
-                }
-                const data = channelStoreRange(capture.store, index, offset, chunkEnd);
-                await postChunk({ type: 'decode-chunk', startSample: offset, sampleRate: capture.store.samplerate, channels: { [edgeInput]: data } }, [data.buffer]);
-              } else {
-                const channels: Record<string, Uint8Array> = {};
-                for (const [key, index] of channelIndexes) channels[key] = channelStoreRange(capture.store, index, offset, chunkEnd);
-                await postChunk({ type: 'decode-chunk', startSample: offset, sampleRate: capture.store.samplerate, channels }, Object.values(channels).map(data => data.buffer));
-              }
-              if (generation !== this.generation) return;
-            }
-          };
-          let cursor = 0n;
-          for (const gap of gaps) {
-            const start = gap.startSample > cursor ? gap.startSample : cursor;
-            if (cursor < start) { await sendKnown(cursor, start); cursor = start; }
-            const end = gap.endSample < length ? gap.endSample : length;
-            if (end > cursor) { worker.postMessage({ type: 'decode-gap', startSample: cursor, endSample: end }); await yieldTask(); cursor = end; }
-            if (cursor >= length) break;
-          }
-          if (cursor < length) await sendKnown(cursor, length);
-          if (generation !== this.generation) return;
-          worker.postMessage({ type: 'decode-finish' });
         } catch (error) {
           if (generation !== this.generation) return;
           activeWorker?.terminate();

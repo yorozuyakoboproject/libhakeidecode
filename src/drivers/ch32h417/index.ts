@@ -1,6 +1,8 @@
+import { descriptor } from './descriptor.js';
+import { ComponentError } from '../../components.js';
 import { sampleIndex, type SampleSource } from '../../libhakei/index.js';
-import { validateDeviceConfiguration, type AcquisitionDescription, type DeviceCapabilities, type DeviceConfiguration, type DeviceDescriptor, type SampleDevice, type PackedLogicChunk, type SampleSourceContext } from '../../libhakei/device.js';
-import { Command, DATA, END, SS_RATES, USB_PID, USB_VID, readCapabilities, readStatus, type Capabilities } from './protocol.js';
+import { validateDeviceConfiguration, type PackedLogicAcquisitionDescription, type DeviceCapabilities, type DeviceConfiguration, type DeviceDescriptor, type PackedLogicDevice, type PackedLogicChunk, type ManagedSampleSourceContext, type SampleSourceContext } from '../../libhakei/device.js';
+import { Command, DATA, END, USB_PID, USB_VID, readCapabilities, readStatus, type Capabilities } from './protocol.js';
 import { H417Transport, TRANSPORT_WORKING_BYTES, browserUsb, statusError, type UsbApi } from './transport.js';
 export type { Capabilities } from './protocol.js';
 export interface H417Identity { serialNumber: string; vendorId: number; productId: number; capabilities: Capabilities; }
@@ -8,91 +10,67 @@ export interface H417TransportMetrics { reads: number; receivedBytes: number; pa
 export interface H417StreamStats { samples: bigint; frames: number; firstByte: number | null; lastByte: number | null; session: number; transport: H417TransportMetrics; }
 export interface H417WorkerMetrics { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number; }
 export interface H417StreamOptions { readonly onBlock?: (samples: bigint, packed: Uint8Array, transport: H417TransportMetrics) => void | Promise<void>; }
-const defaultCaps: Capabilities = { packetBytes: 1024, blockBytes: 16384, heartbeatMs: 5000, channels: 8, rates: [...SS_RATES] };
-const DEVICE_PREF_KEY = 'hakei.ch32h417.serial';
-function capabilities(caps: Capabilities): DeviceCapabilities {
-  return { sampleRate: { kind: 'list', values: caps.rates, default: caps.packetBytes === 1024 ? 40_000_000 : 10_000_000 },
-    sampleCount: { kind: 'range', min: 1n, max: (1n << 64n) - 1n, step: 1n, default: 200_000n },
-    logicChannels: { kind: 'list', values: [1,2,3,4,5,6,7,8], default: 8 }, analogChannels: { kind: 'list', values: [0], default: 0 } };
-}
-
-export class CH32H417Device implements SampleDevice {
-  private identity: H417Identity | null = null;
+export class CH32H417Device implements PackedLogicDevice {
+  readonly layout = 'packed-logic';
+  private identity?: H417Identity;
   private api: UsbApi | null = null;
   onConnectionChange: (() => void) | null = null;
-  private readonly disconnected = (event: { device: { serialNumber?: string } }) => {
-    if (event.device.serialNumber === this.identity?.serialNumber) { this.identity = null; this.onConnectionChange?.(); }
+  private readonly disconnected = (event: { device: { serialNumber?: string } }): void => {
+    if (event.device.serialNumber === this.identity?.serialNumber) { this.identity = undefined; this.onConnectionChange?.(); }
   };
-  get connected(): boolean { return this.identity !== null; }
-  get authorization(): H417Identity | null { return this.identity; }
-  get descriptor(): DeviceDescriptor { return { id: 'ch32h417', name: 'CH32H417 Logic Analyzer', capabilities: capabilities(this.identity?.capabilities ?? defaultCaps), options: [] }; }
-  getCapabilities(_configuration: DeviceConfiguration): DeviceCapabilities { return this.descriptor.capabilities; }
-  async connect(): Promise<void> {
-    const api = browserUsb();
-    const device = await api.requestDevice({ filters: [{ vendorId: USB_VID, productId: USB_PID }] });
-    await this.openAuthorized(api, device);
+  constructor(initialization?: H417Identity) { this.identity = initialization; }
+  get initialization(): H417Identity | undefined { return this.identity; }
+  get connected(): boolean { return !!this.identity; }
+  async connect(initialization?: unknown): Promise<void> {
+    if (!await this.restore(initialization)) throw new ComponentError('driver.ch32h417.error.unavailable');
   }
-
-  async restore(): Promise<boolean> {
-    const usb = (globalThis.navigator as Navigator & { usb?: UsbApi } | undefined)?.usb;
-    if (!usb) return false;
+  async restore(initialization?: unknown): Promise<boolean> {
+    const usb = browserUsb();
     const matches = (await usb.getDevices()).filter(device => device.vendorId === USB_VID && device.productId === USB_PID && device.serialNumber?.startsWith('H417-'));
     if (!matches.length) return false;
-    let previous: string | null = null;
-    try { previous = localStorage.getItem(DEVICE_PREF_KEY); } catch {}
-    const device = matches.find(item => item.serialNumber === previous) ?? (matches.length === 1 ? matches[0] : undefined);
-    if (!device) throw new Error('Multiple authorized H417 devices found; use Connect USB to choose one');
-    await this.openAuthorized(usb, device);
-    return true;
-  }
-  private async openAuthorized(api: UsbApi, device: import('./transport.js').UsbDevice): Promise<void> {
+    const serialNumber = initialization && typeof initialization === 'object' && 'serialNumber' in initialization ? initialization.serialNumber : undefined;
+    const device = matches.find(item => item.serialNumber === serialNumber) ?? (matches.length === 1 ? matches[0] : undefined);
+    if (!device) throw new ComponentError('driver.ch32h417.error.ambiguous');
     const transport = new H417Transport(device);
     try {
       await transport.open();
       const caps = readCapabilities(await transport.command(Command.caps));
-      if (!device.serialNumber?.startsWith('H417-')) throw new Error('H417 serial number required to select the same device in the acquisition Worker');
-      if (caps.packetBytes !== transport.packet) throw new Error('H417 endpoint/capability packet mismatch');
+      if (!device.serialNumber || caps.packetBytes !== transport.packet) throw new Error('H417 endpoint/capability mismatch');
       this.identity = { serialNumber: device.serialNumber, vendorId: device.vendorId, productId: device.productId, capabilities: caps };
-      try { localStorage.setItem(DEVICE_PREF_KEY, device.serialNumber); } catch {}
-      if (this.api !== api) { this.api?.removeEventListener?.('disconnect', this.disconnected); this.api = api; api.addEventListener?.('disconnect', this.disconnected); }
+      if (this.api !== usb) { this.api?.removeEventListener?.('disconnect', this.disconnected); this.api = usb; usb.addEventListener?.('disconnect', this.disconnected); }
     } finally { await transport.close(); this.onConnectionChange?.(); }
+    return true;
   }
   async disconnect(): Promise<void> {
-    this.identity = null; this.api?.removeEventListener?.('disconnect', this.disconnected); this.api = null; this.onConnectionChange?.();
+    this.identity = undefined; this.api?.removeEventListener?.('disconnect', this.disconnected); this.api = null; this.onConnectionChange?.();
   }
-  getAcquisitionDescription(_configuration: DeviceConfiguration): AcquisitionDescription {
-    return { layout: 'packed-logic', logicSampleBytes: 1, analogSampleBytes: 4, chunkSamples: 1_048_576,
-      workingBytes: TRANSPORT_WORKING_BYTES, managedBuffers: true,
-      worker: { moduleUrl: import.meta.url, exportName: 'H417WorkerDevice', required: true, initialization: this.identity } };
-  }
-  createSource(_configuration: DeviceConfiguration, _context?: SampleSourceContext): SampleSource {
-    throw new Error('CH32H417 acquisition requires its dedicated Worker; connect the device first');
-  }
-}
-
-export class H417WorkerDevice implements SampleDevice {
-  constructor(private readonly identity?: H417Identity) {}
-  get descriptor(): DeviceDescriptor { return { id: 'ch32h417', name: 'CH32H417 Logic Analyzer', capabilities: capabilities(this.identity?.capabilities ?? defaultCaps), options: [] }; }
+  get descriptor(): DeviceDescriptor { return descriptor(this.identity?.capabilities); }
   getCapabilities(_configuration: DeviceConfiguration): DeviceCapabilities { return this.descriptor.capabilities; }
   createSource(configuration: DeviceConfiguration, context?: SampleSourceContext): SampleSource {
     validateDeviceConfiguration(this, configuration);
-    if (!this.identity) throw new Error('Connect CH32H417 before capture');
+    if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
     return this.capture(configuration, context);
   }
-  getAcquisitionDescription(_configuration: DeviceConfiguration): AcquisitionDescription {
+  getAcquisitionDescription(_configuration: DeviceConfiguration): PackedLogicAcquisitionDescription {
+    if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
     return { layout: 'packed-logic', logicSampleBytes: 1, analogSampleBytes: 4, chunkSamples: 1_048_576,
-      workingBytes: TRANSPORT_WORKING_BYTES, managedBuffers: true };
+      workingBytes: TRANSPORT_WORKING_BYTES };
   }
-  async *createPackedSource(configuration: DeviceConfiguration, context?: SampleSourceContext): AsyncGenerator<PackedLogicChunk> {
+  async *createPackedSource(configuration: DeviceConfiguration, context: ManagedSampleSourceContext): AsyncGenerator<PackedLogicChunk> {
     validateDeviceConfiguration(this, configuration);
-    if (!this.identity) throw new Error('Connect CH32H417 before capture');
-    const capacity = context?.chunkSamples ?? 1_048_576;
+    if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
+    const capacity = context.chunkSamples ?? 1_048_576;
     let buffer: ArrayBuffer | null = null, raw: Uint8Array | null = null, used = 0, start = 0n;
     const workerMetrics: H417WorkerMetrics = { packedCopyMs: 0, bufferWaitMs: 0, consumerWaitMs: 0 };
     const encode = (): PackedLogicChunk => {
+      context.reportDiagnostics?.({
+        'transport.reads': lastTransport?.reads ?? 0, 'transport.receivedBytes': lastTransport?.receivedBytes ?? 0,
+        'transport.parserMs': lastTransport?.parserMs ?? 0, 'transport.queuePeak': lastTransport?.queuePeak ?? 0,
+        'transport.dataFrames': lastTransport?.dataFrames ?? 0, 'worker.packedCopyMs': workerMetrics.packedCopyMs,
+        'worker.bufferWaitMs': workerMetrics.bufferWaitMs, 'worker.consumerWaitMs': workerMetrics.consumerWaitMs,
+      });
       return { format: 'packed-logic', startSample: start, sampleRate: configuration.sampleRate,
-        channelCount: configuration.logicChannels, length: used, encoding: 'raw8', data: raw!.subarray(0, used),
-        ...(lastTransport ? { h417Transport: { ...lastTransport } } : {}), h417Worker: { ...workerMetrics } };
+        channelCount: configuration.logicChannels, length: used, encoding: 'raw8', data: raw!.subarray(0, used) };
     };
     const queue: PackedLogicChunk[] = [];
     let wake: (() => void) | undefined, resume: (() => void) | undefined, failure: unknown, done = false;
@@ -104,7 +82,7 @@ export class H417WorkerDevice implements SampleDevice {
       for (let offset = 0; offset < payload.length;) {
         if (!buffer) {
           const waitStarted = performance.now();
-          buffer = await context?.acquireBuffer?.() ?? new ArrayBuffer(capacity);
+          buffer = await context.acquireBuffer();
           workerMetrics.bufferWaitMs += performance.now() - waitStarted;
           if (buffer.byteLength < capacity || capacity > 0x1000000) throw new Error('Invalid packed acquisition buffer');
           raw = new Uint8Array(buffer, 0, capacity);
@@ -143,7 +121,7 @@ export class H417WorkerDevice implements SampleDevice {
 
   async stream(configuration: DeviceConfiguration, options: H417StreamOptions = {}, signal?: AbortSignal): Promise<H417StreamStats> {
     validateDeviceConfiguration(this, configuration);
-    if (!this.identity) throw new Error('Connect CH32H417 before capture');
+    if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
     const identity = this.identity, api = browserUsb();
     const matches = (await api.getDevices()).filter(d => d.vendorId === identity.vendorId && d.productId === identity.productId && d.serialNumber === identity.serialNumber);
     if (matches.length !== 1) throw new Error('Authorized H417 device disconnected or ambiguous');
@@ -231,3 +209,5 @@ export class H417WorkerDevice implements SampleDevice {
     }
   }
 }
+
+export { CH32H417Device as H417WorkerDevice };

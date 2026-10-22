@@ -1,4 +1,6 @@
-import type { AcquisitionChunk, DeviceConfiguration, SampleDevice } from '../libhakei/device.js';
+import { componentFailure, type ComponentFailure } from '../components.js';
+import { validateDeviceConfiguration, type AcquisitionChunk, type DeviceConfiguration, type DriverDiagnostics, type ManagedSampleSourceContext } from '../libhakei/device.js';
+import { createDriverDevice } from '../drivers/workers.js';
 import { createSampleChunk } from '../libhakei/index.js';
 import type { SharedChunkProducer, SharedPublisherMetrics } from './shared-chunks.js';
 import type { SharedChunkAllocator } from './shared-chunk-allocator.js';
@@ -8,14 +10,14 @@ import { channelWidthForProbes } from './data/channel-count.js';
 import { DEFAULT_CAPTURE_BUDGET_BYTES, MemoryBudget, type BudgetSnapshot } from './memory.js';
 import { WorkerStoreServer } from './worker-store-server.js';
 export type AcquisitionRequest =
-  | { type: 'start'; moduleUrl: string; exportName: string; initialization?: unknown; configuration: DeviceConfiguration; chunkSamples: number; buffers: ArrayBuffer[]; sharedSampleCount?: bigint; sharedChunkBytes?: number; store?: { budgetBytes: number }; storePort?: MessagePort }
+  | { type: 'start'; driverId: string; initialization?: unknown; configuration: DeviceConfiguration; chunkSamples: number; buffers: ArrayBuffer[]; sharedSampleCount?: bigint; sharedChunkBytes?: number; store?: { budgetBytes: number }; storePort?: MessagePort }
   | { type: 'subscribe'; port: MessagePort }
   | { type: 'recycle'; buffer: ArrayBuffer } | { type: 'stop' };
 export type AcquisitionResponse = { type: 'chunk'; chunk: AcquisitionChunk; buffer: ArrayBuffer }
-  | { type: 'local-progress'; length: bigint; memory: BudgetSnapshot }
-  | { type: 'local-done'; length: bigint; memory: BudgetSnapshot; stopReason: 'complete' | 'stopped' | 'error'; error?: string; timings?: PlanarStoreTimings }
-  | { type: 'shared-progress'; allocatedBytes: number; publishedSamples: bigint; publisher?: SharedPublisherMetrics; h417Transport?: { reads: number; receivedBytes: number; parserMs: number; queuePeak: number; dataFrames: number }; h417Worker?: { packedCopyMs: number; bufferWaitMs: number; consumerWaitMs: number } }
-  | { type: 'done' } | { type: 'error'; message: string } | { type: 'closed' };
+  | { type: 'local-progress'; length: bigint; memory: BudgetSnapshot; driverDiagnostics?: DriverDiagnostics }
+  | { type: 'local-done'; length: bigint; memory: BudgetSnapshot; stopReason: 'complete' | 'stopped' | 'error'; error?: string; timings?: PlanarStoreTimings; driverDiagnostics?: DriverDiagnostics }
+  | { type: 'shared-progress'; allocatedBytes: number; publishedSamples: bigint; publisher?: SharedPublisherMetrics; driverDiagnostics?: DriverDiagnostics }
+  | { type: 'done' } | ({ type: 'error' } & ComponentFailure) | { type: 'closed' };
 type Scope = { onmessage: ((event: MessageEvent<AcquisitionRequest>) => void) | null; postMessage(message: AcquisitionResponse, transfer?: Transferable[]): void };
 const scope = globalThis as unknown as Scope;
 const available: ArrayBuffer[] = [];
@@ -41,9 +43,9 @@ scope.onmessage = ({ data }) => {
   started = true; available.push(...data.buffers);
   void (async () => {
     let iterator: AsyncIterator<AcquisitionChunk> | undefined;
-    let terminal: 'complete' | 'stopped' | 'error' = 'complete', failure = '';
-    let h417Transport: Extract<AcquisitionChunk, { format: 'packed-logic' }>['h417Transport'];
-    let h417Worker: Extract<AcquisitionChunk, { format: 'packed-logic' }>['h417Worker'];
+    let terminal: 'complete' | 'stopped' | 'error' = 'complete';
+    let failure: ComponentFailure = { message: '' };
+    let driverDiagnostics: DriverDiagnostics | undefined;
     let store: PlanarSampleStore | null = null, analogStores: AnalogSampleStore[] = [];
     let logicIds: string[] = [], analogIds: string[] = [], padding: Uint8Array | null = null;
     const budget = data.store ? new MemoryBudget(data.store.budgetBytes ?? DEFAULT_CAPTURE_BUDGET_BYTES) : null;
@@ -106,7 +108,7 @@ scope.onmessage = ({ data }) => {
       if (!force && now - lastProgressAt < 100) return;
       lastProgressAt = now;
       storeServer.publish();
-      scope.postMessage({ type: 'local-progress', length: store.length, memory: budget.snapshot() });
+      scope.postMessage({ type: 'local-progress', length: store.length, memory: budget.snapshot(), driverDiagnostics });
     };
     try {
       if (data.sharedSampleCount !== undefined) {
@@ -116,7 +118,7 @@ scope.onmessage = ({ data }) => {
         const reportSharedProgress = (allocatedBytes: number, publishedSamples: bigint, publisher: SharedPublisherMetrics, force = false): void => {
           const now = performance.now();
           if (force || publishedSamples > 0n && lastReportedSamples === 0n || now - lastProgressAt >= 100 || publishedSamples === data.sharedSampleCount) {
-            lastProgressAt = now; lastReportedSamples = publishedSamples; scope.postMessage({ type: 'shared-progress', allocatedBytes, publishedSamples, publisher, ...(h417Transport ? { h417Transport } : {}), ...(h417Worker ? { h417Worker } : {}) });
+            lastProgressAt = now; lastReportedSamples = publishedSamples; scope.postMessage({ type: 'shared-progress', allocatedBytes, publishedSamples, publisher, driverDiagnostics });
           }
         };
         producer = new SharedChunkProducer({ sampleCount: data.sharedSampleCount, chunkBytes: data.sharedChunkBytes,
@@ -125,23 +127,25 @@ scope.onmessage = ({ data }) => {
         await producer.prepare();
         reportSharedProgress(producer.allocatedBytes, producer.length, producer.publisherMetrics, true);
       }
-      const module = await import(data.moduleUrl);
       controller.signal.throwIfAborted();
-      const device = new module[data.exportName](data.initialization) as SampleDevice;
-      const source = device.getAcquisitionDescription?.(data.configuration).layout === 'packed-logic' ? device.createPackedSource!.bind(device) : device.createSource.bind(device);
+      const device = createDriverDevice(data.driverId, data.initialization);
+      validateDeviceConfiguration(device, data.configuration);
+      if (device.getAcquisitionDescription(data.configuration).layout !== device.layout
+        || !!producer !== (device.layout === 'packed-logic')) throw new Error('Driver acquisition layout does not match the capture pipeline');
       let borrowed: ArrayBuffer | null = null;
-      iterator = source(data.configuration, { signal: controller.signal, chunkSamples: data.chunkSamples,
+      const context: ManagedSampleSourceContext = { signal: controller.signal, chunkSamples: data.chunkSamples,
+        reportDiagnostics: snapshot => { driverDiagnostics = { ...snapshot }; },
         acquireBuffer: async () => {
           controller.signal.throwIfAborted();
           return borrowed = available.shift() ?? await new Promise<ArrayBuffer>((resolve, reject) => { waiter = { resolve, reject }; });
-        } })[Symbol.asyncIterator]();
+        } };
+      iterator = (device.layout === 'packed-logic' ? device.createPackedSource(data.configuration, context)
+        : device.createSource(data.configuration, context))[Symbol.asyncIterator]();
       while (true) {
         const result = await iterator.next();
         if (result.done) break;
         if (!borrowed) throw new Error('Worker driver must use the managed buffer contract');
         if (producer && 'format' in result.value && result.value.format === 'packed-logic') {
-          h417Transport = result.value.h417Transport ?? h417Transport;
-          h417Worker = result.value.h417Worker ?? h417Worker;
           await producer.append(result.value.data.subarray(0, result.value.length));
         } else if (data.store) {
           appendChunk(result.value);
@@ -159,22 +163,22 @@ scope.onmessage = ({ data }) => {
       if (producer && producer.length !== data.sharedSampleCount) throw new Error(`Shared capture ended at ${producer.length} of ${data.sharedSampleCount} samples`);
     } catch (error) {
       if (controller.signal.aborted) terminal = 'stopped';
-      else { terminal = 'error'; failure = error instanceof Error ? error.message : String(error); }
+      else { terminal = 'error'; failure = componentFailure(error); }
     } finally {
       try { await iterator?.return?.(); }
-      catch (error) { if (terminal !== 'stopped') { terminal = 'error'; failure = error instanceof Error ? error.message : String(error); } }
-      if (producer?.state === 'open') producer.finish(terminal, failure || undefined);
-      if (producer) scope.postMessage({ type: 'shared-progress', allocatedBytes: producer.allocatedBytes, publishedSamples: producer.length, publisher: producer.publisherMetrics, ...(h417Transport ? { h417Transport } : {}), ...(h417Worker ? { h417Worker } : {}) });
+      catch (error) { if (terminal !== 'stopped') { terminal = 'error'; failure = componentFailure(error); } }
+      if (producer?.state === 'open') producer.finish(terminal, failure.message || undefined);
+      if (producer) scope.postMessage({ type: 'shared-progress', allocatedBytes: producer.allocatedBytes, publishedSamples: producer.length, publisher: producer.publisherMetrics, driverDiagnostics });
       allocator?.close(); allocator = null;
       const finalStore = store as PlanarSampleStore | null, finalPadding = padding as Uint8Array | null;
       if (finalStore && budget) {
-        try { finalStore.finalizePyramid(); } catch (error) { if (terminal !== 'stopped') { terminal = 'error'; failure = error instanceof Error ? error.message : String(error); } }
+        try { finalStore.finalizePyramid(); } catch (error) { if (terminal !== 'stopped') { terminal = 'error'; failure = componentFailure(error); } }
         storeServer?.publish();
         scope.postMessage({ type: 'local-done', length: finalStore.length, memory: budget.snapshot(), stopReason: terminal,
-          ...(failure ? { error: failure } : {}), timings: finalStore.timings });
+          ...(failure.message ? { error: failure.message } : {}), timings: finalStore.timings, driverDiagnostics });
       }
       if (finalPadding) budget?.release(finalPadding.buffer);
-      if (terminal === 'error') scope.postMessage({ type: 'error', message: failure || 'Acquisition failed' });
+      if (terminal === 'error') scope.postMessage({ type: 'error', ...failure, message: failure.message || 'Acquisition failed' });
       else scope.postMessage({ type: 'done' });
       scope.postMessage({ type: 'closed' });
     }

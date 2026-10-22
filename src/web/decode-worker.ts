@@ -1,6 +1,7 @@
+import { componentFailure } from '../components.js';
 import { createEdgeWindow, createPackedWindow, createValuesWindow } from '../libhakeidecode/signal.js';
 import { compareSamples } from '../libhakei/sample-index.js';
-import { decoderDefinition } from '../decoders/index.js';
+import { decoderWorkerDefinition } from '../decoders/workers.js';
 import { createDecodeRuntime } from './decode-runtime.js';
 import type { DecodeRuntime, DecodeRuntimeResult } from './decode-runtime.js';
 import { AnnotationIndex } from './event-index.js';
@@ -24,6 +25,7 @@ interface Session {
   channels: string[];
   gaps: DecodeStartRequest['gaps'];
   runtime: DecodeRuntime;
+  output: DecodeRuntimeResult | null;
   annotations: AnnotationIndex;
   frames: DecodeFrame[];
   framesSorted: boolean;
@@ -62,12 +64,13 @@ function yieldWorkerTask(): Promise<void> {
   });
 }
 scope.onmessage = event => {
-  if (event.data.type === 'decode-query-annotations') { try { queryAnnotations(event.data); } catch (error) { scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) }); } return; }
-  if (event.data.type === 'decode-read-frames') { try { readFrames(event.data); } catch (error) { scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) }); } return; }
-  if (event.data.type === 'decode-read-csv') { try { readCsv(event.data); } catch (error) { scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) }); } return; }
+  if (event.data.type === 'decode-query-annotations') { try { queryAnnotations(event.data); } catch (error) { scope.postMessage({ type: 'error', ...componentFailure(error) }); } return; }
+  if (event.data.type === 'decode-read-frames') { try { readFrames(event.data); } catch (error) { scope.postMessage({ type: 'error', ...componentFailure(error) }); } return; }
+  if (event.data.type === 'decode-read-csv') { try { readCsv(event.data); } catch (error) { scope.postMessage({ type: 'error', ...componentFailure(error) }); } return; }
+  if (event.data.type === 'decode-read-binary') { try { readBinary(event.data); } catch (error) { scope.postMessage({ type: 'error', ...componentFailure(error) }); } return; }
   queue = queue.then(() => handle(event.data)).catch(error => {
     session = null;
-    scope.postMessage({ type: 'error', message: error instanceof Error ? (error.stack ?? error.message) : String(error) });
+    scope.postMessage({ type: 'error', ...componentFailure(error) });
   });
 };
 
@@ -84,11 +87,11 @@ function maybePostProgress(s: Session): void {
 }
 function start(request: DecodeStartRequest): void {
   if (!Number.isSafeInteger(request.sampleRate) || request.sampleRate < 1 || request.length < 0n) throw new Error('Invalid decode stream configuration');
-  const compareFrames = decoderDefinition(request.decoder).ui.compareFrames;
+  const compareFrames = decoderWorkerDefinition(request.decoder).compareFrames;
   const s = {
     decoder: request.decoder, sampleRate: request.sampleRate, length: request.length, processed: 0n, decodedSamples: 0n,
     started: performance.now(), channels: request.channels, gaps: request.gaps, runtime: null as unknown as DecodeRuntime,
-    annotations: new AnnotationIndex(), frames: [], framesSorted: true,
+    annotations: new AnnotationIndex(), frames: [], framesSorted: true, output: null,
     compareFrames: compareFrames ? (a, b) => compareFrames(a, b) : (a, b) => compareSamples(a.ss, b.ss),
     completed: false, lastProgressPost: 0, sharedTask: null, sharedReader: null,
     packedPort: null, packedChannels: null, packedChannelCount: 0, packedNextId: 0, packedPending: new Map(),
@@ -119,11 +122,16 @@ function readFrames(request: DecodeReadFramesRequest): void {
 function readCsv(request: DecodeReadCsvRequest): void {
   const s = session;
   if (!s) { scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv: '' }); return; }
-  const definition = decoderDefinition(s.decoder);
+  const definition = decoderWorkerDefinition(s.decoder);
   const frames = s.runtime.readFrames?.(request.offset, request.count) ?? s.frames.slice(request.offset, request.offset + request.count);
-  const rows = frames.map(frame => definition.ui.csvRow(frame, request.sampleRate, request.triggerSample));
-  const csv = (request.includeHeader ? definition.ui.csvHeader + '\r\n' : '') + rows.join('\r\n');
+  const rows = frames.map(frame => definition.csvRow(frame, request.sampleRate, request.triggerSample));
+  const csv = (request.includeHeader ? definition.csvHeader + '\r\n' : '') + rows.join('\r\n');
   scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv });
+}
+function readBinary(request: Extract<DecodeStreamRequest, { type: 'decode-read-binary' }>): void {
+  const data = session?.output?.binaries[request.key];
+  scope.postMessage({ type: 'decode-read-binary-result', requestId: request.requestId,
+    blob: data ? new Blob([data.slice().buffer], { type: 'application/octet-stream' }) : null });
 }
 function startShared(s: Session, request: DecodeSharedStartRequest): void {
   if (request.channelCount < 1 || request.channelCount > 8) throw new Error('Shared packed capture supports 1..8 logic channels');
@@ -151,7 +159,7 @@ function startPackedReader(s: Session, request: DecodePackedReaderStartRequest):
   void s.sharedTask.catch(error => {
     for (const pending of s.packedPending.values()) pending.reject(error instanceof Error ? error : new Error(String(error)));
     s.packedPending.clear(); s.packedPort?.close(); s.packedPort = null; session = null;
-    scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+    scope.postMessage({ type: 'error', ...componentFailure(error) });
   });
 }
 function requestPackedRange(s: Session, startSample: bigint, endSample: bigint): Promise<Uint8Array> {
@@ -198,7 +206,7 @@ function startWorkerReader(s: Session, request: DecodeWorkerReaderStartRequest):
   void s.sharedTask.catch(error => {
     for (const pending of s.workerPending.values()) pending.reject(error instanceof Error ? error : new Error(String(error)));
     s.workerPending.clear(); s.workerPort?.close(); s.workerPort = null; session = null;
-    scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+    scope.postMessage({ type: 'error', ...componentFailure(error) });
   });
 }
 function requestWorkerRead(s: Session, startSample: bigint, endSample: bigint, edgeInput: string | undefined, edgeLimit: number): Promise<Extract<DecodeReadResponse, { type: 'decode-read-result' }>> {
@@ -334,17 +342,21 @@ async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
   const stages = { ...s.stages };
   maybePostProgress(s);
   s.completed = true;
-  const binaries = Object.values(output.binaries);
+  s.output = output;
+  const { binaries, ...details } = output;
+  const binarySizes = Object.fromEntries(Object.entries(binaries).map(([key, data]) => [key, data.byteLength]));
+  const previews = Object.fromEntries(Object.entries(binaries).map(([key, data]) => [key, data.slice(0, 100)]));
   post(s, { type: 'done', decoder: s.decoder,
     stats: { elapsedMs: performance.now() - s.started, samples: s.decodedSamples, frames: output.frames, annotations: output.annotations,
       truncated: output.truncated, binaryTruncated: output.binaryTruncated, stages },
-    result: output }, binaries.map(binary => binary.buffer));
+    result: { ...details, binarySizes, previews } });
 }
 async function handle(request: DecodeStreamRequest): Promise<void> {
   if (request.type === 'decode-start') { start(request); return; }
   if (request.type === 'decode-query-annotations') { queryAnnotations(request); return; }
   if (request.type === 'decode-read-frames') { readFrames(request); return; }
   if (request.type === 'decode-read-csv') { readCsv(request); return; }
+  if (request.type === 'decode-read-binary') { readBinary(request); return; }
   if (!session) throw new Error('Decode chunk received before decoder start');
   if (request.type === 'decode-shared-start') { startShared(session, request); return; }
   if (request.type === 'decode-packed-reader-start') { startPackedReader(session, request); return; }

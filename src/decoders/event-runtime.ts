@@ -1,5 +1,5 @@
-import { OUTPUT_ANN, registry } from '../libhakeidecode/index.js';
-import type { DecoderEngine, OutputEvent, SignalWindow } from '../libhakeidecode/index.js';
+import { OUTPUT_ANN } from '../libhakeidecode/index.js';
+import type { DecoderEngine, DecoderPlugin, OutputEvent, SignalWindow } from '../libhakeidecode/index.js';
 import type { Annotation, DecodeBatch, DecodeFrame, DecodeRuntime, DecodeRuntimeContext, DecodeRuntimeResult } from './definition.js';
 
 export interface EventRuntimeApi<F extends DecodeFrame> {
@@ -25,11 +25,11 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   private framesCount = 0;
   private binaryBytes = 0;
 
-  constructor(decoder: string, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
+  constructor(plugin: DecoderPlugin<any, any>, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
     this.host = context.host; this.handler = handler;
     const channels = Object.fromEntries(context.channels.map(channel => [channel, channel]));
-    this.engine = registry.getPlugin(decoder).createEngine({
-      sampleRate: context.sampleRate, options: context.options, channels, instanceId: decoder + '-ui',
+    this.engine = plugin.createEngine({
+      sampleRate: context.sampleRate, options: context.options, channels, instanceId: plugin.descriptor.id,
       sink: { write: (batch: readonly OutputEvent[]) => this.consume(batch) },
     });
   }
