@@ -1,6 +1,12 @@
 import { OUTPUT_ANN } from '../libhakeidecode/index.js';
 import type { DecoderEngine, DecoderPlugin, OutputEvent, SignalWindow } from '../libhakeidecode/index.js';
-import type { Annotation, DecodeBatch, DecodeFrame, DecodeRuntime, DecodeRuntimeContext, DecodeRuntimeResult } from './definition.js';
+import type {
+  Annotation,
+  DecodeFrame,
+  DecodeRuntime,
+  DecodeRuntimeContext,
+  DecodeRuntimeResult,
+} from './definition.js';
 
 export interface EventRuntimeApi<F extends DecodeFrame> {
   addFrame(frame: F): void;
@@ -26,44 +32,78 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   private binaryBytes = 0;
 
   constructor(plugin: DecoderPlugin<any, any>, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
-    this.host = context.host; this.handler = handler;
-    const channels = Object.fromEntries(context.channels.map(channel => [channel, channel]));
+    this.host = context.host;
+    this.handler = handler;
+    const channels = Object.fromEntries(context.channels.map((channel) => [channel, channel]));
     this.engine = plugin.createEngine({
-      sampleRate: context.sampleRate, options: context.options, channels, instanceId: plugin.descriptor.id,
+      sampleRate: context.sampleRate,
+      options: context.options,
+      channels,
+      instanceId: plugin.descriptor.id,
       sink: { write: (batch: readonly OutputEvent[]) => this.consume(batch) },
     });
   }
-  get frameCount(): number { return this.framesCount; }
-  get annotationCount(): number { return this.annotationsCount; }
-  get resultBytes(): number { return this.binaryBytes; }
-  addFrame(frame: F): void { this.frames.push(frame); this.framesCount++; }
+  get frameCount(): number {
+    return this.framesCount;
+  }
+  get annotationCount(): number {
+    return this.annotationsCount;
+  }
+  get resultBytes(): number {
+    return this.binaryBytes;
+  }
+  addFrame(frame: F): void {
+    this.frames.push(frame);
+    this.framesCount++;
+  }
   addBinary(key: string, bytes: Uint8Array): void {
     let chunks = this.binaryChunks.get(key);
-    if (!chunks) { chunks = []; this.binaryChunks.set(key, chunks); }
+    if (!chunks) {
+      chunks = [];
+      this.binaryChunks.set(key, chunks);
+    }
     for (let index = 0; index < bytes.length; index++) chunks.push(bytes[index]!);
     this.binaryBytes += bytes.length;
   }
-  addValue(key: string, value: number): void { if (Number.isFinite(value)) this.values.set(key, value); }
-  async push(window: SignalWindow): Promise<void> { await this.engine.push(window); }
+  addValue(key: string, value: number): void {
+    if (Number.isFinite(value)) this.values.set(key, value);
+  }
+  async push(window: SignalWindow): Promise<void> {
+    await this.engine.push(window);
+  }
   async flush(progress: number): Promise<void> {
     if (!this.annotations.length && !this.frames.length) return;
-    const annotations = this.annotations, frames = this.frames;
-    this.annotations = []; this.frames = [];
+    const annotations = this.annotations,
+      frames = this.frames;
+    this.annotations = [];
+    this.frames = [];
     await this.host.postBatch({ type: 'batch', progress, annotations, frames });
   }
-  reset(): void { this.handler.reset?.(this); this.engine.reset(); }
+  reset(): void {
+    this.handler.reset?.(this);
+    this.engine.reset();
+  }
   async finish(progress: number): Promise<DecodeRuntimeResult> {
-    await this.engine.finish(); this.handler.finish?.(this); await this.flush(progress);
+    await this.engine.finish();
+    this.handler.finish?.(this);
+    await this.flush(progress);
     const binaries: Record<string, Uint8Array> = {};
     for (const [key, chunks] of this.binaryChunks) binaries[key] = Uint8Array.from(chunks);
-    return { binaries, values: { ...Object.fromEntries(this.values) }, frames: this.framesCount, annotations: this.annotationsCount,
-      truncated: false, binaryTruncated: false };
+    return {
+      binaries,
+      values: { ...Object.fromEntries(this.values) },
+      frames: this.framesCount,
+      annotations: this.annotationsCount,
+      truncated: false,
+      binaryTruncated: false,
+    };
   }
   private consume(events: readonly OutputEvent[]): void {
     for (const event of events) {
       if (event.type === OUTPUT_ANN) {
         const data = event.data as readonly [number, readonly string[]];
-        this.annotations.push({ ss: event.ss, es: event.es, classIndex: data[0], texts: data[1] }); this.annotationsCount++;
+        this.annotations.push({ ss: event.ss, es: event.es, classIndex: data[0], texts: data[1] });
+        this.annotationsCount++;
       } else this.handler.event(event, this);
     }
   }

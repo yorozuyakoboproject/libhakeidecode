@@ -1,9 +1,23 @@
 import type { DecoderDescriptor, OptionValue, SignalWindow } from '../libhakeidecode/types.js';
 import type { ComponentMessages } from '../components.js';
 
-export interface Annotation { ss: bigint; es: bigint; classIndex: number; texts: readonly string[]; value?: number }
-export interface DecodeFrame { readonly ss: bigint; readonly es: bigint }
-export interface DecodeBatch<F extends DecodeFrame = DecodeFrame> { type: 'batch'; progress: number; annotations: Annotation[]; frames: F[] }
+export interface Annotation {
+  ss: bigint;
+  es: bigint;
+  classIndex: number;
+  texts: readonly string[];
+  value?: number;
+}
+export interface DecodeFrame {
+  readonly ss: bigint;
+  readonly es: bigint;
+}
+export interface DecodeBatch<F extends DecodeFrame = DecodeFrame> {
+  type: 'batch';
+  progress: number;
+  annotations: Annotation[];
+  frames: F[];
+}
 export interface DecodeRuntimeResult {
   readonly binaries: Record<string, Uint8Array>;
   readonly values: Record<string, number | null>;
@@ -38,10 +52,27 @@ export interface DecodeRuntimeContext {
   readonly paged: 'always' | 'auto' | 'never';
   readonly host: DecodeRuntimeHost;
 }
-export interface DecoderInputDefinition { readonly key: string; readonly label: string; readonly labelKey?: string; readonly optional?: boolean }
-export interface DecoderRowDefinition { readonly label: string; readonly labelKey?: string; readonly classes: readonly number[] }
-export interface DecoderBinaryDefinition { readonly key: string; readonly label: string; readonly labelKey?: string }
-export interface AnnotationTextContext { readonly sampleRate: number; readonly decimals: number; text(key: string, fallback: string): string }
+export interface DecoderInputDefinition {
+  readonly key: string;
+  readonly label: string;
+  readonly labelKey?: string;
+  readonly optional?: boolean;
+}
+export interface DecoderRowDefinition {
+  readonly label: string;
+  readonly labelKey?: string;
+  readonly classes: readonly number[];
+}
+export interface DecoderBinaryDefinition {
+  readonly key: string;
+  readonly label: string;
+  readonly labelKey?: string;
+}
+export interface AnnotationTextContext {
+  readonly sampleRate: number;
+  readonly decimals: number;
+  text(key: string, fallback: string): string;
+}
 export interface DecoderUiDefinition {
   readonly description?: string;
   readonly descriptionKey?: string;

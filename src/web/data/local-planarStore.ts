@@ -31,11 +31,15 @@ function levelBlockBitsLog(level: number): number {
   return Math.max(12, BASE_BLOCK_BITS_LOG - LEVEL_LOG * level);
 }
 
-export function estimateLocalPlanarBytes(samples: number, channels: number): { baseBytes: number; pyramidBytes: number; totalBytes: number } {
+export function estimateLocalPlanarBytes(
+  samples: number,
+  channels: number,
+): { baseBytes: number; pyramidBytes: number; totalBytes: number } {
   const baseBytes = Math.ceil(samples / 2 ** BASE_BLOCK_BITS_LOG) * 2 ** (BASE_BLOCK_BITS_LOG - 3) * channels;
   let pyramidBytes = 0;
   for (let level = 1; level <= MAX_LEVEL; level++) {
-    const bins = Math.floor(samples / binSizeOf(level)), blockLog = levelBlockBitsLog(level);
+    const bins = Math.floor(samples / binSizeOf(level)),
+      blockLog = levelBlockBitsLog(level);
     pyramidBytes += Math.ceil(bins / 2 ** blockLog) * 2 ** (blockLog - 3) * channels * 2;
   }
   return { baseBytes, pyramidBytes, totalBytes: baseBytes + pyramidBytes };
@@ -125,12 +129,16 @@ export class LocalPlanarSampleStore implements SampleStore {
 
   prepareAppend(count: number): () => void {
     const to = this.length + count;
-    if (!Number.isSafeInteger(count) || count < 0 || to > SEGMENT_SAMPLES) throw new RangeError('append exceeds local segment capacity');
+    if (!Number.isSafeInteger(count) || count < 0 || to > SEGMENT_SAMPLES)
+      throw new RangeError('append exceeds local segment capacity');
     if (to <= this.preparedTo) return () => {};
     const previousPrepared = this.preparedTo;
     const planes = [...this.base, ...this.hi.slice(1).flat(), ...this.lo.slice(1).flat()];
-    const sizes = planes.map(plane => plane.blocks.length);
-    const rollback = () => { this.preparedTo = previousPrepared; planes.forEach((plane, index) => plane.trimBlocks(sizes[index]!)); };
+    const sizes = planes.map((plane) => plane.blocks.length);
+    const rollback = () => {
+      this.preparedTo = previousPrepared;
+      planes.forEach((plane, index) => plane.trimBlocks(sizes[index]!));
+    };
     try {
       for (const plane of this.base) plane.reserve(to);
       for (let level = 1; level <= MAX_LEVEL; level++) {
@@ -138,22 +146,34 @@ export class LocalPlanarSampleStore implements SampleStore {
         for (const plane of this.hi[level]!) plane.reserve(bins);
         for (const plane of this.lo[level]!) plane.reserve(bins);
       }
-    } catch (error) { rollback(); throw error; }
-    this.preparedTo = to; return rollback;
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+    this.preparedTo = to;
+    return rollback;
   }
 
   appendChannels(channels: readonly ArrayLike<number>[]): void {
-    if (channels.length !== this.channelCount || channels.some(channel => channel.length !== channels[0]!.length)) throw new Error('Logic layout mismatch');
-    if (this.channelCount === 32 && channels[0] instanceof Uint8Array && channels.every(channel => channel === channels[0])) {
+    if (channels.length !== this.channelCount || channels.some((channel) => channel.length !== channels[0]!.length))
+      throw new Error('Logic layout mismatch');
+    if (
+      this.channelCount === 32 &&
+      channels[0] instanceof Uint8Array &&
+      channels.every((channel) => channel === channels[0])
+    ) {
       this.appendRepeated8(channels[0]);
       return;
     }
-    const count = channels[0]!.length, from = this.length, to = from + count;
+    const count = channels[0]!.length,
+      from = this.length,
+      to = from + count;
     this.prepareAppend(count);
     for (let channel = 0; channel < this.channelCount; channel++) {
-      const values = channels[channel]!, plane = this.base[channel]!;
+      const values = channels[channel]!,
+        plane = this.base[channel]!;
       let index = 0;
-      for (; index < count && ((from + index) & 31); index++) plane.setBit(from + index, values[index]!);
+      for (; index < count && (from + index) & 31; index++) plane.setBit(from + index, values[index]!);
       for (; index + 32 <= count; index += 32) {
         let word = 0;
         for (let bit = 0; bit < 32; bit++) word |= values[index + bit]! << bit;
@@ -163,37 +183,45 @@ export class LocalPlanarSampleStore implements SampleStore {
       for (; index < count; index++) plane.setBit(from + index, values[index]!);
       plane.bits = to;
     }
-    this.length = to; this.validBins[0] = to;
+    this.length = to;
+    this.validBins[0] = to;
     if (!this.deferPyramid) this.updatePyramid(from, to);
   }
 
   private appendRepeated8(values: Uint8Array): void {
-    const count = values.length, from = this.length, to = from + count;
+    const count = values.length,
+      from = this.length,
+      to = from + count;
     this.prepareAppend(count);
     for (const plane of this.base) plane.extendTo(to);
     let index = 0;
-    for (; index < count && ((from + index) & 31); index++) {
+    for (; index < count && (from + index) & 31; index++) {
       const value = values[index]!;
       for (const plane of this.base) plane.setBit(from + index, value);
     }
-    const bodyEnd = index + ((count - index) >>> 5 << 5);
+    const bodyEnd = index + (((count - index) >>> 5) << 5);
     for (; index < bodyEnd; index += 32) {
       let word = 0;
       for (let bit = 0; bit < 32; bit++) word |= values[index + bit]! << bit;
-      const sample = from + index, block = sample >>> BASE_BLOCK_BITS_LOG, offset = (sample & (2 ** BASE_BLOCK_BITS_LOG - 1)) >>> 5;
+      const sample = from + index,
+        block = sample >>> BASE_BLOCK_BITS_LOG,
+        offset = (sample & (2 ** BASE_BLOCK_BITS_LOG - 1)) >>> 5;
       for (const plane of this.base) plane.blocks[block]![offset] = word;
     }
     for (; index < count; index++) {
       const value = values[index]!;
       for (const plane of this.base) plane.setBit(from + index, value);
     }
-    this.length = to; this.validBins[0] = to;
+    this.length = to;
+    this.validBins[0] = to;
     if (!this.deferPyramid) this.updatePyramid(from, to);
   }
 
   dispose(): void {
     for (const plane of [...this.base, ...this.hi.slice(1).flat(), ...this.lo.slice(1).flat()]) plane.trimBlocks(0);
-    this.length = 0; this.preparedTo = 0; this.validBins.fill(0);
+    this.length = 0;
+    this.preparedTo = 0;
+    this.validBins.fill(0);
   }
 
   append(chunk: Uint8Array): void {
@@ -230,7 +258,8 @@ export class LocalPlanarSampleStore implements SampleStore {
       }
     }
     if (words === 0) return;
-    const from = this.length, to = from + words * 32;
+    const from = this.length,
+      to = from + words * 32;
     if (to > SEGMENT_SAMPLES) throw new Error(`append exceeds local segment capacity (${to})`);
     this.prepareAppend(words * 32);
     for (const plane of this.base) plane.extendTo(to);
@@ -303,22 +332,47 @@ export class LocalPlanarSampleStore implements SampleStore {
       const wordsWanted = (siEnd - si) >>> 5;
       const words = Math.min(wordsLeftInBlock, wordsWanted);
 
-      const b0 = planes[0]!.blocks[blk]!, b1 = planes[1]!.blocks[blk]!;
-      const b2 = planes[2]!.blocks[blk]!, b3 = planes[3]!.blocks[blk]!;
-      const b4 = planes[4]!.blocks[blk]!, b5 = planes[5]!.blocks[blk]!;
-      const b6 = planes[6]!.blocks[blk]!, b7 = planes[7]!.blocks[blk]!;
-      const b8 = planes[8]!.blocks[blk]!, b9 = planes[9]!.blocks[blk]!;
-      const ba = planes[10]!.blocks[blk]!, bb = planes[11]!.blocks[blk]!;
-      const bc = planes[12]!.blocks[blk]!, bd = planes[13]!.blocks[blk]!;
-      const be = planes[14]!.blocks[blk]!, bf = planes[15]!.blocks[blk]!;
+      const b0 = planes[0]!.blocks[blk]!,
+        b1 = planes[1]!.blocks[blk]!;
+      const b2 = planes[2]!.blocks[blk]!,
+        b3 = planes[3]!.blocks[blk]!;
+      const b4 = planes[4]!.blocks[blk]!,
+        b5 = planes[5]!.blocks[blk]!;
+      const b6 = planes[6]!.blocks[blk]!,
+        b7 = planes[7]!.blocks[blk]!;
+      const b8 = planes[8]!.blocks[blk]!,
+        b9 = planes[9]!.blocks[blk]!;
+      const ba = planes[10]!.blocks[blk]!,
+        bb = planes[11]!.blocks[blk]!;
+      const bc = planes[12]!.blocks[blk]!,
+        bd = planes[13]!.blocks[blk]!;
+      const be = planes[14]!.blocks[blk]!,
+        bf = planes[15]!.blocks[blk]!;
 
       for (let w = 0; w < words; w++) {
-        let a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0;
-        let a8 = 0, a9 = 0, aa = 0, ab = 0, ac = 0, ad = 0, ae = 0, af = 0;
+        let a0 = 0,
+          a1 = 0,
+          a2 = 0,
+          a3 = 0,
+          a4 = 0,
+          a5 = 0,
+          a6 = 0,
+          a7 = 0;
+        let a8 = 0,
+          a9 = 0,
+          aa = 0,
+          ab = 0,
+          ac = 0,
+          ad = 0,
+          ae = 0,
+          af = 0;
         const base = si + (w << 5);
         for (let g = 0; g < 8; g++) {
           const j = base + (g << 2);
-          const s0 = src[j]!, s1 = src[j + 1]!, s2 = src[j + 2]!, s3 = src[j + 3]!;
+          const s0 = src[j]!,
+            s1 = src[j + 1]!,
+            s2 = src[j + 2]!,
+            s3 = src[j + 3]!;
           const L = (s0 & 0xff) | ((s1 & 0xff) << 8) | ((s2 & 0xff) << 16) | ((s3 & 0xff) << 24);
           const H = (s0 >>> 8) | ((s1 >>> 8) << 8) | ((s2 >>> 8) << 16) | ((s3 >>> 8) << 24);
           const sh = g << 2;
@@ -340,10 +394,22 @@ export class LocalPlanarSampleStore implements SampleStore {
           af |= (imul((H >>> 7) & M, G) >>> 28) << sh;
         }
         const o = wordInBlock + w;
-        b0[o] = a0; b1[o] = a1; b2[o] = a2; b3[o] = a3;
-        b4[o] = a4; b5[o] = a5; b6[o] = a6; b7[o] = a7;
-        b8[o] = a8; b9[o] = a9; ba[o] = aa; bb[o] = ab;
-        bc[o] = ac; bd[o] = ad; be[o] = ae; bf[o] = af;
+        b0[o] = a0;
+        b1[o] = a1;
+        b2[o] = a2;
+        b3[o] = a3;
+        b4[o] = a4;
+        b5[o] = a5;
+        b6[o] = a6;
+        b7[o] = a7;
+        b8[o] = a8;
+        b9[o] = a9;
+        ba[o] = aa;
+        bb[o] = ab;
+        bc[o] = ac;
+        bd[o] = ad;
+        be[o] = ae;
+        bf[o] = af;
       }
       si += words << 5;
       dstBit += words << 5;
@@ -363,35 +429,90 @@ export class LocalPlanarSampleStore implements SampleStore {
     const bodyEnd = si + (((n - si) >>> 5) << 5);
     while (si < bodyEnd) {
       let i = si;
-      let a7 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a6 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a5 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a4 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a3 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a2 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a1 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3); i += 4;
-      let a0 = BYTE_TO_NIBBLES[chunk[i]!] | (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
-        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) | (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      let a7 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a6 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a5 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a4 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a3 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a2 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a1 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
+      i += 4;
+      let a0 =
+        BYTE_TO_NIBBLES[chunk[i]!] |
+        (BYTE_TO_NIBBLES[chunk[i + 1]!] << 1) |
+        (BYTE_TO_NIBBLES[chunk[i + 2]!] << 2) |
+        (BYTE_TO_NIBBLES[chunk[i + 3]!] << 3);
       let t;
-      t = (a0 ^ (a4 >>> 16)) & 0x0000ffff; a0 ^= t; a4 ^= t << 16;
-      t = (a1 ^ (a5 >>> 16)) & 0x0000ffff; a1 ^= t; a5 ^= t << 16;
-      t = (a2 ^ (a6 >>> 16)) & 0x0000ffff; a2 ^= t; a6 ^= t << 16;
-      t = (a3 ^ (a7 >>> 16)) & 0x0000ffff; a3 ^= t; a7 ^= t << 16;
-      t = (a0 ^ (a2 >>> 8)) & 0x00ff00ff; a0 ^= t; a2 ^= t << 8;
-      t = (a1 ^ (a3 >>> 8)) & 0x00ff00ff; a1 ^= t; a3 ^= t << 8;
-      t = (a4 ^ (a6 >>> 8)) & 0x00ff00ff; a4 ^= t; a6 ^= t << 8;
-      t = (a5 ^ (a7 >>> 8)) & 0x00ff00ff; a5 ^= t; a7 ^= t << 8;
-      t = (a0 ^ (a1 >>> 4)) & 0x0f0f0f0f; a0 ^= t; a1 ^= t << 4;
-      t = (a2 ^ (a3 >>> 4)) & 0x0f0f0f0f; a2 ^= t; a3 ^= t << 4;
-      t = (a4 ^ (a5 >>> 4)) & 0x0f0f0f0f; a4 ^= t; a5 ^= t << 4;
-      t = (a6 ^ (a7 >>> 4)) & 0x0f0f0f0f; a6 ^= t; a7 ^= t << 4;
+      t = (a0 ^ (a4 >>> 16)) & 0x0000ffff;
+      a0 ^= t;
+      a4 ^= t << 16;
+      t = (a1 ^ (a5 >>> 16)) & 0x0000ffff;
+      a1 ^= t;
+      a5 ^= t << 16;
+      t = (a2 ^ (a6 >>> 16)) & 0x0000ffff;
+      a2 ^= t;
+      a6 ^= t << 16;
+      t = (a3 ^ (a7 >>> 16)) & 0x0000ffff;
+      a3 ^= t;
+      a7 ^= t << 16;
+      t = (a0 ^ (a2 >>> 8)) & 0x00ff00ff;
+      a0 ^= t;
+      a2 ^= t << 8;
+      t = (a1 ^ (a3 >>> 8)) & 0x00ff00ff;
+      a1 ^= t;
+      a3 ^= t << 8;
+      t = (a4 ^ (a6 >>> 8)) & 0x00ff00ff;
+      a4 ^= t;
+      a6 ^= t << 8;
+      t = (a5 ^ (a7 >>> 8)) & 0x00ff00ff;
+      a5 ^= t;
+      a7 ^= t << 8;
+      t = (a0 ^ (a1 >>> 4)) & 0x0f0f0f0f;
+      a0 ^= t;
+      a1 ^= t << 4;
+      t = (a2 ^ (a3 >>> 4)) & 0x0f0f0f0f;
+      a2 ^= t;
+      a3 ^= t << 4;
+      t = (a4 ^ (a5 >>> 4)) & 0x0f0f0f0f;
+      a4 ^= t;
+      a5 ^= t << 4;
+      t = (a6 ^ (a7 >>> 4)) & 0x0f0f0f0f;
+      a6 ^= t;
+      a7 ^= t << 4;
       const blk = dstBit >>> bbl;
       const off = (dstBit & blockMask) >>> 5;
       if (nch >= 1) this.base[0]!.blocks[blk]![off] = a7;
@@ -440,8 +561,15 @@ export class LocalPlanarSampleStore implements SampleStore {
       const blk = dstBit >>> BASE_BLOCK_BITS_LOG;
       const wordInBlock = (dstBit & blockMask) >>> 5;
       const words = Math.min((1 << (BASE_BLOCK_BITS_LOG - 5)) - wordInBlock, (siEnd - si) >>> 5);
-      this.transpose32.transpose(src, si, words, this.base.map(plane => plane.blocks[blk]!), wordInBlock);
-      si += words << 5; dstBit += words << 5;
+      this.transpose32.transpose(
+        src,
+        si,
+        words,
+        this.base.map((plane) => plane.blocks[blk]!),
+        wordInBlock,
+      );
+      si += words << 5;
+      dstBit += words << 5;
     }
   }
 
@@ -489,7 +617,12 @@ export class LocalPlanarSampleStore implements SampleStore {
   }
 
   private reduceOne(
-    dstHi: BitPlane, dstLo: BitPlane, srcHi: BitPlane, srcLo: BitPlane, i: number, fromBase: boolean,
+    dstHi: BitPlane,
+    dstLo: BitPlane,
+    srcHi: BitPlane,
+    srcLo: BitPlane,
+    i: number,
+    fromBase: boolean,
   ): void {
     const sBit = i * 16;
     const bh = srcHi.blocks[sBit >>> srcHi.blockBitsLog]!;
@@ -512,7 +645,8 @@ export class LocalPlanarSampleStore implements SampleStore {
     const sBit = i * 16;
     const sArr = src.blocks[sBit >>> src.blockBitsLog]!;
     const sOff = (sBit & src.blockMask) >>> 5;
-    let h = 0, l = 0;
+    let h = 0,
+      l = 0;
     for (let j = 0; j < 16; j++) {
       const s = sArr[sOff + j]! | 0;
       const loHalf = s & 0xffff;
@@ -527,15 +661,14 @@ export class LocalPlanarSampleStore implements SampleStore {
     dstLo.blocks[i >>> dstLo.blockBitsLog]![(i & dstLo.blockMask) >>> 5] = l;
   }
 
-  private reduceGroup(
-    dstHi: BitPlane, dstLo: BitPlane, srcHi: BitPlane, srcLo: BitPlane, i: number,
-  ): void {
+  private reduceGroup(dstHi: BitPlane, dstLo: BitPlane, srcHi: BitPlane, srcLo: BitPlane, i: number): void {
     const sBit = i * 16;
     const ah = srcHi.blocks[sBit >>> srcHi.blockBitsLog]!;
     const al = srcLo.blocks[sBit >>> srcLo.blockBitsLog]!;
     const oh = (sBit & srcHi.blockMask) >>> 5;
     const ol = (sBit & srcLo.blockMask) >>> 5;
-    let h = 0, l = 0;
+    let h = 0,
+      l = 0;
     for (let j = 0; j < 16; j++) {
       const sh = ah[oh + j]! | 0;
       const sl = al[ol + j]! | 0;
@@ -556,7 +689,10 @@ export class LocalPlanarSampleStore implements SampleStore {
       let b = Math.floor(s1 / B);
       const vb = this.validBins[level]!;
       if (b > vb) b = vb;
-      if (a >= b) { level--; continue; }
+      if (a >= b) {
+        level--;
+        continue;
+      }
 
       const coreStart = a * B;
       const coreEnd = b * B;
@@ -601,8 +737,10 @@ export class LocalPlanarSampleStore implements SampleStore {
       this.scratchEdge = new Uint8Array(bins);
       this.scratchPacked = new Uint8Array(bins);
     }
-    const low = this.scratchLow, high = this.scratchHigh;
-    const edge = this.scratchEdge, packed = this.scratchPacked;
+    const low = this.scratchLow,
+      high = this.scratchHigh;
+    const edge = this.scratchEdge,
+      packed = this.scratchPacked;
 
     const B = this.binSize[level]!;
     const snap = this.snapColumns && level > 0;
@@ -633,8 +771,14 @@ export class LocalPlanarSampleStore implements SampleStore {
     }
 
     return {
-      channel, startSample: s, endSample: e, bins,
-      low, high, edge, packed,
+      channel,
+      startSample: s,
+      endSample: e,
+      bins,
+      low,
+      high,
+      edge,
+      packed,
     };
   }
 
@@ -659,9 +803,7 @@ export class LocalPlanarSampleStore implements SampleStore {
     return n;
   }
 
-  private edgeSegments(
-    channel: number, startSample: number, endSample: number,
-  ): Array<[number, number]> | null {
+  private edgeSegments(channel: number, startSample: number, endSample: number): Array<[number, number]> | null {
     if (channel < 0 || channel >= this.channelCount || (channel | 0) !== channel) {
       throw new Error(`channel ${channel} out of range 0..${this.channelCount - 1}`);
     }
@@ -674,9 +816,7 @@ export class LocalPlanarSampleStore implements SampleStore {
     return splitAroundGaps(this.gapList, s, e);
   }
 
-  private scanEdgesRange(
-    channel: number, s: number, e: number, out: Int32Array | null, outOff: number,
-  ): number {
+  private scanEdgesRange(channel: number, s: number, e: number, out: Int32Array | null, outOff: number): number {
     const plane = this.base[channel]!;
     const blockWords = plane.blockWords;
     let n = outOff;
@@ -730,11 +870,19 @@ export class LocalPlanarSampleStore implements SampleStore {
     }
     const usedBase = Math.ceil(this.length / 8) * this.channelCount;
     let usedPyramid = 0;
-    for (let level = 1; level <= MAX_LEVEL; level++) usedPyramid += Math.ceil(this.validBins[level]! / 8) * this.channelCount * 2;
+    for (let level = 1; level <= MAX_LEVEL; level++)
+      usedPyramid += Math.ceil(this.validBins[level]! / 8) * this.channelCount * 2;
     return {
       baseBytes,
       pyramidBytes,
-      totalBytes: baseBytes + pyramidBytes + this.transposeScratchBytes + this.scratchLow.byteLength + this.scratchHigh.byteLength + this.scratchEdge.byteLength + this.scratchPacked.byteLength,
+      totalBytes:
+        baseBytes +
+        pyramidBytes +
+        this.transposeScratchBytes +
+        this.scratchLow.byteLength +
+        this.scratchHigh.byteLength +
+        this.scratchEdge.byteLength +
+        this.scratchPacked.byteLength,
       overhead: baseBytes === 0 ? 0 : pyramidBytes / baseBytes,
       slackBytes: baseBytes - usedBase + pyramidBytes - usedPyramid,
     };
@@ -746,33 +894,50 @@ export class LocalPlanarSampleStore implements SampleStore {
   }
 
   packRange(startSample: number, endSample: number, channels = this.channelCount): Uint8Array {
-    if (!Number.isInteger(startSample) || !Number.isInteger(endSample) || startSample < 0 || endSample < startSample || endSample > this.length) {
+    if (
+      !Number.isInteger(startSample) ||
+      !Number.isInteger(endSample) ||
+      startSample < 0 ||
+      endSample < startSample ||
+      endSample > this.length
+    ) {
       throw new RangeError('invalid packed sample range');
     }
-    if (!Number.isInteger(channels) || channels < 1 || channels > this.channelCount) throw new RangeError('invalid packed channel count');
-    const unit = Math.ceil(channels / 8), out = new Uint8Array((endSample - startSample) * unit);
+    if (!Number.isInteger(channels) || channels < 1 || channels > this.channelCount)
+      throw new RangeError('invalid packed channel count');
+    const unit = Math.ceil(channels / 8),
+      out = new Uint8Array((endSample - startSample) * unit);
     if (!out.length) return out;
     if (channels === 32) {
-      const source = new Uint32Array(32), words = Array.from({ length: 32 }, () => new Uint32Array(1));
+      const source = new Uint32Array(32),
+        words = Array.from({ length: 32 }, () => new Uint32Array(1));
       const firstAligned = startSample + ((32 - (startSample & 31)) & 31);
       const fillSample = (sample: number): void => {
         let value = 0;
         for (let channel = 0; channel < channels; channel++) value |= this.base[channel]!.getBit(sample) << channel;
         const offset = (sample - startSample) * unit;
-        out[offset] = value & 0xff; out[offset + 1] = (value >>> 8) & 0xff; out[offset + 2] = (value >>> 16) & 0xff; out[offset + 3] = value >>> 24;
+        out[offset] = value & 0xff;
+        out[offset + 1] = (value >>> 8) & 0xff;
+        out[offset + 2] = (value >>> 16) & 0xff;
+        out[offset + 3] = value >>> 24;
       };
       for (let sample = startSample; sample < Math.min(firstAligned, endSample); sample++) fillSample(sample);
       let sample = firstAligned;
       for (; sample + 32 <= endSample; sample += 32) {
         const word = sample >>> 5;
         for (let channel = 0; channel < 32; channel++) {
-          const plane = this.base[channel]!, block = plane.blocks[word >>> (BASE_BLOCK_BITS_LOG - 5)]!;
+          const plane = this.base[channel]!,
+            block = plane.blocks[word >>> (BASE_BLOCK_BITS_LOG - 5)]!;
           source[channel] = block[word & ((1 << (BASE_BLOCK_BITS_LOG - 5)) - 1)]!;
         }
         this.transpose32.transpose(source, 0, 1, words, 0);
         for (let row = 0; row < 32; row++) {
-          const value = words[row]![0]!, offset = (sample + row - startSample) * 4;
-          out[offset] = value & 0xff; out[offset + 1] = (value >>> 8) & 0xff; out[offset + 2] = (value >>> 16) & 0xff; out[offset + 3] = value >>> 24;
+          const value = words[row]![0]!,
+            offset = (sample + row - startSample) * 4;
+          out[offset] = value & 0xff;
+          out[offset + 1] = (value >>> 8) & 0xff;
+          out[offset + 2] = (value >>> 16) & 0xff;
+          out[offset + 3] = value >>> 24;
         }
       }
       for (; sample < endSample; sample++) fillSample(sample);
@@ -780,7 +945,8 @@ export class LocalPlanarSampleStore implements SampleStore {
     }
     for (let sample = startSample; sample < endSample; sample++) {
       const valueOffset = (sample - startSample) * unit;
-      for (let channel = 0; channel < channels; channel++) if (this.base[channel]!.getBit(sample)) out[valueOffset + (channel >>> 3)] |= 1 << (channel & 7);
+      for (let channel = 0; channel < channels; channel++)
+        if (this.base[channel]!.getBit(sample)) out[valueOffset + (channel >>> 3)] |= 1 << (channel & 7);
     }
     return out;
   }

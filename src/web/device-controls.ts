@@ -1,5 +1,10 @@
-import { defaultDeviceConfiguration, numericChoices,
-  type DeviceCapabilities, type DeviceConfiguration, type NumericCapability } from '../libhakei/device.js';
+import {
+  defaultDeviceConfiguration,
+  numericChoices,
+  type DeviceCapabilities,
+  type DeviceConfiguration,
+  type NumericCapability,
+} from '../libhakei/device.js';
 import type { DeviceControl } from './device-protocol.js';
 import { errorLabel, hasMessage, numberLabel, t, translateDOM, type MessageKey } from './i18n.js';
 
@@ -22,17 +27,26 @@ export class DeviceControls {
   private connectionSequence = 0;
   private configurationError: unknown = null;
   private connectionError: unknown = null;
-  constructor(readonly form: HTMLFormElement, readonly devices: readonly DeviceControl[]) {
+  constructor(
+    readonly form: HTMLFormElement,
+    readonly devices: readonly DeviceControl[],
+  ) {
     const select = this.control<HTMLSelectElement>('device-select');
     for (const device of devices) {
-      const option = document.createElement('option'); option.value = device.descriptor.id;
-      this.caption(option, `driver.${device.descriptor.id}.name`, device.descriptor.name); select.append(option);
+      const option = document.createElement('option');
+      option.value = device.descriptor.id;
+      this.caption(option, `driver.${device.descriptor.id}.name`, device.descriptor.name);
+      select.append(option);
     }
     const remembered = this.rememberedDevice();
     if (remembered) select.value = remembered;
-    for (const device of devices) device.onConnectionChange = () => {
-      if (device === this.device) { this.refreshConnection(); this.onConnectionChange?.(); }
-    };
+    for (const device of devices)
+      device.onConnectionChange = () => {
+        if (device === this.device) {
+          this.refreshConnection();
+          this.onConnectionChange?.();
+        }
+      };
     const connect = form.querySelector<HTMLButtonElement>('#connect-device');
     const disconnect = form.querySelector<HTMLButtonElement>('#disconnect-device');
     connect?.addEventListener('click', () => {
@@ -45,92 +59,156 @@ export class DeviceControls {
     });
     this.selectDevice();
     select.addEventListener('change', () => {
-      ++this.connectionSequence; this.connecting = false;
-      this.rememberDevice(); this.selectDevice();
+      ++this.connectionSequence;
+      this.connecting = false;
+      this.rememberDevice();
+      this.selectDevice();
       void this.restoreAuthorizedDevices();
     });
-    form.addEventListener('change', event => {
+    form.addEventListener('change', (event) => {
       if (event.target === select) return;
       void this.refreshCapabilities();
     });
     void this.restoreAuthorizedDevices();
   }
   private control<T extends HTMLInputElement | HTMLSelectElement = HTMLInputElement>(id: string): T {
-    const node = this.form.querySelector<T>(`#${id}`); if (!node) throw new Error(`Missing device control: ${id}`); return node;
+    const node = this.form.querySelector<T>(`#${id}`);
+    if (!node) throw new Error(`Missing device control: ${id}`);
+    return node;
   }
   get device(): DeviceControl {
-    const device = this.devices.find(item => item.descriptor.id === this.control('device-select').value);
-    if (!device) throw new Error('Select an available device'); return device;
+    const device = this.devices.find((item) => item.descriptor.id === this.control('device-select').value);
+    if (!device) throw new Error('Select an available device');
+    return device;
   }
-  get ready(): boolean { return !this.connecting && !this.configuring && !this.configurationError && this.device.connected !== false; }
+  get ready(): boolean {
+    return !this.connecting && !this.configuring && !this.configurationError && this.device.connected !== false;
+  }
   configuration(): DeviceConfiguration {
-    const values = Object.fromEntries(fields.map(([key, id]) => [key, key === 'sampleCount' ? BigInt(this.control(id).value) : Number(this.control(id).value)]));
-    const options = Object.fromEntries(this.device.descriptor.options.map(option => {
-      const value = this.control(`device-option-${option.id}`).value;
-      return [option.id, option.kind === 'number' ? Number(value) : value];
-    }));
-    return { sampleRate: Number(values.sampleRate!), sampleCount: values.sampleCount!, logicChannels: Number(values.logicChannels!), analogChannels: Number(values.analogChannels!), options };
+    const values = Object.fromEntries(
+      fields.map(([key, id]) => [
+        key,
+        key === 'sampleCount' ? BigInt(this.control(id).value) : Number(this.control(id).value),
+      ]),
+    );
+    const options = Object.fromEntries(
+      this.device.descriptor.options.map((option) => {
+        const value = this.control(`device-option-${option.id}`).value;
+        return [option.id, option.kind === 'number' ? Number(value) : value];
+      }),
+    );
+    return {
+      sampleRate: Number(values.sampleRate!),
+      sampleCount: values.sampleCount!,
+      logicChannels: Number(values.logicChannels!),
+      analogChannels: Number(values.analogChannels!),
+      options,
+    };
   }
   private caption(node: HTMLElement, key: string, fallback: string): void {
-    if (hasMessage(key)) { node.dataset.i18n = key; node.textContent = t(key); } else node.textContent = fallback;
+    if (hasMessage(key)) {
+      node.dataset.i18n = key;
+      node.textContent = t(key);
+    } else node.textContent = fallback;
   }
   private rememberedDevice(): string | undefined {
     try {
       const id = localStorage.getItem(SELECTED_DEVICE_KEY);
-      return this.devices.some(device => device.descriptor.id === id) ? id! : undefined;
-    } catch { return undefined; }
+      return this.devices.some((device) => device.descriptor.id === id) ? id! : undefined;
+    } catch {
+      return undefined;
+    }
   }
   private rememberDevice(): void {
-    try { localStorage.setItem(SELECTED_DEVICE_KEY, this.control<HTMLSelectElement>('device-select').value); } catch {}
+    try {
+      localStorage.setItem(SELECTED_DEVICE_KEY, this.control<HTMLSelectElement>('device-select').value);
+    } catch {}
   }
   private selectDevice(): void {
     const defaults = defaultDeviceConfiguration(this.device.descriptor);
-    const configuration = { ...defaults, sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
-      sampleCount: this.savedSampling('sampleCount') ?? defaults.sampleCount };
+    const configuration = {
+      ...defaults,
+      sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
+      sampleCount: this.savedSampling('sampleCount') ?? defaults.sampleCount,
+    };
     this.renderSampling(configuration, this.device.descriptor.capabilities);
-    const container = this.form.querySelector('#device-options')!; container.replaceChildren();
+    const container = this.form.querySelector('#device-options')!;
+    container.replaceChildren();
     for (const option of this.device.descriptor.options) {
-      const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span');
-      this.caption(caption, `driver.${this.device.descriptor.id}.option.${option.id}`, option.name); label.append(caption);
+      const label = document.createElement('label');
+      label.className = 'field';
+      const caption = document.createElement('span');
+      this.caption(caption, `driver.${this.device.descriptor.id}.option.${option.id}`, option.name);
+      label.append(caption);
       let input: HTMLInputElement | HTMLSelectElement;
       if (option.kind === 'choice') {
         input = document.createElement('select');
         for (const value of option.values) {
-          const item = document.createElement('option'); item.value = value; this.caption(item, `driver.${this.device.descriptor.id}.value.${value}`, value); input.append(item);
+          const item = document.createElement('option');
+          item.value = value;
+          this.caption(item, `driver.${this.device.descriptor.id}.value.${value}`, value);
+          input.append(item);
         }
       } else {
-        input = document.createElement('input'); input.type = 'number'; input.required = true;
+        input = document.createElement('input');
+        input.type = 'number';
+        input.required = true;
         input.step = String(option.step ?? 'any');
         if (option.min !== undefined) input.min = String(option.min);
         if (option.max !== undefined) input.max = String(option.max);
       }
-      input.id = `device-option-${option.id}`; input.value = String(option.default); label.append(input); container.append(label);
+      input.id = `device-option-${option.id}`;
+      input.value = String(option.default);
+      label.append(input);
+      container.append(label);
     }
-    const details = this.form.querySelector<HTMLElement>('#device-settings')!; details.hidden = !this.device.descriptor.options.length;
-    this.connectionError = null; this.refreshConnection();
-    void this.refreshCapabilities(); translateDOM();
+    const details = this.form.querySelector<HTMLElement>('#device-settings')!;
+    details.hidden = !this.device.descriptor.options.length;
+    this.connectionError = null;
+    this.refreshConnection();
+    void this.refreshCapabilities();
+    translateDOM();
   }
-  setBusy(busy: boolean): void { this.busy = busy; this.refreshConnection(); }
+  setBusy(busy: boolean): void {
+    this.busy = busy;
+    this.refreshConnection();
+  }
   private refreshConnection(): void {
-    const device = this.device, row = this.form.querySelector<HTMLElement>('#device-connection');
+    const device = this.device,
+      row = this.form.querySelector<HTMLElement>('#device-connection');
     if (!row) return;
     row.hidden = device.connected === undefined && !this.configuring && !this.configurationError;
     this.control<HTMLSelectElement>('device-select').disabled = this.busy || this.connecting;
-    const connect = row.querySelector<HTMLButtonElement>('#connect-device')!, disconnect = row.querySelector<HTMLButtonElement>('#disconnect-device')!;
+    const connect = row.querySelector<HTMLButtonElement>('#connect-device')!,
+      disconnect = row.querySelector<HTMLButtonElement>('#disconnect-device')!;
     connect.hidden = disconnect.hidden = device.connected === undefined;
     connect.disabled = this.busy || this.connecting || device.connected === true;
     disconnect.disabled = this.busy || this.connecting || !device.connected;
     const status = row.querySelector<HTMLElement>('#device-connection-status')!;
     const error = this.connectionError ?? this.configurationError;
-    status.textContent = error ? errorLabel(error) : t(this.connecting ? 'device.connecting' : this.configuring ? 'device.configuring' : device.connected ? 'device.connected' : 'device.disconnected');
+    status.textContent = error
+      ? errorLabel(error)
+      : t(
+          this.connecting
+            ? 'device.connecting'
+            : this.configuring
+              ? 'device.configuring'
+              : device.connected
+                ? 'device.connected'
+                : 'device.disconnected',
+        );
   }
   private async restoreAuthorizedDevices(): Promise<void> {
     if (this.device.connected !== false) return;
     await this.updateConnection('restore');
   }
   private async updateConnection(action: 'connect' | 'disconnect' | 'restore'): Promise<void> {
-    const device = this.device, sequence = ++this.connectionSequence;
-    this.connecting = true; this.connectionError = null; this.refreshConnection(); this.onConnectionChange?.();
+    const device = this.device,
+      sequence = ++this.connectionSequence;
+    this.connecting = true;
+    this.connectionError = null;
+    this.refreshConnection();
+    this.onConnectionChange?.();
     try {
       await device[action]();
       if (device === this.device && sequence === this.connectionSequence) await this.refreshCapabilities();
@@ -138,26 +216,43 @@ export class DeviceControls {
       if (device === this.device && sequence === this.connectionSequence) this.connectionError = error;
     } finally {
       if (device === this.device && sequence === this.connectionSequence) {
-        this.connecting = false; this.refreshConnection(); this.onConnectionChange?.();
+        this.connecting = false;
+        this.refreshConnection();
+        this.onConnectionChange?.();
       }
     }
   }
   async refreshCapabilities(): Promise<void> {
-    const device = this.device, sequence = ++this.configurationSequence;
-    this.configuring = true; this.configurationError = null; this.refreshConnection(); this.onConnectionChange?.();
+    const device = this.device,
+      sequence = ++this.configurationSequence;
+    this.configuring = true;
+    this.configurationError = null;
+    this.refreshConnection();
+    this.onConnectionChange?.();
     try {
       const settings = await device.configure(this.configuration());
       if (device !== this.device || sequence !== this.configurationSequence) return;
       this.renderSampling(settings.configuration, settings.capabilities);
-      for (const option of device.descriptor.options) this.control(`device-option-${option.id}`).value = String(settings.configuration.options[option.id]);
-      this.rememberSampling(); translateDOM();
-      const key = JSON.stringify([device.descriptor.id, ...fields.map(([field]) => String(settings.configuration[field])), settings.configuration.options]);
-      if (key !== this.configurationKey) { this.configurationKey = key; this.onChange?.(); }
+      for (const option of device.descriptor.options)
+        this.control(`device-option-${option.id}`).value = String(settings.configuration.options[option.id]);
+      this.rememberSampling();
+      translateDOM();
+      const key = JSON.stringify([
+        device.descriptor.id,
+        ...fields.map(([field]) => String(settings.configuration[field])),
+        settings.configuration.options,
+      ]);
+      if (key !== this.configurationKey) {
+        this.configurationKey = key;
+        this.onChange?.();
+      }
     } catch (error) {
       if (device === this.device && sequence === this.configurationSequence) this.configurationError = error;
     } finally {
       if (device === this.device && sequence === this.configurationSequence) {
-        this.configuring = false; this.refreshConnection(); this.onConnectionChange?.();
+        this.configuring = false;
+        this.refreshConnection();
+        this.onConnectionChange?.();
       }
     }
   }
@@ -167,63 +262,126 @@ export class DeviceControls {
     let previewRate: number | undefined;
     let previewCount: bigint | undefined;
     for (const [key, id, captionKey] of fields) {
-      const capability = capabilities[key], value = configuration[key];
+      const capability = capabilities[key],
+        value = configuration[key];
       const selected = value;
       if (key === 'sampleRate') previewRate = Number(selected);
       if (key === 'sampleCount') previewCount = BigInt(selected);
-      const label = document.createElement('label'); label.className = 'field'; const caption = document.createElement('span');
-      this.caption(caption, captionKey, captionKey); label.append(caption);
-      this.numericControl(label, id, capability, selected, captionKey); container.append(label);
+      const label = document.createElement('label');
+      label.className = 'field';
+      const caption = document.createElement('span');
+      this.caption(caption, captionKey, captionKey);
+      label.append(caption);
+      this.numericControl(label, id, capability, selected, captionKey);
+      container.append(label);
     }
-    const preview = document.createElement('p'); preview.id = 'capture-duration-preview'; preview.className = 'hint';
-    preview.textContent = this.durationPreview(previewCount!, previewRate!); container.append(preview);
+    const preview = document.createElement('p');
+    preview.id = 'capture-duration-preview';
+    preview.className = 'hint';
+    preview.textContent = this.durationPreview(previewCount!, previewRate!);
+    container.append(preview);
   }
-  private samplingKey(key: 'sampleRate' | 'sampleCount'): string { return `hakei.${this.device.descriptor.id}.${key}`; }
+  private samplingKey(key: 'sampleRate' | 'sampleCount'): string {
+    return `hakei.${this.device.descriptor.id}.${key}`;
+  }
   private savedSampling(key: 'sampleRate' | 'sampleCount'): number | bigint | undefined {
     try {
-      const raw = localStorage.getItem(this.samplingKey(key)); if (!raw) return undefined;
+      const raw = localStorage.getItem(this.samplingKey(key));
+      if (!raw) return undefined;
       if (key === 'sampleCount') return BigInt(raw);
-      const value = Number(raw); return Number.isSafeInteger(value) ? value : undefined;
-    } catch { return undefined; }
+      const value = Number(raw);
+      return Number.isSafeInteger(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
   }
   private rememberSampling(): void {
-    for (const [key, id] of [['sampleRate', 'sample-rate'], ['sampleCount', 'sample-limit']] as const) {
-      const input = this.form.querySelector<HTMLInputElement | HTMLSelectElement>('#' + id); if (!input) continue;
-      try { localStorage.setItem(this.samplingKey(key), input.value); } catch {}
+    for (const [key, id] of [
+      ['sampleRate', 'sample-rate'],
+      ['sampleCount', 'sample-limit'],
+    ] as const) {
+      const input = this.form.querySelector<HTMLInputElement | HTMLSelectElement>('#' + id);
+      if (!input) continue;
+      try {
+        localStorage.setItem(this.samplingKey(key), input.value);
+      } catch {}
     }
   }
   private durationPreview(sampleCount: bigint, sampleRate: number): string {
     const seconds = Number(sampleCount) / sampleRate;
     if (!Number.isFinite(seconds)) return '';
-    const value = seconds < 1e-6 ? `${(seconds * 1e9).toFixed(2)} ns` : seconds < 1e-3 ? `${(seconds * 1e6).toFixed(2)} us` : seconds < 1 ? `${(seconds * 1e3).toFixed(2)} ms` : seconds < 60 ? `${seconds.toFixed(3)} s` : `${(seconds / 60).toFixed(2)} min`;
+    const value =
+      seconds < 1e-6
+        ? `${(seconds * 1e9).toFixed(2)} ns`
+        : seconds < 1e-3
+          ? `${(seconds * 1e6).toFixed(2)} us`
+          : seconds < 1
+            ? `${(seconds * 1e3).toFixed(2)} ms`
+            : seconds < 60
+              ? `${seconds.toFixed(3)} s`
+              : `${(seconds / 60).toFixed(2)} min`;
     return t('capture.durationPreview', { duration: value });
   }
   private choiceLabel(value: number | bigint, id: string): string {
     if (id !== 'sample-rate' && id !== 'sample-limit') return numberLabel(value);
-    const units = [[1e15, 'P'], [1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'k'], [1, '']] as const;
+    const units = [
+      [1e15, 'P'],
+      [1e12, 'T'],
+      [1e9, 'G'],
+      [1e6, 'M'],
+      [1e3, 'k'],
+      [1, ''],
+    ] as const;
     const [scale, prefix] = units.find(([scale]) => value >= scale) ?? [1, ''];
     const unit = prefix + (id === 'sample-rate' ? 'Hz' : '');
     return numberLabel(Number(value) / scale, { maximumSignificantDigits: 16 }) + (unit ? ` ${unit}` : '');
   }
-  private numericControl(label: HTMLElement, id: string, capability: NumericCapability<number | bigint>, value: number | bigint, captionKey: MessageKey): void {
+  private numericControl(
+    label: HTMLElement,
+    id: string,
+    capability: NumericCapability<number | bigint>,
+    value: number | bigint,
+    captionKey: MessageKey,
+  ): void {
     let input: HTMLInputElement | HTMLSelectElement;
     const choices = numericChoices(capability);
     if (capability.kind === 'list' || id === 'sample-rate' || id === 'sample-limit') {
-      input = document.createElement('select'); input.required = true;
+      input = document.createElement('select');
+      input.required = true;
       for (const choice of choices) {
-        const option = document.createElement('option'); option.value = String(choice);
-        option.textContent = this.choiceLabel(choice, id); option.title = numberLabel(choice) + (id === 'sample-rate' ? ' Hz' : ''); input.append(option);
+        const option = document.createElement('option');
+        option.value = String(choice);
+        option.textContent = this.choiceLabel(choice, id);
+        option.title = numberLabel(choice) + (id === 'sample-rate' ? ' Hz' : '');
+        input.append(option);
       }
-      if (!choices.some(choice => String(choice) === String(value))) {
-        const option = document.createElement('option'); option.value = String(value); option.textContent = this.choiceLabel(value, id); input.append(option);
+      if (!choices.some((choice) => String(choice) === String(value))) {
+        const option = document.createElement('option');
+        option.value = String(value);
+        option.textContent = this.choiceLabel(value, id);
+        input.append(option);
       }
     } else {
-      input = document.createElement('input'); input.type = 'number'; input.required = true;
-      input.min = String(capability.min); input.max = String(capability.max); input.step = String(capability.step);
-      const list = document.createElement('datalist'); list.id = `${id}-choices`; input.setAttribute('list', list.id);
-      for (const choice of choices) { const option = document.createElement('option'); option.value = String(choice); option.label = numberLabel(choice); list.append(option); }
+      input = document.createElement('input');
+      input.type = 'number';
+      input.required = true;
+      input.min = String(capability.min);
+      input.max = String(capability.max);
+      input.step = String(capability.step);
+      const list = document.createElement('datalist');
+      list.id = `${id}-choices`;
+      input.setAttribute('list', list.id);
+      for (const choice of choices) {
+        const option = document.createElement('option');
+        option.value = String(choice);
+        option.label = numberLabel(choice);
+        list.append(option);
+      }
       label.append(list);
     }
-    input.id = id; input.value = String(value); input.dataset.i18nAttrs = `aria-label:${captionKey}`; label.append(input);
+    input.id = id;
+    input.value = String(value);
+    input.dataset.i18nAttrs = `aria-label:${captionKey}`;
+    label.append(input);
   }
 }

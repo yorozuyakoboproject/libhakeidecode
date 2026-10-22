@@ -86,7 +86,9 @@ export interface DecoderContext {
   channelValue(id: ChannelId, sample?: bigint): Pin | undefined;
   readonly currentSample: bigint;
 }
-export interface EofInfo { readonly sample: bigint; }
+export interface EofInfo {
+  readonly sample: bigint;
+}
 export interface DecoderLifecycle {
   readonly descriptor: DecoderDescriptor;
   ctx: DecoderContext | null;
@@ -99,10 +101,14 @@ export interface DecoderLifecycle {
   onEof?(info: EofInfo): void;
   onCancel?(): void;
 }
-export interface LogicDecoder extends DecoderLifecycle { decode(): LogicGenerator; }
-export interface ProtocolDecoder<Data = unknown> extends DecoderLifecycle { decode(ss: bigint, es: bigint, data: Data): void; }
+export interface LogicDecoder extends DecoderLifecycle {
+  decode(): LogicGenerator;
+}
+export interface ProtocolDecoder<Data = unknown> extends DecoderLifecycle {
+  decode(ss: bigint, es: bigint, data: Data): void;
+}
 export interface DecoderClass {
-  new(options?: Record<string, OptionValue>): DecoderLifecycle;
+  new (options?: Record<string, OptionValue>): DecoderLifecycle;
   readonly descriptor: DecoderDescriptor;
   readonly apiVersion?: number;
 }
@@ -130,14 +136,17 @@ export interface SignalWindow {
 export interface OutputSink<Batch = readonly OutputEvent[]> {
   write(batch: Batch): void | Promise<void>;
 }
-export interface DecoderEngineContext<Options extends object = Record<string, OptionValue>, Batch = readonly OutputEvent[]> {
+export interface DecoderEngineContext<
+  Options extends object = Record<string, OptionValue>,
+  Batch = readonly OutputEvent[],
+> {
   readonly sampleRate: number;
   readonly options: Options;
   readonly channels: ChannelMapping;
   readonly instanceId?: string;
   readonly sink: OutputSink<Batch>;
 }
-export interface DecoderEngine<Batch = readonly OutputEvent[]> {
+export interface DecoderEngine<_Batch = readonly OutputEvent[]> {
   push(window: SignalWindow): void | Promise<void>;
   flush?(): void | Promise<void>;
   finish(): void | Promise<void>;

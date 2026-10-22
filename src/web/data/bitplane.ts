@@ -21,7 +21,10 @@ export class BitPlane {
 
   bits = 0;
 
-  constructor(blockBitsLog: number, private readonly budget?: MemoryBudget) {
+  constructor(
+    blockBitsLog: number,
+    private readonly budget?: MemoryBudget,
+  ) {
     if (blockBitsLog < 5 || blockBitsLog > 30) throw new Error(`bad blockBitsLog ${blockBitsLog}`);
     this.blockBitsLog = blockBitsLog;
     this.blockBits = 1 << blockBitsLog;
@@ -31,11 +34,19 @@ export class BitPlane {
 
   reserve(n: number): void {
     const need = Math.ceil(n / this.blockBits);
-    while (this.blocks.length < need) this.blocks.push(this.budget ? new Uint32Array(this.budget.allocate(this.blockWords * 4, 'digital block')) : new Uint32Array(this.blockWords));
+    while (this.blocks.length < need)
+      this.blocks.push(
+        this.budget
+          ? new Uint32Array(this.budget.allocate(this.blockWords * 4, 'digital block'))
+          : new Uint32Array(this.blockWords),
+      );
   }
 
   trimBlocks(count: number): void {
-    while (this.blocks.length > count) { const block = this.blocks.pop()!; this.budget?.release(block.buffer); }
+    while (this.blocks.length > count) {
+      const block = this.blocks.pop()!;
+      this.budget?.release(block.buffer);
+    }
   }
 
   extendTo(n: number): void {

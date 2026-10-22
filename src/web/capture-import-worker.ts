@@ -15,12 +15,22 @@ export interface CaptureImportInfo {
   readonly workspace?: Capture['workspace'];
   readonly acquisition?: Capture['acquisition'];
 }
-type ImportRequest = { type: 'start'; file: File; sampleRate: number; width: number; pipeline: CaptureImportPipelineOptions; port: MessagePort };
+type ImportRequest = {
+  type: 'start';
+  file: File;
+  sampleRate: number;
+  width: number;
+  pipeline: CaptureImportPipelineOptions;
+  port: MessagePort;
+};
 type ImportResponse =
   | { type: 'progress'; fraction: number }
   | { type: 'done'; capture: CaptureImportInfo }
   | { type: 'error'; message: string; key?: MessageKey; params?: MessageParams };
-type Scope = { onmessage: ((event: MessageEvent<ImportRequest>) => void) | null; postMessage(message: ImportResponse, transfer?: Transferable[]): void };
+type Scope = {
+  onmessage: ((event: MessageEvent<ImportRequest>) => void) | null;
+  postMessage(message: ImportResponse, transfer?: Transferable[]): void;
+};
 const scope = globalThis as unknown as Scope;
 
 scope.onmessage = ({ data }) => {
@@ -28,19 +38,45 @@ scope.onmessage = ({ data }) => {
   scope.onmessage = null;
   void (async () => {
     let capture: Capture | null = null;
-    const server = new WorkerStoreServer(() => capture ? { store: capture.store as PlanarSampleStore | RleSampleStore,
-      labels: capture.labels, ...(capture.logicChannelCount === undefined ? {} : { logicChannelCount: capture.logicChannelCount }),
-      ...(capture.analogChannels ? { analogChannels: capture.analogChannels } : {}) } : null);
+    const server = new WorkerStoreServer(() =>
+      capture
+        ? {
+            store: capture.store as PlanarSampleStore | RleSampleStore,
+            labels: capture.labels,
+            ...(capture.logicChannelCount === undefined ? {} : { logicChannelCount: capture.logicChannelCount }),
+            ...(capture.analogChannels ? { analogChannels: capture.analogChannels } : {}),
+          }
+        : null,
+    );
     try {
-      capture = await importCaptureLocal(data.file, data.sampleRate, data.width, fraction => scope.postMessage({ type: 'progress', fraction }), undefined, data.pipeline);
+      capture = await importCaptureLocal(
+        data.file,
+        data.sampleRate,
+        data.width,
+        (fraction) => scope.postMessage({ type: 'progress', fraction }),
+        undefined,
+        data.pipeline,
+      );
       server.connect(data.port);
-      scope.postMessage({ type: 'done', capture: { metadata: server.metadata(), name: capture.name, triggerSample: capture.triggerSample,
-        loadedMs: capture.loadedMs, ...(capture.logicChannelCount === undefined ? {} : { logicChannelCount: capture.logicChannelCount }),
-        ...(capture.workspace ? { workspace: capture.workspace } : {}), ...(capture.acquisition ? { acquisition: capture.acquisition } : {}) } });
+      scope.postMessage({
+        type: 'done',
+        capture: {
+          metadata: server.metadata(),
+          name: capture.name,
+          triggerSample: capture.triggerSample,
+          loadedMs: capture.loadedMs,
+          ...(capture.logicChannelCount === undefined ? {} : { logicChannelCount: capture.logicChannelCount }),
+          ...(capture.workspace ? { workspace: capture.workspace } : {}),
+          ...(capture.acquisition ? { acquisition: capture.acquisition } : {}),
+        },
+      });
     } catch (error) {
       server.dispose();
-      scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error),
-        ...(error instanceof UIError ? { key: error.key, params: error.params } : {}) });
+      scope.postMessage({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof UIError ? { key: error.key, params: error.params } : {}),
+      });
     }
   })();
 };

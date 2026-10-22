@@ -20,7 +20,8 @@ export function assertGapBounds(startSample: bigint, endSample: bigint, length: 
 
 export function mergeGap(list: readonly GapSpan[], start: bigint, end: bigint): GapSpan[] {
   const out: GapSpan[] = [];
-  let lo = start, hi = end;
+  let lo = start,
+    hi = end;
   let placed = false;
   for (const g of list) {
     if (!placed && g.startSample > hi) {
@@ -38,9 +39,7 @@ export function mergeGap(list: readonly GapSpan[], start: bigint, end: bigint): 
   return out;
 }
 
-export function splitAroundGaps(
-  gaps: readonly GapSpan[], s: bigint, e: bigint,
-): Array<[bigint, bigint]> {
+export function splitAroundGaps(gaps: readonly GapSpan[], s: bigint, e: bigint): Array<[bigint, bigint]> {
   if (gaps.length === 0) return [[s, e]];
   const out: Array<[bigint, bigint]> = [];
   let a = s;
@@ -55,9 +54,7 @@ export function splitAroundGaps(
   return out;
 }
 
-export function channelAcrossGaps(
-  store: SampleStore, channel: number,
-): { initial: 0 | 1; edges: bigint[] } {
+export function channelAcrossGaps(store: SampleStore, channel: number): { initial: 0 | 1; edges: bigint[] } {
   const len = store.length;
   if (len === 0n) return { initial: 0, edges: [] };
 
@@ -71,13 +68,18 @@ export function channelAcrossGaps(
   let count = 0;
   for (const g of gaps) {
     if (g.endSample >= len) continue;
-    while (i < src.length && src[i]! <= g.endSample) { i++; count++; }
+    while (i < src.length && src[i]! <= g.endSample) {
+      i++;
+      count++;
+    }
     const have = (initial ^ ((count + extra.length) & 1)) as 0 | 1;
     if (have !== levelAt(g.endSample)) extra.push(g.endSample - 1n);
   }
   if (extra.length === 0) return { initial, edges: src };
   const out = new Array<bigint>(src.length + extra.length);
-  let a = 0, b = 0, w = 0;
+  let a = 0,
+    b = 0,
+    w = 0;
   while (a < src.length || b < extra.length) {
     if (b >= extra.length || (a < src.length && src[a]! <= extra[b]!)) out[w++] = src[a++]!;
     else out[w++] = extra[b++]!;

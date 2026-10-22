@@ -41,10 +41,16 @@
     }
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "dev": "vite",
+    "build": "npm run lint && npm run fmt && node scripts/build.mjs",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "npm run lint -- --fix",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "check": "npm run lint && npm run fmt:check && npm run typecheck",
     "typecheck": "node scripts/generate-components.mjs && tsc -p tsconfig.json --noEmit",
-    "preserve": "npm run build",
-    "serve": "node scripts/server.mjs",
+    "serve": "vite",
+    "preview": "vite preview",
     "prepack": "npm run build",
     "build:wasm": "node scripts/build-transpose-wasm.mjs"
   },
@@ -53,14 +59,19 @@
     "dist",
     "web",
     "scripts",
+    "index.html",
     "README.md",
-    "tsconfig.json"
+    "tsconfig.json",
+    "vite.config.mjs"
   ],
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "devDependencies": {
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
     "typescript": "7.0.2",
+    "vite": "8.3.5",
     "wabt": "1.0.39"
   },
   "types": "./dist/src/index.d.ts"

@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "oxc"],
+  "categories": { "correctness": "error" },
+  "env": { "browser": true, "worker": true },
+  "ignorePatterns": [".cache/", "dist/", "src/generated/"],
+  "overrides": [
+    {
+      "files": ["scripts/*.mjs", "vite.config.mjs"],
+      "env": { "browser": false, "worker": false, "node": true }
+    }
+  ]
+}

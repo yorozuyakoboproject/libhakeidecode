@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 120,
+  "singleQuote": true,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    ".cache/",
+    "dist/",
+    "src/generated/",
+    "src/web/data/transpose32-wasm-binary.ts",
+    "package-lock.json",
+    "AGENTS.md",
+    "README.md"
+  ]
+}

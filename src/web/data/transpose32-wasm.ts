@@ -12,9 +12,9 @@ function getModule(backend: 'wasm-scalar' | 'wasm-simd'): WebAssembly.Module | n
   let module: WebAssembly.Module | null = null;
   try {
     const base64 = backend === 'wasm-simd' ? TRANSPOSE32_SIMD_BASE64 : TRANSPOSE32_SCALAR_BASE64;
-    const bytes = Uint8Array.from(atob(base64), ch => ch.charCodeAt(0));
+    const bytes = Uint8Array.from(atob(base64), (ch) => ch.charCodeAt(0));
     if (WebAssembly.validate(bytes)) module = new WebAssembly.Module(bytes);
-  } catch {   }
+  } catch {}
   modules.set(backend, module);
   return module;
 }
@@ -37,7 +37,7 @@ export class WasmTranspose32 {
     this.output = new Uint32Array(memory.buffer, OUTPUT_OFFSET, INPUT_WORDS);
     const basic = exports[backend === 'wasm-simd' ? 'transpose_simd' : 'transpose_scalar'] as (words: number) => void;
     const fourTiles = exports.transpose_simd4 as ((words: number) => void) | undefined;
-    this.run = fourTiles ? words => (words % 4 === 0 ? fourTiles : basic)(words) : basic;
+    this.run = fourTiles ? (words) => (words % 4 === 0 ? fourTiles : basic)(words) : basic;
   }
 
   transpose(src: Uint32Array, si: number, words: number, blocks: readonly Uint32Array[], wordOffset: number): void {
@@ -47,7 +47,8 @@ export class WasmTranspose32 {
       const start = si + done * 32;
       this.input.set(src.subarray(start, start + count * 32));
       this.run(count);
-      for (let ch = 0; ch < 32; ch++) blocks[ch]!.set(this.output.subarray(ch * count, (ch + 1) * count), wordOffset + done);
+      for (let ch = 0; ch < 32; ch++)
+        blocks[ch]!.set(this.output.subarray(ch * count, (ch + 1) * count), wordOffset + done);
       done += count;
     }
   }
@@ -62,7 +63,9 @@ export function createTranspose32(backend: Transpose32Backend = 'auto'): {
     try {
       const wasm = new WasmTranspose32('wasm-simd');
       return { backend: wasm.backend, scratchBytes: wasm.scratchBytes, transpose: wasm.transpose.bind(wasm) };
-    } catch { backend = 'js'; }
+    } catch {
+      backend = 'js';
+    }
   }
   if (backend === 'js') return { backend, scratchBytes: 0, transpose: transpose32Words };
   const wasm = new WasmTranspose32(backend);

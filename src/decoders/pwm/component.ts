@@ -30,7 +30,9 @@ export const component = {
     annotationTexts,
     summary(result, decimals, text): string {
       const average = result.values.averageDutyCycle;
-      return average === null || average === undefined ? '' : text('decoder.pwm.summary', 'Mean duty: {duty}%').replace('{duty}', average.toFixed(decimals));
+      return average === null || average === undefined
+        ? ''
+        : text('decoder.pwm.summary', 'Mean duty: {duty}%').replace('{duty}', average.toFixed(decimals));
     },
   },
 } satisfies DecoderDefinition;

@@ -10,8 +10,17 @@ export const worker: DecoderWorkerDefinition = {
   csvHeader: 'direction,start_sample,end_sample,time_s,value_hex,value_dec,valid',
   csvRow(value, sampleRate, triggerSample): string {
     const item = frame(value);
-    return [item.direction ? 'TX' : 'RX', item.ss, item.es, Number(item.ss - triggerSample) / sampleRate,
-      item.value.toString(16).toUpperCase(), item.value, item.valid === null ? 'incomplete' : item.valid].join(',');
+    return [
+      item.direction ? 'TX' : 'RX',
+      item.ss,
+      item.es,
+      Number(item.ss - triggerSample) / sampleRate,
+      item.value.toString(16).toUpperCase(),
+      item.value,
+      item.valid === null ? 'incomplete' : item.valid,
+    ].join(',');
   },
-  compareFrames(left, right): number { return left.ss < right.ss ? -1 : left.ss > right.ss ? 1 : frame(left).direction - frame(right).direction; },
+  compareFrames(left, right): number {
+    return left.ss < right.ss ? -1 : left.ss > right.ss ? 1 : frame(left).direction - frame(right).direction;
+  },
 };

@@ -13,24 +13,54 @@ export interface SharedChunkDescriptor {
   readonly bytesPerSample: number;
   readonly buffer: SharedArrayBuffer;
 }
-export interface SharedSampleRead { readonly startSample: bigint; readonly sampleCount: number; readonly data: Uint8Array }
-export interface SharedPublisherMetrics { readonly calls: number; readonly bytes: number; readonly totalMs: number; readonly maxMs: number }
+export interface SharedSampleRead {
+  readonly startSample: bigint;
+  readonly sampleCount: number;
+  readonly data: Uint8Array;
+}
+export interface SharedPublisherMetrics {
+  readonly calls: number;
+  readonly bytes: number;
+  readonly totalMs: number;
+  readonly maxMs: number;
+}
 export class SharedCaptureError extends Error {
-  constructor(readonly captureState: 'stopped' | 'error', message: string) { super(message); this.name = 'SharedCaptureError'; }
+  constructor(
+    readonly captureState: 'stopped' | 'error',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SharedCaptureError';
+  }
 }
 type SharedMessage =
-  | { type: 'directory'; sessionId: string; chunks: SharedChunkDescriptor[]; publishedSamples: bigint; state: SharedCaptureState; error?: string }
+  | {
+      type: 'directory';
+      sessionId: string;
+      chunks: SharedChunkDescriptor[];
+      publishedSamples: bigint;
+      state: SharedCaptureState;
+      error?: string;
+    }
   | { type: 'chunk'; sessionId: string; chunk: SharedChunkDescriptor }
   | { type: 'commit'; sessionId: string; chunkId: number; committedSamples: number; publishedSamples: bigint }
   | { type: 'state'; sessionId: string; state: SharedCaptureState; publishedSamples: bigint; error?: string };
 type ConsumerPort = MessagePort;
 
 function checkChunkBytes(chunkBytes: number, bytesPerSample: number): void {
-  if (!Number.isSafeInteger(chunkBytes) || chunkBytes < bytesPerSample || !Number.isSafeInteger(bytesPerSample) || bytesPerSample < 1)
+  if (
+    !Number.isSafeInteger(chunkBytes) ||
+    chunkBytes < bytesPerSample ||
+    !Number.isSafeInteger(bytesPerSample) ||
+    bytesPerSample < 1
+  )
     throw new RangeError('Invalid shared chunk layout');
-  if (Math.floor(chunkBytes / bytesPerSample) > 0x7fffffff) throw new RangeError('Shared chunk exceeds atomic sample count');
+  if (Math.floor(chunkBytes / bytesPerSample) > 0x7fffffff)
+    throw new RangeError('Shared chunk exceeds atomic sample count');
 }
-function sharedHeader(chunk: SharedChunkDescriptor): Int32Array { return new Int32Array(chunk.buffer, 0, HEADER_BYTES / 4); }
+function sharedHeader(chunk: SharedChunkDescriptor): Int32Array {
+  return new Int32Array(chunk.buffer, 0, HEADER_BYTES / 4);
+}
 
 export interface SharedChunkProducerOptions {
   readonly sampleCount: bigint;
@@ -42,7 +72,12 @@ export interface SharedChunkProducerOptions {
 
   readonly onProgress?: (allocatedBytes: number, publishedSamples: bigint, publisher: SharedPublisherMetrics) => void;
 }
-interface PendingAllocation { capacitySamples: number; byteLength: number; buffer?: SharedArrayBuffer; promise: Promise<SharedArrayBuffer> }
+interface PendingAllocation {
+  capacitySamples: number;
+  byteLength: number;
+  buffer?: SharedArrayBuffer;
+  promise: Promise<SharedArrayBuffer>;
+}
 export class SharedChunkProducer {
   readonly sessionId: string;
   readonly bytesPerSample: number;
@@ -61,23 +96,35 @@ export class SharedChunkProducer {
   private readonly publisher = { calls: 0, bytes: 0, totalMs: 0, maxMs: 0 };
 
   constructor(options: SharedChunkProducerOptions) {
-    if (typeof SharedArrayBuffer === 'undefined') throw new Error('SharedArrayBuffer is unavailable; serve the page in a cross-origin isolated context');
+    if (typeof SharedArrayBuffer === 'undefined')
+      throw new Error('SharedArrayBuffer is unavailable; serve the page in a cross-origin isolated context');
     if (options.sampleCount < 0n) throw new RangeError('Sample count must not be negative');
     this.sampleCount = options.sampleCount;
     this.bytesPerSample = options.bytesPerSample ?? 1;
     this.chunkBytes = options.chunkBytes ?? DEFAULT_SHARED_CHUNK_BYTES;
     checkChunkBytes(this.chunkBytes, this.bytesPerSample);
     this.sessionId = options.sessionId ?? `capture-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    this.allocate = options.allocate ?? (size => new SharedArrayBuffer(size));
+    this.allocate = options.allocate ?? ((size) => new SharedArrayBuffer(size));
     this.onProgress = options.onProgress;
   }
-  get length(): bigint { return this.published; }
-  get chunks(): readonly SharedChunkDescriptor[] { return this.directory; }
-  get state(): SharedCaptureState { return this.terminalState; }
-  get publisherMetrics(): SharedPublisherMetrics { return { ...this.publisher }; }
+  get length(): bigint {
+    return this.published;
+  }
+  get chunks(): readonly SharedChunkDescriptor[] {
+    return this.directory;
+  }
+  get state(): SharedCaptureState {
+    return this.terminalState;
+  }
+  get publisherMetrics(): SharedPublisherMetrics {
+    return { ...this.publisher };
+  }
   get allocatedBytes(): number {
-    return this.directory.reduce((sum, chunk) => sum + chunk.buffer.byteLength, 0)
-      + (this.prepared?.buffer.byteLength ?? 0) + (this.allocation?.buffer?.byteLength ?? 0);
+    return (
+      this.directory.reduce((sum, chunk) => sum + chunk.buffer.byteLength, 0) +
+      (this.prepared?.buffer.byteLength ?? 0) +
+      (this.allocation?.buffer?.byteLength ?? 0)
+    );
   }
 
   async prepare(): Promise<void> {
@@ -101,7 +148,7 @@ export class SharedChunkProducer {
     }
     const consumer = port as ConsumerPort;
     this.consumers.add(consumer);
-    consumer.addEventListener('message', event => {
+    consumer.addEventListener('message', (event) => {
       if ((event.data as { type?: unknown })?.type === 'detach') this.consumers.delete(consumer);
     });
     consumer.start();
@@ -112,27 +159,38 @@ export class SharedChunkProducer {
     if (this.terminalState !== 'open') throw new Error('Shared capture is already terminal');
     if (data.byteLength % this.bytesPerSample) throw new RangeError('Append must contain whole samples');
     const totalSamples = data.byteLength / this.bytesPerSample;
-    if (this.published + BigInt(totalSamples) > this.sampleCount) throw new RangeError('Append exceeds requested sample count');
+    if (this.published + BigInt(totalSamples) > this.sampleCount)
+      throw new RangeError('Append exceeds requested sample count');
     let sourceOffset = 0;
     while (sourceOffset < data.byteLength) {
-      const chunk = this.active ?? await this.createChunk();
-      const header = sharedHeader(chunk), committed = Atomics.load(header, COMMITTED_SAMPLES);
+      const chunk = this.active ?? (await this.createChunk());
+      const header = sharedHeader(chunk),
+        committed = Atomics.load(header, COMMITTED_SAMPLES);
       const capacityBytes = chunk.capacitySamples * this.bytesPerSample;
       const availableBytes = capacityBytes - committed * this.bytesPerSample;
       const countBytes = Math.min(availableBytes, data.byteLength - sourceOffset);
       const countSamples = countBytes / this.bytesPerSample;
       const publishStarted = performance.now();
-      new Uint8Array(chunk.buffer, HEADER_BYTES + committed * this.bytesPerSample, countBytes)
-        .set(data.subarray(sourceOffset, sourceOffset + countBytes));
+      new Uint8Array(chunk.buffer, HEADER_BYTES + committed * this.bytesPerSample, countBytes).set(
+        data.subarray(sourceOffset, sourceOffset + countBytes),
+      );
       const nextCommitted = committed + countSamples;
       Atomics.store(header, VALID_SAMPLES, nextCommitted);
       Atomics.store(header, COMMITTED_SAMPLES, nextCommitted);
       this.published += BigInt(countSamples);
       sourceOffset += countBytes;
-      this.broadcast({ type: 'commit', sessionId: this.sessionId, chunkId: chunk.id, committedSamples: nextCommitted, publishedSamples: this.published });
+      this.broadcast({
+        type: 'commit',
+        sessionId: this.sessionId,
+        chunkId: chunk.id,
+        committedSamples: nextCommitted,
+        publishedSamples: this.published,
+      });
       const publishMs = performance.now() - publishStarted;
-      this.publisher.calls++; this.publisher.bytes += countBytes;
-      this.publisher.totalMs += publishMs; this.publisher.maxMs = Math.max(this.publisher.maxMs, publishMs);
+      this.publisher.calls++;
+      this.publisher.bytes += countBytes;
+      this.publisher.totalMs += publishMs;
+      this.publisher.maxMs = Math.max(this.publisher.maxMs, publishMs);
       this.reportProgress();
       if (nextCommitted === chunk.capacitySamples) this.active = null;
       else if (nextCommitted * 4 >= chunk.capacitySamples * 3) this.preallocateNext();
@@ -141,11 +199,18 @@ export class SharedChunkProducer {
 
   finish(state: Exclude<SharedCaptureState, 'open'>, error?: string): void {
     if (this.terminalState !== 'open') return;
-    if (state === 'complete' && this.published !== this.sampleCount) throw new Error('Cannot complete before the requested sample count is committed');
+    if (state === 'complete' && this.published !== this.sampleCount)
+      throw new Error('Cannot complete before the requested sample count is committed');
     this.terminalState = state;
     this.terminalError = error;
     for (const chunk of this.directory) Atomics.store(sharedHeader(chunk), CHUNK_STATE, stateCode(state));
-    this.broadcast({ type: 'state', sessionId: this.sessionId, state, publishedSamples: this.published, ...(error ? { error } : {}) });
+    this.broadcast({
+      type: 'state',
+      sessionId: this.sessionId,
+      state,
+      publishedSamples: this.published,
+      ...(error ? { error } : {}),
+    });
     this.prepared = null;
     this.reportProgress();
   }
@@ -157,9 +222,14 @@ export class SharedChunkProducer {
   }
   private requestAllocation(capacitySamples: number): PendingAllocation {
     const byteLength = HEADER_BYTES + capacitySamples * this.bytesPerSample;
-    const pending: PendingAllocation = { capacitySamples, byteLength, promise: Promise.resolve().then(() => this.allocate(byteLength)) };
-    pending.promise = pending.promise.then(buffer => {
-      if (!(buffer instanceof SharedArrayBuffer) || buffer.byteLength !== byteLength) throw new Error('Shared chunk allocator returned an invalid buffer');
+    const pending: PendingAllocation = {
+      capacitySamples,
+      byteLength,
+      promise: Promise.resolve().then(() => this.allocate(byteLength)),
+    };
+    pending.promise = pending.promise.then((buffer) => {
+      if (!(buffer instanceof SharedArrayBuffer) || buffer.byteLength !== byteLength)
+        throw new Error('Shared chunk allocator returned an invalid buffer');
       pending.buffer = buffer;
       this.reportProgress();
       return buffer;
@@ -176,12 +246,22 @@ export class SharedChunkProducer {
   private async takeBuffer(capacitySamples: number): Promise<SharedArrayBuffer> {
     let pending = this.allocation;
     if (!pending || pending.capacitySamples !== capacitySamples) pending = this.requestAllocation(capacitySamples);
-    try { return await pending.promise; }
-    finally { if (this.allocation === pending) this.allocation = null; }
+    try {
+      return await pending.promise;
+    } finally {
+      if (this.allocation === pending) this.allocation = null;
+    }
   }
   private publishChunk(capacitySamples: number, buffer: SharedArrayBuffer): SharedChunkDescriptor {
-    const chunk: SharedChunkDescriptor = { id: this.directory.length, startSample: this.published, capacitySamples, bytesPerSample: this.bytesPerSample, buffer };
-    this.directory.push(chunk); this.active = chunk;
+    const chunk: SharedChunkDescriptor = {
+      id: this.directory.length,
+      startSample: this.published,
+      capacitySamples,
+      bytesPerSample: this.bytesPerSample,
+      buffer,
+    };
+    this.directory.push(chunk);
+    this.active = chunk;
     this.broadcast({ type: 'chunk', sessionId: this.sessionId, chunk });
     this.reportProgress();
     return chunk;
@@ -191,7 +271,10 @@ export class SharedChunkProducer {
     if (capacitySamples <= 0) throw new Error('No sample capacity remains');
     let buffer: SharedArrayBuffer;
     try {
-      buffer = this.prepared?.capacitySamples === capacitySamples ? this.prepared.buffer : await this.takeBuffer(capacitySamples);
+      buffer =
+        this.prepared?.capacitySamples === capacitySamples
+          ? this.prepared.buffer
+          : await this.takeBuffer(capacitySamples);
     } catch (error) {
       this.finish('error', error instanceof Error ? error.message : String(error));
       throw error;
@@ -200,20 +283,33 @@ export class SharedChunkProducer {
     return this.publishChunk(capacitySamples, buffer);
   }
   private directoryMessage(): SharedMessage {
-    return { type: 'directory', sessionId: this.sessionId, chunks: [...this.directory], publishedSamples: this.published,
-      state: this.terminalState, ...(this.terminalError ? { error: this.terminalError } : {}) };
+    return {
+      type: 'directory',
+      sessionId: this.sessionId,
+      chunks: [...this.directory],
+      publishedSamples: this.published,
+      state: this.terminalState,
+      ...(this.terminalError ? { error: this.terminalError } : {}),
+    };
   }
   private broadcast(message: SharedMessage): void {
     for (const port of this.consumers) {
-      try { port.postMessage(message); } catch { this.consumers.delete(port); }
+      try {
+        port.postMessage(message);
+      } catch {
+        this.consumers.delete(port);
+      }
     }
   }
   private reportProgress(): void {
-    try { this.onProgress?.(this.allocatedBytes, this.published, this.publisherMetrics); } catch {   }
+    try {
+      this.onProgress?.(this.allocatedBytes, this.published, this.publisherMetrics);
+    } catch {}
   }
-
 }
-function stateCode(state: SharedCaptureState): number { return state === 'complete' ? 1 : state === 'stopped' ? 2 : state === 'error' ? 3 : 0; }
+function stateCode(state: SharedCaptureState): number {
+  return state === 'complete' ? 1 : state === 'stopped' ? 2 : state === 'error' ? 3 : 0;
+}
 
 export class SharedChunkReader {
   private readonly chunks = new Map<number, SharedChunkDescriptor>();
@@ -231,22 +327,39 @@ export class SharedChunkReader {
     if (this.session === null) this.session = message.sessionId;
     if (message.type === 'directory') {
       for (const chunk of message.chunks) this.addChunk(chunk);
-      this.published = message.publishedSamples; this.state = message.state; this.failure = message.error;
+      this.published = message.publishedSamples;
+      this.state = message.state;
+      this.failure = message.error;
     } else if (message.type === 'chunk') this.addChunk(message.chunk);
     else if (message.type === 'commit') this.published = message.publishedSamples;
-    else { this.state = message.state; this.published = message.publishedSamples; this.failure = message.error; }
+    else {
+      this.state = message.state;
+      this.published = message.publishedSamples;
+      this.failure = message.error;
+    }
     this.wake();
   };
 
-  constructor(readonly port: MessagePort, readonly bytesPerSample = 1) {
+  constructor(
+    readonly port: MessagePort,
+    readonly bytesPerSample = 1,
+  ) {
     if (!Number.isSafeInteger(bytesPerSample) || bytesPerSample < 1) throw new RangeError('Invalid sample width');
     port.addEventListener('message', this.onMessage as EventListener);
     port.start();
   }
-  get readPosition(): bigint { return this.cursor; }
-  get availableSamples(): bigint { return this.published - this.cursor; }
-  get terminalState(): SharedCaptureState { return this.state; }
-  get chunkCount(): number { return this.chunks.size; }
+  get readPosition(): bigint {
+    return this.cursor;
+  }
+  get availableSamples(): bigint {
+    return this.published - this.cursor;
+  }
+  get terminalState(): SharedCaptureState {
+    return this.state;
+  }
+  get chunkCount(): number {
+    return this.chunks.size;
+  }
 
   readRange(startSample: bigint, endSample: bigint): Uint8Array | null {
     if (startSample < 0n || endSample < startSample) return null;
@@ -258,14 +371,16 @@ export class SharedChunkReader {
     for (let position = startSample; position < endSample;) {
       const chunk = this.findChunk(position);
       if (!chunk) return null;
-      const header = sharedHeader(chunk), committed = Atomics.load(header, COMMITTED_SAMPLES);
+      const header = sharedHeader(chunk),
+        committed = Atomics.load(header, COMMITTED_SAMPLES);
       const offset = Number(position - chunk.startSample);
       const available = committed - offset;
       if (available <= 0) return null;
       const count = Math.min(available, Number(endSample - position));
       const bytes = count * this.bytesPerSample;
       output.set(new Uint8Array(chunk.buffer, HEADER_BYTES + offset * this.bytesPerSample, bytes), destination);
-      destination += bytes; position += BigInt(count);
+      destination += bytes;
+      position += BigInt(count);
     }
     return output;
   }
@@ -281,21 +396,29 @@ export class SharedChunkReader {
   }
 
   async next(maxSamples = 1_048_576): Promise<SharedSampleRead | null> {
-    if (!Number.isSafeInteger(maxSamples) || maxSamples < 1) throw new RangeError('maxSamples must be a positive safe integer');
+    if (!Number.isSafeInteger(maxSamples) || maxSamples < 1)
+      throw new RangeError('maxSamples must be a positive safe integer');
     while (!this.closed) {
       const chunk = this.findChunk(this.cursor);
       if (chunk) {
-        const header = sharedHeader(chunk), committed = Atomics.load(header, COMMITTED_SAMPLES);
+        const header = sharedHeader(chunk),
+          committed = Atomics.load(header, COMMITTED_SAMPLES);
         const offset = Number(this.cursor - chunk.startSample);
         if (committed > offset) {
           const sampleCount = Math.min(maxSamples, committed - offset);
-          const data = new Uint8Array(chunk.buffer, HEADER_BYTES + offset * chunk.bytesPerSample, sampleCount * chunk.bytesPerSample);
-          const startSample = this.cursor; this.cursor += BigInt(sampleCount);
+          const data = new Uint8Array(
+            chunk.buffer,
+            HEADER_BYTES + offset * chunk.bytesPerSample,
+            sampleCount * chunk.bytesPerSample,
+          );
+          const startSample = this.cursor;
+          this.cursor += BigInt(sampleCount);
           return { startSample, sampleCount, data };
         }
       }
       if (this.state !== 'open' && this.cursor >= this.published) {
-        if (this.state === 'error' || this.state === 'stopped') throw new SharedCaptureError(this.state, this.failure ?? `Capture ${this.state}`);
+        if (this.state === 'error' || this.state === 'stopped')
+          throw new SharedCaptureError(this.state, this.failure ?? `Capture ${this.state}`);
         return null;
       }
       await this.waitForChange();
@@ -304,35 +427,49 @@ export class SharedChunkReader {
   }
   close(): void {
     if (this.closed) return;
-    this.closed = true; this.port.removeEventListener('message', this.onMessage as EventListener);
-    try { this.port.postMessage({ type: 'detach' }); } catch {}
-    this.port.close(); this.wake();
+    this.closed = true;
+    this.port.removeEventListener('message', this.onMessage as EventListener);
+    try {
+      this.port.postMessage({ type: 'detach' });
+    } catch {}
+    this.port.close();
+    this.wake();
   }
   private addChunk(chunk: SharedChunkDescriptor): void {
-    if (chunk.bytesPerSample !== this.bytesPerSample || chunk.id < 0 || !Number.isSafeInteger(chunk.capacitySamples)
-      || chunk.capacitySamples < 1 || chunk.startSample < 0n) throw new Error('Invalid shared chunk descriptor');
+    if (
+      chunk.bytesPerSample !== this.bytesPerSample ||
+      chunk.id < 0 ||
+      !Number.isSafeInteger(chunk.capacitySamples) ||
+      chunk.capacitySamples < 1 ||
+      chunk.startSample < 0n
+    )
+      throw new Error('Invalid shared chunk descriptor');
     const previous = this.chunks.get(chunk.id);
     if (previous && previous.buffer !== chunk.buffer) throw new Error('Shared chunk id was reused');
     this.chunks.set(chunk.id, chunk);
-    const index = this.orderedChunks.findIndex(item => item.id === chunk.id);
+    const index = this.orderedChunks.findIndex((item) => item.id === chunk.id);
     if (index >= 0) this.orderedChunks[index] = chunk;
-    else if (!this.orderedChunks.length || chunk.startSample >= this.orderedChunks.at(-1)!.startSample) this.orderedChunks.push(chunk);
+    else if (!this.orderedChunks.length || chunk.startSample >= this.orderedChunks.at(-1)!.startSample)
+      this.orderedChunks.push(chunk);
     else {
-      const at = this.orderedChunks.findIndex(item => item.startSample > chunk.startSample);
-      if (at < 0) this.orderedChunks.push(chunk); else this.orderedChunks.splice(at, 0, chunk);
+      const at = this.orderedChunks.findIndex((item) => item.startSample > chunk.startSample);
+      if (at < 0) this.orderedChunks.push(chunk);
+      else this.orderedChunks.splice(at, 0, chunk);
     }
   }
   private findChunk(sample: bigint): SharedChunkDescriptor | undefined {
-    let low = 0, high = this.orderedChunks.length;
+    let low = 0,
+      high = this.orderedChunks.length;
     while (low < high) {
       const mid = (low + high) >>> 1;
-      if (this.orderedChunks[mid]!.startSample <= sample) low = mid + 1; else high = mid;
+      if (this.orderedChunks[mid]!.startSample <= sample) low = mid + 1;
+      else high = mid;
     }
     const chunk = this.orderedChunks[low - 1];
     return chunk && sample < chunk.startSample + BigInt(chunk.capacitySamples) ? chunk : undefined;
   }
   private waitForChange(): Promise<void> {
-    return new Promise(resolve => this.waiters.add(resolve));
+    return new Promise((resolve) => this.waiters.add(resolve));
   }
   private wake(): void {
     for (const resolve of this.waiters) resolve();

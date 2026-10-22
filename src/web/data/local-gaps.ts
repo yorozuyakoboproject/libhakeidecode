@@ -18,7 +18,8 @@ export function assertGapBounds(startSample: number, endSample: number, length: 
 
 export function mergeGap(list: readonly GapSpan[], start: number, end: number): GapSpan[] {
   const out: GapSpan[] = [];
-  let lo = start, hi = end;
+  let lo = start,
+    hi = end;
   let placed = false;
   for (const g of list) {
     if (!placed && g.startSample > hi) {
@@ -36,9 +37,7 @@ export function mergeGap(list: readonly GapSpan[], start: number, end: number): 
   return out;
 }
 
-export function splitAroundGaps(
-  gaps: readonly GapSpan[], s: number, e: number,
-): Array<[number, number]> {
+export function splitAroundGaps(gaps: readonly GapSpan[], s: number, e: number): Array<[number, number]> {
   if (gaps.length === 0) return [[s, e]];
   const out: Array<[number, number]> = [];
   let a = s;

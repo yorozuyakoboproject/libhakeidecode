@@ -3,8 +3,17 @@ import type { DecoderContext, DecoderDescriptor } from '../libhakeidecode/index.
 
 export class FrameToTextDecoder extends Decoder {
   out!: number;
-  static descriptor: DecoderDescriptor = { apiVersion: 3, id: 'frame-to-text', name: 'Frame to text', inputs: ['uart'], outputs: ['text'] };
-  start(ctx: DecoderContext): void { super.start(ctx); this.out = this.register(OUTPUT_PROTOCOL, 'text'); }
+  static descriptor: DecoderDescriptor = {
+    apiVersion: 3,
+    id: 'frame-to-text',
+    name: 'Frame to text',
+    inputs: ['uart'],
+    outputs: ['text'],
+  };
+  start(ctx: DecoderContext): void {
+    super.start(ctx);
+    this.out = this.register(OUTPUT_PROTOCOL, 'text');
+  }
   decode(ss: bigint, es: bigint, data: unknown): void {
     if (!Array.isArray(data)) return;
     const [kind, direction, payload] = data;

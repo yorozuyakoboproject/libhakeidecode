@@ -35,7 +35,6 @@ export interface GapSpan {
 }
 
 export interface MemoryReport {
-
   baseBytes: number;
 
   pyramidBytes: number;

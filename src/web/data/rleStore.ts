@@ -1,14 +1,19 @@
-import { sampleIndex, sampleFloor, sampleCeil, minSample, maxSample, numberFraction, type SampleInput } from '../../libhakei/sample-index.js';
-
 import {
-  assertGapBounds, channelAcrossGaps, isSampleIndex, mergeGap, splitAroundGaps,
-} from './gaps.js';
+  sampleIndex,
+  sampleFloor,
+  sampleCeil,
+  minSample,
+  maxSample,
+  numberFraction,
+  type SampleInput,
+} from '../../libhakei/sample-index.js';
+
+import { assertGapBounds, channelAcrossGaps, isSampleIndex, mergeGap, splitAroundGaps } from './gaps.js';
 import type { ColumnView, GapSpan, MemoryReport, SampleStore } from './types.js';
 import { GAP_BIT } from './types.js';
 import { isChannelCount, type ChannelCount } from './channel-count.js';
 
 export interface RleChannelData {
-
   initial: 0 | 1;
 
   edges: bigint[];
@@ -19,7 +24,7 @@ export interface RleStoreOptions {
   samplerate: number;
 
   length: SampleInput;
-  channels: {initial: 0 | 1; edges: ArrayLike<SampleInput>}[];
+  channels: { initial: 0 | 1; edges: ArrayLike<SampleInput> }[];
   gaps?: GapSpan[];
 }
 
@@ -68,7 +73,7 @@ export class RleSampleStore implements SampleStore {
       if (src.initial !== 0 && src.initial !== 1) {
         throw new Error(`channel ${c}: initial must be 0 or 1, got ${src.initial}`);
       }
-      const edges = Array.from(src.edges, p => sampleIndex(p));
+      const edges = Array.from(src.edges, (p) => sampleIndex(p));
       for (let i = 0; i < edges.length; i++) {
         const p = edges[i]!;
         if (!isSampleIndex(p) || p < 1 || p >= length) {
@@ -85,7 +90,10 @@ export class RleSampleStore implements SampleStore {
   }
 
   static fromTransitions(
-    channelCount: ChannelCount, samplerate: number, length: SampleInput, sources: RleTransitionSource[],
+    channelCount: ChannelCount,
+    samplerate: number,
+    length: SampleInput,
+    sources: RleTransitionSource[],
   ): RleSampleStore {
     if (!(samplerate > 0)) throw new Error(`samplerate must be positive, got ${samplerate}`);
     if (sources.length !== channelCount) {
@@ -154,7 +162,8 @@ export class RleSampleStore implements SampleStore {
   }
 
   noteGap(startSample: SampleInput, endSample: SampleInput): void {
-    startSample = sampleIndex(startSample); endSample = sampleIndex(endSample);
+    startSample = sampleIndex(startSample);
+    endSample = sampleIndex(endSample);
     assertGapBounds(startSample, endSample, this.length);
     this.gapList = mergeGap(this.gapList, startSample, endSample);
   }
@@ -184,15 +193,17 @@ export class RleSampleStore implements SampleStore {
       this.scratchEdge = new Uint8Array(bins);
       this.scratchPacked = new Uint8Array(bins);
     }
-    const low = this.scratchLow, high = this.scratchHigh;
-    const edge = this.scratchEdge, packed = this.scratchPacked;
+    const low = this.scratchLow,
+      high = this.scratchHigh;
+    const edge = this.scratchEdge,
+      packed = this.scratchPacked;
 
     const { initial, edges } = this.channels[channel]!;
     const gaps = this.gapList;
     let gp = 0;
     for (let i = 0; i < bins; i++) {
-      const c0 = s + BigInt(i) * width / BigInt(bins);
-      let c1 = s + BigInt(i + 1) * width / BigInt(bins);
+      const c0 = s + (BigInt(i) * width) / BigInt(bins);
+      let c1 = s + (BigInt(i + 1) * width) / BigInt(bins);
       if (c1 <= c0) c1 = c0 + 1n;
       if (c1 > e) c1 = e;
 
@@ -203,11 +214,13 @@ export class RleSampleStore implements SampleStore {
 
       let lv: number, hv: number;
       if (n - (edgeAtC0 ? 1 : 0) > 0) {
-        lv = 0; hv = 1;
+        lv = 0;
+        hv = 1;
       } else {
         let levelC0 = initial ^ (lo & 1);
         if (edgeAtC0) levelC0 ^= 1;
-        lv = levelC0; hv = levelC0;
+        lv = levelC0;
+        hv = levelC0;
       }
       const ev = n > 0 ? 1 : 0;
 
@@ -221,8 +234,14 @@ export class RleSampleStore implements SampleStore {
     }
 
     return {
-      channel, startSample: s, endSample: e, bins,
-      low, high, edge, packed,
+      channel,
+      startSample: s,
+      endSample: e,
+      bins,
+      low,
+      high,
+      edge,
+      packed,
     };
   }
 
@@ -254,7 +273,9 @@ export class RleSampleStore implements SampleStore {
   }
 
   private edgeSegments(
-    channel: number, startSample: SampleInput, endSample: SampleInput,
+    channel: number,
+    startSample: SampleInput,
+    endSample: SampleInput,
   ): Array<[bigint, bigint]> | null {
     if (channel < 0 || channel >= this.channelCount || (channel | 0) !== channel) {
       throw new Error(`channel ${channel} out of range 0..${this.channelCount - 1}`);
@@ -277,7 +298,13 @@ export class RleSampleStore implements SampleStore {
     return {
       baseBytes,
       pyramidBytes,
-      totalBytes: baseBytes + pyramidBytes + this.scratchLow.byteLength + this.scratchHigh.byteLength + this.scratchEdge.byteLength + this.scratchPacked.byteLength,
+      totalBytes:
+        baseBytes +
+        pyramidBytes +
+        this.scratchLow.byteLength +
+        this.scratchHigh.byteLength +
+        this.scratchEdge.byteLength +
+        this.scratchPacked.byteLength,
       overhead: baseBytes === 0 ? 0 : pyramidBytes / baseBytes,
       slackBytes: 0,
     };
@@ -293,7 +320,12 @@ export class RleSampleStore implements SampleStore {
 }
 
 function lowerBound(edges: readonly bigint[], pos: bigint): number {
-  let lo = 0, hi = edges.length;
-  while (lo < hi) { const mid = Math.floor((lo + hi) / 2); if (edges[mid]! < pos) lo = mid + 1; else hi = mid; }
+  let lo = 0,
+    hi = edges.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (edges[mid]! < pos) lo = mid + 1;
+    else hi = mid;
+  }
   return lo;
 }

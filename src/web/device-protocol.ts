@@ -1,7 +1,14 @@
-import type { AcquisitionDescription, DeviceConfiguration, DeviceConfigurationState, DeviceDescriptor } from '../libhakei/device.js';
+import type {
+  AcquisitionDescription,
+  DeviceConfiguration,
+  DeviceConfigurationState,
+  DeviceDescriptor,
+} from '../libhakei/device.js';
 import type { ComponentFailure } from '../components.js';
 
-export type WorkerAcquisitionDescription = AcquisitionDescription & { readonly worker: { readonly driverId: string; readonly initialization?: unknown } };
+export type WorkerAcquisitionDescription = AcquisitionDescription & {
+  readonly worker: { readonly driverId: string; readonly initialization?: unknown };
+};
 export interface DeviceControl {
   readonly descriptor: DeviceDescriptor;
   readonly connected?: boolean;
@@ -24,5 +31,12 @@ export type DeviceCommand =
 export type DeviceRequest = DeviceCommand & { readonly requestId: number; readonly driverId: string };
 export type DeviceResponse =
   | { readonly type: 'state'; readonly state: DeviceState }
-  | { readonly type: 'result'; readonly requestId: number; readonly state: DeviceState; readonly restored?: boolean; readonly settings?: DeviceConfigurationState; readonly description?: WorkerAcquisitionDescription }
+  | {
+      readonly type: 'result';
+      readonly requestId: number;
+      readonly state: DeviceState;
+      readonly restored?: boolean;
+      readonly settings?: DeviceConfigurationState;
+      readonly description?: WorkerAcquisitionDescription;
+    }
   | ({ readonly type: 'error'; readonly requestId: number } & ComponentFailure);
