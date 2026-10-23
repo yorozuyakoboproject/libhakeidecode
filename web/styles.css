@@ -377,23 +377,91 @@ select {
   cursor: pointer;
   overflow: hidden;
 }
-.channel-chip:has(input:not(:checked)) {
+.channel-chip:has(input[type='checkbox']:not(:checked)) {
   opacity: 0.5;
 }
-.channel-chip input {
+.channel-chip input[type='checkbox'] {
+  flex: none;
   width: 12px;
   height: 12px;
   margin: 0;
   accent-color: var(--channel-color);
 }
 .channel-chip strong {
+  flex: none;
   color: var(--channel-color);
   font-family: Consolas, monospace;
 }
-.channel-chip span {
-  overflow: hidden;
+.channel-chip .channel-name {
+  min-width: 0;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.channel-chip .channel-name:focus {
+  outline: 1px solid var(--channel-color);
+  outline-offset: 2px;
+  background: var(--surface-chip);
+}
+.channel-settings {
+  flex: none;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.analog-settings {
+  width: min(470px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  padding: 22px;
+  border: 1px solid var(--border-control);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+}
+.analog-settings::backdrop {
+  background: var(--backdrop);
+}
+.analog-settings form {
+  display: grid;
+  gap: 12px;
+}
+.analog-settings h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.analog-settings label {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(0, 1.4fr);
+  align-items: center;
+  gap: 12px;
+}
+.analog-settings input,
+.analog-settings select {
+  min-width: 0;
+  width: 100%;
+}
+.analog-settings input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  justify-self: start;
+}
+.analog-settings input[type='color'] {
+  height: 32px;
+  padding: 3px;
+}
+.analog-settings-error {
+  color: var(--text-danger);
+  margin: 0;
+}
+.analog-settings-error:empty {
+  display: none;
 }
 .advanced summary {
   color: var(--text-secondary);

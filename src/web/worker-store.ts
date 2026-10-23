@@ -1,16 +1,19 @@
 import type { SampleInput } from '../libhakei/sample-index.js';
-import type { AnalogStore } from './data/analogStore.js';
+import type { AnalogRange, AnalogStore } from './data/analogStore.js';
 import type { AnalogColumnView } from './data/analogStore.js';
 import type { ColumnView, GapSpan, MemoryReport, SampleStore } from './data/types.js';
 import type { DecodeEdgePart } from './protocol.js';
 import type { AcquisitionResult } from './capture.js';
 import type { WorkspaceSettings } from './workspace.js';
+import type { AnalogSettings } from './analog-settings.js';
 
 export interface StoreAnalogMetadata {
   readonly name: string;
   readonly length: bigint;
   readonly samplerate: number;
   readonly bytes: number;
+  readonly range: AnalogRange | null;
+  readonly mean: number | null;
 }
 export interface StoreMetadata {
   readonly channelCount: number;
@@ -40,6 +43,7 @@ export interface PreparedAnalogView {
   readonly startSample: bigint;
   readonly endSample: bigint;
   readonly bins: number;
+  readonly logic?: AnalogColumnView['logic'];
 }
 export type StoreRequest =
   | {
@@ -51,9 +55,18 @@ export type StoreRequest =
       bins: number;
       includeEdges: boolean;
     }
-  | { type: 'prepare-analog'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
+  | {
+      type: 'prepare-analog';
+      id: number;
+      channel: number;
+      startSample: bigint;
+      endSample: bigint;
+      bins: number;
+      settings?: AnalogSettings;
+    }
   | { type: 'pack-range'; id: number; startSample: bigint; endSample: bigint; channels: number }
   | { type: 'analog-range'; id: number; channel: number; startSample: bigint; endSample: bigint }
+  | { type: 'probe-analog'; id: number; sample: bigint }
   | {
       type: 'export-sr';
       id: number;
@@ -77,6 +90,7 @@ export type StoreResponse =
   | { type: 'prepared-analog'; id: number; view: PreparedAnalogView; availableEnd: bigint }
   | { type: 'pack-range-result'; id: number; data: Uint8Array }
   | { type: 'analog-range-result'; id: number; data: Float32Array }
+  | { type: 'analog-probe'; id: number; sample: bigint; values: (number | null)[] }
   | { type: 'export-sr-result'; id: number; blob: Blob }
   | { type: 'error'; id?: number; message: string };
 
@@ -117,7 +131,7 @@ interface SharedStoreState {
 type Pending = { resolve(value: StoreResponse): void; reject(error: Error): void };
 type StoreQueryRequest = Extract<
   StoreRequest,
-  { type: 'prepare-digital' | 'prepare-analog' | 'pack-range' | 'analog-range' }
+  { type: 'prepare-digital' | 'prepare-analog' | 'pack-range' | 'analog-range' | 'probe-analog' }
 >;
 type DigitalPrepared = { view: ColumnView; availableEnd: bigint; edges: bigint[] | null };
 const keyFor = (channel: number, start: bigint, end: bigint, bins: number): string =>
@@ -127,7 +141,7 @@ function copyMetadata(metadata: StoreMetadata): StoreMetadata {
   return {
     ...metadata,
     labels: [...metadata.labels],
-    analog: metadata.analog.map((item) => ({ ...item })),
+    analog: metadata.analog.map((item) => ({ ...item, range: item.range ? { ...item.range } : null })),
     gaps: metadata.gaps.map((gap) => ({ ...gap })),
   };
 }
@@ -143,7 +157,7 @@ function emptyMetadata(
     length: 0n,
     logicChannelCount: labels.length,
     labels: [...labels],
-    analog: analogNames.map((name) => ({ name, length: 0n, samplerate, bytes: 0 })),
+    analog: analogNames.map((name) => ({ name, length: 0n, samplerate, bytes: 0, range: null, mean: null })),
     gaps: [],
     digitalBytes: 0,
     analogBytes: 0,
@@ -365,8 +379,22 @@ export class WorkerCaptureStore implements SampleStore {
   nextRequestId(): number {
     return this.nextId++;
   }
-  requestAnalog(channel: number, startSample: bigint, endSample: bigint, bins: number): Promise<StoreResponse> {
-    return this.request({ type: 'prepare-analog', id: this.nextRequestId(), channel, startSample, endSample, bins });
+  requestAnalog(
+    channel: number,
+    startSample: bigint,
+    endSample: bigint,
+    bins: number,
+    settings?: AnalogSettings,
+  ): Promise<StoreResponse> {
+    return this.request({
+      type: 'prepare-analog',
+      id: this.nextRequestId(),
+      channel,
+      startSample,
+      endSample,
+      bins,
+      settings,
+    });
   }
   async readPackedRange(startSample: bigint, endSample: bigint, channels = this.channelCount): Promise<Uint8Array> {
     const response = await this.request({ type: 'pack-range', id: this.nextId++, startSample, endSample, channels });
@@ -377,6 +405,11 @@ export class WorkerCaptureStore implements SampleStore {
     const response = await this.request({ type: 'analog-range', id: this.nextId++, channel, startSample, endSample });
     if (response.type !== 'analog-range-result') throw new Error('Invalid analog range response');
     return response.data;
+  }
+  async readAnalogProbe(sample: bigint): Promise<readonly (number | null)[]> {
+    const response = await this.request({ type: 'probe-analog', id: this.nextId++, sample });
+    if (response.type !== 'analog-probe') throw new Error('Invalid analog probe response');
+    return response.values;
   }
   dispose(): void {
     if (this.disposed) return;
@@ -449,6 +482,12 @@ export class WorkerAnalogStore implements AnalogStore {
   get name(): string {
     return this.owner.analogMetadata[this.channel]?.name ?? `A${this.channel}`;
   }
+  get range(): AnalogRange | null {
+    return this.owner.analogMetadata[this.channel]?.range ?? null;
+  }
+  get mean(): number | null {
+    return this.owner.analogMetadata[this.channel]?.mean ?? null;
+  }
   private cache: { key: string; view: AnalogColumnView } | null = null;
   append(_values: ArrayLike<number>): void {
     throw new Error('Worker capture storage is read-only on the UI thread');
@@ -456,10 +495,10 @@ export class WorkerAnalogStore implements AnalogStore {
   sampleAt(_index: SampleInput): number {
     throw new Error('Use the Worker decoder or request a prepared viewport');
   }
-  async prepareView(start: bigint, end: bigint, bins: number): Promise<void> {
-    const key = `${start}:${end}:${bins}:${this.owner.revision}`;
+  async prepareView(start: bigint, end: bigint, bins: number, settings?: AnalogSettings): Promise<void> {
+    const key = `${start}:${end}:${bins}:${this.owner.revision}:${settings?.conversion}:${settings?.threshold}`;
     if (this.cache?.key === key) return;
-    const response = await this.owner.requestAnalog(this.channel, start, end, bins);
+    const response = await this.owner.requestAnalog(this.channel, start, end, bins, settings);
     if (response.type !== 'prepared-analog') throw new Error('Invalid prepared analog response');
     this.cache = {
       key,
@@ -469,6 +508,7 @@ export class WorkerAnalogStore implements AnalogStore {
         bins: response.view.bins,
         low: response.view.low,
         high: response.view.high,
+        ...(response.view.logic ? { logic: response.view.logic } : {}),
       },
     };
   }

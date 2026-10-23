@@ -1,4 +1,5 @@
 import type { MemoryBudget } from '../memory.js';
+import type { ColumnView } from './types.js';
 import { LocalAnalogSampleStore } from './local-analogStore.js';
 import {
   sampleIndex,
@@ -10,16 +11,23 @@ import {
   type SampleInput,
 } from '../../libhakei/sample-index.js';
 export { ANALOG_BLOCK_SAMPLES } from './local-analogStore.js';
+export interface AnalogRange {
+  readonly min: number;
+  readonly max: number;
+}
 export interface AnalogColumnView {
   readonly startSample: bigint;
   readonly endSample: bigint;
   readonly bins: number;
   readonly low: Float32Array;
   readonly high: Float32Array;
+  readonly logic?: ColumnView & { readonly edges?: bigint[] };
 }
 export interface AnalogStore {
   readonly samplerate: number;
   readonly length: bigint;
+  readonly range: AnalogRange | null;
+  readonly mean: number | null;
   append(values: ArrayLike<number>, startSample?: SampleInput): void;
   sampleAt(index: SampleInput): number;
   query(startSample: SampleInput, endSample: SampleInput, bins: number): AnalogColumnView;
@@ -30,8 +38,17 @@ const SEGMENT = BigInt(SEGMENT_SAMPLES);
 export class AnalogSampleStore implements AnalogStore {
   private segments: LocalAnalogSampleStore[] = [];
   private sampleCount = 0n;
+  private minimum = Infinity;
+  private maximum = -Infinity;
+  private sum = 0;
   get length(): bigint {
     return this.sampleCount;
+  }
+  get range(): AnalogRange | null {
+    return this.sampleCount ? { min: this.minimum, max: this.maximum } : null;
+  }
+  get mean(): number | null {
+    return this.sampleCount ? this.sum / Number(this.sampleCount) : null;
   }
   private low = new Float32Array(0);
   private high = new Float32Array(0);
@@ -90,6 +107,12 @@ export class AnalogSampleStore implements AnalogStore {
           ? values.subarray(done, done + n)
           : Array.from({ length: n }, (_, i) => values[done + i]!);
       segment.appendValidated(part);
+      for (let i = 0; i < part.length; i++) {
+        const value = Math.fround(part[i]!);
+        this.minimum = Math.min(this.minimum, value);
+        this.maximum = Math.max(this.maximum, value);
+        this.sum += value;
+      }
       done += n;
       this.sampleCount += BigInt(n);
     }
@@ -98,6 +121,9 @@ export class AnalogSampleStore implements AnalogStore {
     for (const segment of this.segments) segment.dispose();
     this.segments.length = 1;
     this.sampleCount = 0n;
+    this.minimum = Infinity;
+    this.maximum = -Infinity;
+    this.sum = 0;
   }
   sampleAt(input: SampleInput): number {
     const index = sampleIndex(input);

@@ -20,6 +20,13 @@ import { AnnotationIndex } from './event-index.js';
 import { readPalette } from './theme.js';
 import { hasMessage, t } from './i18n.js';
 import { rowKey, reconcileRowOrder, moveTimelineRow, type TimelineRow } from './timeline.js';
+import {
+  analogAxis,
+  analogHeight,
+  defaultAnalogSettings,
+  parseAnalogSettings,
+  type AnalogSettings,
+} from './analog-settings.js';
 const timeUnits = [
   [1e-15, 'fs'],
   [1e-12, 'ps'],
@@ -39,6 +46,22 @@ const SAMPLE_POINT_GAP = 3,
   ANALOG_LINE_WIDTH = 1.5,
   ANALOG_LINE_MIN_PIXELS = 0.25,
   MIN_VIEW_SAMPLES = 2n;
+export function voltageLabel(value: number): string {
+  const magnitude = Math.abs(value),
+    units = [
+      [1e9, 'GV'],
+      [1e6, 'MV'],
+      [1e3, 'kV'],
+      [1, 'V'],
+      [1e-3, 'mV'],
+      [1e-6, 'µV'],
+      [1e-9, 'nV'],
+      [1e-12, 'pV'],
+    ] as const;
+  const [scale, unit] =
+    magnitude === 0 ? units[3] : (units.find(([scale]) => magnitude >= scale) ?? units[units.length - 1]);
+  return `${Number((value / scale).toPrecision(4))} ${unit}`;
+}
 export function timeLabel(seconds: number, resolutionSeconds?: number, digits = 3): string {
   const basis = Math.abs(resolutionSeconds ?? (seconds || 1e-9));
   let index = 0;
@@ -75,6 +98,7 @@ export class WaveformRenderer {
   }
   channels: number[] = [];
   analogChannels: number[] = [];
+  analogSettings: AnalogSettings[] = [];
   rowOrder: TimelineRow[] = [];
   start = 0n;
   end = 1n;
@@ -90,6 +114,7 @@ export class WaveformRenderer {
   onAnnotationClick: (id: string, ss: bigint, es: bigint) => void = () => {};
   onChange: () => void = () => {};
   onProtocolOrderChange: () => void = () => {};
+  onAnalogSettings: (channel: number) => void = () => {};
   private pending = false;
   private viewRefresh: Promise<void> | null = null;
   private viewRefreshDirty = false;
@@ -126,6 +151,13 @@ export class WaveformRenderer {
   private palette = readPalette();
   private readonly frameCanvas = document.createElement('canvas');
   private readonly frameContext = this.frameCanvas.getContext('2d')!;
+  private presentedViewport: readonly [bigint, bigint] | null = null;
+  private hoverX: number | null = null;
+  private hoverSample: bigint | null = null;
+  private hoverResult: { capture: Capture; sample: bigint; length: bigint; values: readonly (number | null)[] } | null =
+    null;
+  private hoverPending = false;
+  private hoverFrame = 0;
   private readonly themeChanged = (): void => {
     this.palette = readPalette();
     this.schedule();
@@ -147,6 +179,7 @@ export class WaveformRenderer {
         event.preventDefault();
         const rect = scroll.getBoundingClientRect();
         const x = event.clientX - rect.left + scroll.scrollLeft;
+        this.moveHover(x);
         const anchor = (x - this.gutter) / (this.width - this.gutter - 16);
         this.zoom(Math.exp(-Math.max(-200, Math.min(200, event.deltaY)) * 0.006), anchor);
       },
@@ -156,23 +189,26 @@ export class WaveformRenderer {
     target.addEventListener('pointerdown', (event) => {
       if (!this.capture || event.button !== 0 || this.pointerId !== null) return;
       this.pointerId = event.pointerId;
-      this.pointerStart = { x: event.offsetX, y: event.offsetY };
+      const rect = target.getBoundingClientRect(),
+        x = event.clientX - rect.left,
+        y = event.clientY - rect.top;
+      this.pointerStart = { x, y };
       target.setPointerCapture(event.pointerId);
-      const row = this.rowAt(event.offsetX, event.offsetY);
+      const row = this.rowAt(x, y);
       if (row) {
         this.settleRows();
         this.rowDrag = {
           entry: row.entry,
           startY: event.clientY,
           clientY: event.clientY,
-          y: event.offsetY,
-          offset: event.offsetY - row.top,
+          y,
+          offset: y - row.top,
           moved: false,
         };
         this.schedule();
         return;
       }
-      if (event.offsetX < this.gutter) return;
+      if (x < this.gutter) return;
       if (this.cursorMode) {
         const sample = minSample(this.capture.store.length - 1n, this.sampleAtX(event.offsetX));
         this.cursorA = sample;
@@ -200,12 +236,12 @@ export class WaveformRenderer {
       }
     });
     target.addEventListener('pointermove', (event) => {
+      const rect = target.getBoundingClientRect(),
+        x = event.clientX - rect.left,
+        y = event.clientY - rect.top;
+      this.moveHover(x);
       if (this.pointerId === null) {
-        target.style.cursor = this.rowAt(event.offsetX, event.offsetY)
-          ? 'grab'
-          : this.cursorMode
-            ? 'crosshair'
-            : 'grab';
+        target.style.cursor = this.rowAt(x, y) ? 'grab' : this.cursorMode ? 'crosshair' : 'grab';
         return;
       }
       if (this.pointerId !== event.pointerId) return;
@@ -239,19 +275,28 @@ export class WaveformRenderer {
     target.addEventListener('pointerup', (event) => {
       if (this.pointerId !== event.pointerId) return;
       const begin = this.pointerStart;
+      const rect = target.getBoundingClientRect(),
+        x = event.clientX - rect.left,
+        y = event.clientY - rect.top;
       if (this.cursorRange?.moved) this.setCursor(event.offsetX, 'b');
       if (
         begin &&
         !this.draggingCursor &&
         !this.rowDrag?.moved &&
-        Math.abs(event.offsetX - begin.x) < 4 &&
-        Math.abs(event.offsetY - begin.y) < 4
+        Math.abs(x - begin.x) < 4 &&
+        Math.abs(y - begin.y) < 4
       )
-        this.selectAnnotation(event.offsetX, event.offsetY);
+        this.selectAnnotation(x, y);
       this.finishPointer(target);
       if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
     });
     target.addEventListener('pointercancel', () => this.finishPointer(target));
+    target.addEventListener('pointerleave', () => this.moveHover(null));
+    target.addEventListener('dblclick', (event) => {
+      const rect = target.getBoundingClientRect(),
+        row = this.rowAt(event.clientX - rect.left, event.clientY - rect.top);
+      if (row?.entry.kind === 'analog') this.onAnalogSettings(row.entry.id);
+    });
     target.addEventListener('lostpointercapture', () => {
       if (this.pointerId !== null) this.finishPointer(target);
     });
@@ -275,9 +320,17 @@ export class WaveformRenderer {
     });
   }
   setCapture(capture: Capture, viewport?: readonly [SampleInput, SampleInput]): void {
+    this.clearHover();
     this.capture = capture;
     this.channels = Array.from({ length: capture.logicChannelCount ?? capture.store.channelCount }, (_, i) => i);
     this.analogChannels = Array.from({ length: capture.analogChannels?.length ?? 0 }, (_, i) => i);
+    this.analogSettings = this.analogChannels.map(
+      (id) =>
+        capture.workspace?.analogSettings?.[id] ??
+        defaultAnalogSettings(
+          this.palette.channels[(id + (capture.logicChannelCount ?? 0)) % this.palette.channels.length],
+        ),
+    );
     this.rowOrder = this.channels.map((id) => ({ kind: 'channel', id }));
     this.settleRows();
     this.annotations.clear();
@@ -300,9 +353,11 @@ export class WaveformRenderer {
     this.applyViewport(start, end);
   }
   clearCapture(): void {
+    this.clearHover();
     this.capture = null;
     this.channels = [];
     this.analogChannels = [];
+    this.analogSettings = [];
     this.rowOrder = [];
     this.start = 0n;
     this.end = 1n;
@@ -318,6 +373,12 @@ export class WaveformRenderer {
   updateCapture(capture: Capture): void {
     this.capture = capture;
     this.schedule();
+  }
+  setAnalogSettings(channel: number, settings: AnalogSettings): void {
+    if (!this.analogSettings[channel]) throw new RangeError('Analog channel out of range');
+    this.analogSettings[channel] = parseAnalogSettings(settings);
+    this.settleRows();
+    this.invalidateView();
   }
   setViewport(startInput: SampleInput, endInput: SampleInput): void {
     this.applyViewport(startInput, endInput);
@@ -420,35 +481,39 @@ export class WaveformRenderer {
       this.rowOrder,
       channels,
       this.protocols.map((p) => p.id),
+      Array.from({ length: this.capture?.analogChannels?.length ?? 0 }, (_, id) => id),
     );
     const visible = new Set(this.channels);
     this.channels = this.rowOrder.flatMap((row) => (row.kind === 'channel' && visible.has(row.id) ? [row.id] : []));
+    const analogVisible = new Set(this.analogChannels);
+    this.analogChannels = this.rowOrder.flatMap((row) =>
+      row.kind === 'analog' && analogVisible.has(row.id) ? [row.id] : [],
+    );
     return this.rowOrder.map((row) => ({ ...row }));
   }
   rowLayout(): TimelineLayoutRow[] {
     const visible = new Set(this.channels),
+      analogVisible = new Set(this.analogChannels),
       protocols = new Map(this.protocols.map((p) => [p.id, p]));
     let top = this.waveformTop();
     const rows = this.getRowOrder().flatMap((entry) => {
       if (entry.kind === 'channel' && !visible.has(entry.id)) return [];
+      if (entry.kind === 'analog' && !analogVisible.has(entry.id)) return [];
       const height =
-        entry.kind === 'channel' || entry.kind === 'analog' ? 54 : this.protocolHeight(protocols.get(entry.id)!);
+        entry.kind === 'analog'
+          ? analogHeight(this.analogSettings[entry.id]!)
+          : entry.kind === 'channel'
+            ? 54
+            : this.protocolHeight(protocols.get(entry.id)!);
       const row = { entry, top, height };
       top += height;
       return [row];
     });
-    for (const id of this.analogChannels) {
-      const row = { entry: { kind: 'analog' as const, id }, top, height: 54 };
-      rows.push(row);
-      top += row.height;
-    }
     return rows;
   }
   private rowAt(x: number, y: number): TimelineLayoutRow | null {
     if (x < 0 || x >= this.gutter - 12) return null;
-    return (
-      this.rowLayout().find((row) => row.entry.kind !== 'analog' && y >= row.top && y < row.top + row.height) ?? null
-    );
+    return this.rowLayout().find((row) => y >= row.top && y < row.top + row.height) ?? null;
   }
   private settleRows(): void {
     this.rowSnapshot = null;
@@ -493,6 +558,8 @@ export class WaveformRenderer {
     this.rowOrder = next;
     const visible = new Set(this.channels);
     this.channels = next.flatMap((row) => (row.kind === 'channel' && visible.has(row.id) ? [row.id] : []));
+    const analogVisible = new Set(this.analogChannels);
+    this.analogChannels = next.flatMap((row) => (row.kind === 'analog' && analogVisible.has(row.id) ? [row.id] : []));
     const protocols = new Map(this.protocols.map((p) => [p.id, p]));
     this.protocols.splice(
       0,
@@ -598,6 +665,8 @@ export class WaveformRenderer {
   setRenderingEnabled(enabled: boolean): void {
     this.renderingEnabled = enabled;
     if (!enabled) {
+      cancelAnimationFrame(this.hoverFrame);
+      this.hoverFrame = 0;
       if (this.pending) {
         cancelAnimationFrame(this.frameRequest);
         this.pending = false;
@@ -653,15 +722,25 @@ export class WaveformRenderer {
     if (store?.prepareView && end > start) tasks.push(store.prepareView(this.channels, start, end, bins));
     for (const channel of this.analogChannels) {
       const analog = capture.analogChannels?.[channel]?.store as
-        | (AnalogStore & { prepareView?: (start: bigint, end: bigint, bins: number) => Promise<void> })
+        | (AnalogStore & {
+            prepareView?: (start: bigint, end: bigint, bins: number, settings?: AnalogSettings) => Promise<void>;
+          })
         | undefined;
       if (!analog?.prepareView) continue;
       const samples = this.sampleRange(analog.length, bins, ANALOG_LINE_MIN_PIXELS);
-      if (samples) tasks.push(analog.prepareView(samples.start, samples.end, samples.count));
+      if (samples)
+        tasks.push(analog.prepareView(samples.start, samples.end, samples.count, this.analogSettings[channel]));
       else {
         const availableEnd = minSample(analog.length, end);
         if (availableEnd > start)
-          tasks.push(analog.prepareView(start, availableEnd, this.availableBins(availableEnd, bins)));
+          tasks.push(
+            analog.prepareView(
+              start,
+              availableEnd,
+              this.availableBins(availableEnd, bins),
+              this.analogSettings[channel],
+            ),
+          );
       }
     }
     for (const protocol of this.protocols)
@@ -798,6 +877,8 @@ export class WaveformRenderer {
     this.drawCursor(ctx, height, !this.axisCanvas);
     this.drawAxis(capture, dpr);
     this.drawOverview(capture, dpr);
+    this.presentedViewport = [this.start, this.end];
+    this.refreshHover();
     this.presentFrame();
     const animating = [...this.rowMotions.values()].some((motion) => now - motion.started < this.motionDuration);
     if (animating || scrolling) this.schedule();
@@ -817,6 +898,120 @@ export class WaveformRenderer {
     ctx.globalCompositeOperation = 'copy';
     ctx.drawImage(this.frameCanvas, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
+    this.drawHover(ctx);
+  }
+  private clearHover(): void {
+    cancelAnimationFrame(this.hoverFrame);
+    this.hoverFrame = 0;
+    this.hoverX = null;
+    this.hoverSample = null;
+    this.hoverResult = null;
+    this.presentedViewport = null;
+  }
+  private moveHover(x: number | null): void {
+    this.hoverX = x !== null && x >= this.gutter && x <= this.width - 16 ? x : null;
+    if (this.hoverX === null) this.hoverSample = null;
+    this.scheduleHover();
+  }
+  private scheduleHover(): void {
+    if (this.hoverFrame || !this.renderingEnabled) return;
+    this.hoverFrame = requestAnimationFrame(() => {
+      this.hoverFrame = 0;
+      if (!this.capture || !this.presentedViewport) return;
+      this.refreshHover();
+      this.presentFrame();
+    });
+  }
+  private refreshHover(): void {
+    const capture = this.capture,
+      viewport = this.presentedViewport;
+    this.hoverSample =
+      this.hoverX === null || !viewport
+        ? null
+        : minSample(
+            viewport[1] - 1n,
+            viewport[0] +
+              scaleSamples(
+                viewport[1] - viewport[0],
+                (this.hoverX - this.gutter) / Math.max(1, this.width - this.gutter - 16),
+              ),
+          );
+    const sample = this.hoverSample,
+      store = capture?.store as
+        | (Capture['store'] & {
+            readAnalogProbe?: (sample: bigint) => Promise<readonly (number | null)[]>;
+          })
+        | undefined;
+    if (
+      !capture ||
+      sample === null ||
+      !store?.readAnalogProbe ||
+      this.hoverPending ||
+      (this.hoverResult?.capture === capture &&
+        this.hoverResult.sample === sample &&
+        this.hoverResult.length === store.length)
+    )
+      return;
+    this.hoverPending = true;
+    const length = store.length;
+    void store
+      .readAnalogProbe(sample)
+      .then(
+        (values) => {
+          this.hoverResult = { capture, sample, length, values };
+        },
+        () => {
+          this.hoverResult = { capture, sample, length, values: [] };
+        },
+      )
+      .finally(() => {
+        this.hoverPending = false;
+        this.scheduleHover();
+      });
+  }
+  private drawHover(ctx: CanvasRenderingContext2D): void {
+    const capture = this.capture;
+    if (!capture || !this.presentedViewport || this.rowSnapshot) return;
+    ctx.save();
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (this.hoverX !== null) {
+      ctx.strokeStyle = this.palette['hover'];
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(this.hoverX, this.axisHeight());
+      ctx.lineTo(this.hoverX, this.canvas.height / dpr);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.font = '11px ui-monospace, Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (const row of this.rowLayout()) {
+      if (row.entry.kind !== 'analog') continue;
+      const channel = row.entry.id,
+        range = capture.analogChannels?.[channel]?.store.range;
+      if (!range) continue;
+      const value =
+        this.hoverSample !== null &&
+        this.hoverResult?.capture === capture &&
+        this.hoverResult.sample === this.hoverSample
+          ? this.hoverResult.values[channel]
+          : null;
+      const settings = this.analogSettings[channel]!;
+      const text = `[ ${value == null ? '—' : voltageLabel(value)} ] ${voltageLabel(analogAxis(range, settings).perDivision)}/div`,
+        width = Math.min(this.width - this.gutter - 16, ctx.measureText(text).width + 14),
+        right = this.width - 22,
+        top = row.top + 3;
+      ctx.fillStyle = this.palette['bg'];
+      ctx.globalAlpha = 0.94;
+      ctx.fillRect(right - width, top, width + 4, 20);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = settings.color;
+      ctx.fillText(text, right, top + 10, width - 10);
+    }
+    ctx.restore();
   }
   private drawTimelineRow(
     ctx: CanvasRenderingContext2D,
@@ -899,26 +1094,60 @@ export class WaveformRenderer {
   private drawAnalog(ctx: CanvasRenderingContext2D, channel: number, top: number, plotWidth: number): void {
     const capture = this.capture!,
       item = capture.analogChannels![channel]!,
+      settings = this.analogSettings[channel]!,
+      height = (settings.positiveDivs + settings.negativeDivs) * settings.divHeight,
+      rowHeight = analogHeight(settings),
       y = top + 5;
-    const color = this.palette.channels[(channel + (capture.logicChannelCount ?? 0)) % this.palette.channels.length];
+    const color = settings.color;
     ctx.fillStyle = this.palette['label-bg'];
-    ctx.fillRect(0, y - 5, this.gutter - 12, 46);
+    ctx.fillRect(0, top, this.gutter - 12, rowHeight - 8);
+    this.drawGrip(ctx, top, rowHeight - 8, this.rowDrag?.entry.kind === 'analog' && this.rowDrag.entry.id === channel);
     ctx.fillStyle = color;
-    ctx.fillRect(14, y + 5, 3, 25);
+    ctx.fillRect(14, y + 5, 3, Math.min(25, Math.max(4, rowHeight - 17)));
     ctx.font = '600 12px system-ui, sans-serif';
     ctx.fillText(`A${channel}`, 26, y + 12);
     ctx.fillStyle = this.palette['label'];
     ctx.font = '11px system-ui, sans-serif';
-    ctx.fillText(item.name.slice(0, 12), 26, y + 28);
-    const queryStarted = performance.now(),
-      scale = 22,
-      center = y + 20;
-    const pointY = (value: number): number => center - Math.max(-1, Math.min(1, value)) * scale;
+    if (rowHeight >= 40) ctx.fillText(item.name.slice(0, 12), 26, y + 28);
+    ctx.strokeStyle = this.palette['divider'];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, top + rowHeight - 3);
+    ctx.lineTo(this.width, top + rowHeight - 3);
+    ctx.stroke();
+    const range = item.store.range;
+    if (!range) return;
+    const { minimum, maximum } = analogAxis(range, settings);
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.textAlign = 'right';
+    if (height >= 32) {
+      ctx.fillText(String(Number(maximum.toPrecision(4))), this.gutter - 16, y + 1, 72);
+      ctx.fillText(String(Number(minimum.toPrecision(4))), this.gutter - 16, y - 2 + height, 72);
+    }
+    ctx.textAlign = 'left';
+    ctx.strokeStyle = this.palette['grid'];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let div = 0; div <= settings.positiveDivs + settings.negativeDivs; div++) {
+      const gridY = y - 2 + div * settings.divHeight;
+      ctx.moveTo(this.gutter, gridY);
+      ctx.lineTo(this.width - 16, gridY);
+    }
+    ctx.stroke();
+    const queryStarted = performance.now();
+    const pointY = (value: number): number => y - 2 + ((maximum - value) / (maximum - minimum)) * height;
+    let prepared: AnalogColumnView | undefined;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.gutter, y - 2, plotWidth, height);
+    ctx.clip();
+    if (settings.conversion !== 'none' && settings.traces === 'converted') ctx.globalAlpha = 0;
     ctx.fillStyle = color;
     ctx.strokeStyle = color;
     const samples = this.sampleRange(item.store.length, plotWidth, ANALOG_LINE_MIN_PIXELS);
     if (samples) {
       const points: AnalogColumnView = item.store.query(samples.start, samples.end, samples.count);
+      prepared = points;
       this.recordQuery?.(performance.now() - queryStarted);
       ctx.lineWidth = ANALOG_LINE_WIDTH;
       ctx.beginPath();
@@ -952,6 +1181,7 @@ export class WaveformRenderer {
         availableEnd,
         this.availableBins(availableEnd, plotWidth),
       );
+      prepared = view;
       this.recordQuery?.(performance.now() - queryStarted);
       const viewSpan = view.endSample - view.startSample;
       const xAt = (index: number): number =>
@@ -975,12 +1205,16 @@ export class WaveformRenderer {
         }
       }
     }
-    ctx.strokeStyle = this.palette['divider'];
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, y + 46);
-    ctx.lineTo(this.width, y + 46);
-    ctx.stroke();
+    ctx.restore();
+    if (settings.conversion !== 'none' && settings.traces !== 'analog' && prepared?.logic) {
+      const logic = prepared.logic,
+        both = settings.traces === 'both',
+        highY = both ? y - 2 + height + 4 : y + 3,
+        lowY = both ? highY + 16 : y - 2 + height - 4;
+      this.drawDigital(ctx, logic, highY, lowY, color, logic.edges);
+      if (samples && plotWidth / Number(this.end - this.start) >= SAMPLE_POINT_GAP)
+        this.drawDigitalPoints(ctx, logic, highY, lowY, color);
+    }
   }
   private drawDigital(
     ctx: CanvasRenderingContext2D,
@@ -1387,6 +1621,8 @@ export class WaveformRenderer {
     this.queryMaxMs = Math.max(this.queryMaxMs, elapsed);
   }
   dispose(): void {
+    this.renderingEnabled = false;
+    this.clearHover();
     window.removeEventListener('hakei:themechange', this.themeChanged);
     this.observer.disconnect();
     this.settleRows();

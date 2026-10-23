@@ -1,9 +1,11 @@
 import { minSample, maxSample, localNumber } from '../libhakei/sample-index.js';
-import type { AnalogStore } from './data/analogStore.js';
+import type { AnalogStore, AnalogColumnView } from './data/analogStore.js';
 import { channelStoreRange, packStoreRange } from './data/channel-range.js';
 import type { PlanarSampleStore } from './data/planarStore.js';
 import type { RleSampleStore } from './data/rleStore.js';
 import { serializeSR } from './sr.js';
+import { AnalogConversion } from './analog-conversion.js';
+import { parseAnalogSettings } from './analog-settings.js';
 import type {
   DecodeReadRequest,
   DecodeReadResponse,
@@ -38,6 +40,7 @@ export class WorkerStoreServer {
   private readonly decodePorts = new Set<MessagePort>();
   private readonly exportControllers = new Map<number, AbortController>();
   private disposed = false;
+  private readonly conversions = new Map<number, AnalogConversion>();
   constructor(private readonly source: () => StoreCaptureSource | null) {}
 
   metadata(): StoreMetadata {
@@ -66,6 +69,8 @@ export class WorkerStoreServer {
         length: channel.store.length,
         samplerate: channel.store.samplerate,
         bytes: channel.store.memory().totalBytes,
+        range: channel.store.range,
+        mean: channel.store.mean,
       })),
       gaps: store.gaps().map((gap) => ({ ...gap })),
       digitalBytes: store.memory().totalBytes,
@@ -101,6 +106,8 @@ export class WorkerStoreServer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    for (const conversion of this.conversions.values()) conversion.dispose();
+    this.conversions.clear();
     this.port?.close();
     this.port = null;
     for (const controller of this.exportControllers.values()) controller.abort();
@@ -124,6 +131,15 @@ export class WorkerStoreServer {
     }
     const capture = this.source();
     if (!capture) throw new Error('Capture data is not ready');
+    if (request.type === 'probe-analog') {
+      const sample = request.sample,
+        inGap = capture.store.gaps().some((gap) => sample >= gap.startSample && sample < gap.endSample),
+        values = (capture.analogChannels ?? []).map(({ store }) =>
+          sample >= 0n && sample < store.length && !inGap ? store.sampleAt(sample) : null,
+        );
+      this.port!.postMessage({ type: 'analog-probe', id: request.id, sample, values } satisfies StoreResponse);
+      return;
+    }
     if (request.type === 'prepare-digital') {
       this.prepareDigital(capture, request);
       return;
@@ -276,10 +292,36 @@ export class WorkerStoreServer {
       low,
       high,
     };
-    this.port!.postMessage({ type: 'prepared-analog', id: request.id, view, availableEnd } satisfies StoreResponse, [
-      low.buffer,
-      high.buffer,
-    ]);
+    const settings = request.settings ? parseAnalogSettings(request.settings) : null;
+    let logic: AnalogColumnView['logic'];
+    if (settings && settings.conversion !== 'none' && availableSpan > 0n) {
+      let conversion = this.conversions.get(request.channel);
+      if (!conversion) {
+        conversion = new AnalogConversion();
+        this.conversions.set(request.channel, conversion);
+      }
+      logic = conversion.prepare(analog.store, settings, capture.store.gaps(), start, availableEnd, bins);
+    } else {
+      this.conversions.get(request.channel)?.dispose();
+      this.conversions.delete(request.channel);
+    }
+    const result = logic ? { ...view, logic } : view;
+    this.port!.postMessage(
+      { type: 'prepared-analog', id: request.id, view: result, availableEnd } satisfies StoreResponse,
+      [
+        low.buffer,
+        high.buffer,
+        ...(logic
+          ? [
+              logic.low.buffer,
+              logic.high.buffer,
+              logic.edge.buffer,
+              logic.packed.buffer,
+              ...(logic.points ? [logic.points.buffer] : []),
+            ]
+          : []),
+      ],
+    );
   }
 
   private connectDecodeReader(port: MessagePort): void {

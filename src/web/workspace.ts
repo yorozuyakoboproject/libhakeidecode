@@ -2,6 +2,7 @@ import { sampleIndex, type SampleInput } from '../libhakei/sample-index.js';
 import { decoderDefinition } from '../decoders/index.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
 import { rowKey, type TimelineRow } from './timeline.js';
+import { parseAnalogSettings, type AnalogSettings } from './analog-settings.js';
 export interface ProtocolSettings {
   id: string;
   decoder: string;
@@ -20,9 +21,17 @@ export interface WorkspaceSettings {
   viewport: [bigint, bigint];
   channels: number[];
   rowOrder?: TimelineRow[];
+  channelNames?: { digital: string[]; analog: string[] };
+  analogChannels?: number[];
+  analogSettings?: AnalogSettings[];
 }
 
-export function parseWorkspace(value: unknown, channelCount: number, length: bigint): WorkspaceSettings {
+export function parseWorkspace(
+  value: unknown,
+  channelCount: number,
+  length: bigint,
+  analogCount = 0,
+): WorkspaceSettings {
   if (!value || typeof value !== 'object') throw new Error('Invalid workspace');
   const input = value as WorkspaceSettings;
   const cursor = (v: SampleInput | null): bigint | null => (v === null ? null : sampleIndex(v));
@@ -101,11 +110,18 @@ export function parseWorkspace(value: unknown, channelCount: number, length: big
   if (obj.cursorA !== undefined) result.cursorA = obj.cursorA;
   if (obj.cursorB !== undefined) result.cursorB = obj.cursorB;
   if (obj.rowOrder !== undefined) {
+    const hasAnalog = Array.isArray(obj.rowOrder) && obj.rowOrder.some((row) => row?.kind === 'analog');
     if (
       !Array.isArray(obj.rowOrder) ||
-      obj.rowOrder.length !== channelCount + protocols.length ||
+      obj.rowOrder.length !== channelCount + protocols.length + (hasAnalog ? analogCount : 0) ||
       obj.rowOrder.some(
-        (row) => !row || (row.kind === 'channel' ? !index(row.id) : row.kind !== 'protocol' || !ids.has(row.id)),
+        (row) =>
+          !row ||
+          (row.kind === 'channel'
+            ? !index(row.id)
+            : row.kind === 'analog'
+              ? !Number.isInteger(row.id) || row.id < 0 || row.id >= analogCount
+              : row.kind !== 'protocol' || !ids.has(row.id)),
       ) ||
       new Set(obj.rowOrder.map(rowKey)).size !== obj.rowOrder.length
     )
@@ -116,6 +132,34 @@ export function parseWorkspace(value: unknown, channelCount: number, length: big
     if (channels.some((id, i) => id !== obj.channels[i]) || protocolIds.some((id, i) => id !== protocols[i].id))
       throw new Error('Inconsistent timeline row order');
     result.rowOrder = obj.rowOrder.map((row) => ({ ...row }));
+  }
+  if (obj.analogChannels !== undefined) {
+    if (
+      !Array.isArray(obj.analogChannels) ||
+      obj.analogChannels.some((id) => !Number.isInteger(id) || id < 0 || id >= analogCount) ||
+      new Set(obj.analogChannels).size !== obj.analogChannels.length
+    )
+      throw new Error('Invalid visible analog channels');
+    result.analogChannels = [...obj.analogChannels];
+  }
+  if (obj.analogSettings !== undefined) {
+    if (!Array.isArray(obj.analogSettings) || obj.analogSettings.length !== analogCount)
+      throw new Error('Invalid analog channel settings');
+    result.analogSettings = obj.analogSettings.map(parseAnalogSettings);
+  }
+  if (obj.channelNames !== undefined) {
+    const names = obj.channelNames,
+      validNames = (items: unknown): items is string[] =>
+        Array.isArray(items) && items.every((name) => typeof name === 'string' && name.trim() && name.length <= 80);
+    if (
+      !names ||
+      !validNames(names.digital) ||
+      names.digital.length !== channelCount ||
+      !validNames(names.analog) ||
+      names.analog.length > 128
+    )
+      throw new Error('Invalid channel names');
+    result.channelNames = { digital: [...names.digital], analog: [...names.analog] };
   }
   return result;
 }

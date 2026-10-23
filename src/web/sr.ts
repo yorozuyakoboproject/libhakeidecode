@@ -280,7 +280,8 @@ export async function importSR(
           capture.analogChannels.push({ name: description.name.slice(0, 80), store: analog });
         }
       }
-      if (extra.workspace !== undefined) capture.workspace = parseWorkspace(extra.workspace, count, BigInt(length));
+      if (extra.workspace !== undefined)
+        capture.workspace = parseWorkspace(extra.workspace, count, BigInt(length), capture.analogChannels?.length ?? 0);
     }
     capture.loadedMs = performance.now() - started;
     return capture;
@@ -308,7 +309,9 @@ export async function serializeSR(
   for (const channel of analogChannels)
     if (channel.store.length !== store.length || channel.store.samplerate !== store.samplerate)
       throw new Error('Inconsistent analog timeline');
-  if (workspace) parseWorkspace(workspace, count, store.length);
+  if (workspace) parseWorkspace(workspace, count, store.length, analogChannels.length);
+  const names = workspace?.channelNames;
+  if (names && names.analog.length !== analogChannels.length) throw new Error('Invalid analog channel names');
   const totalBytes = Number(store.length * BigInt(unit + analogChannels.length * 4)),
     chunkSamples = 1_048_576;
   async function* entries(): AsyncGenerator<ZipEntry> {
@@ -323,12 +326,17 @@ export async function serializeSR(
       `samplerate=${store.samplerate} Hz`,
       ...(count ? [`unitsize=${unit}`] : []),
       ...(count
-        ? Array.from({ length: count }, (_, i) => `probe${i + 1}=${escapeINI(capture.labels[i] ?? `D${i}`)}`)
+        ? Array.from(
+            { length: count },
+            (_, i) => `probe${i + 1}=${escapeINI(names?.digital[i] ?? capture.labels[i] ?? `D${i}`)}`,
+          )
         : []),
       ...(analogChannels.length
         ? [
             `total analog=${analogChannels.length}`,
-            ...analogChannels.map((channel, i) => `analog${count + i + 1}=${escapeINI(channel.name)}`),
+            ...analogChannels.map(
+              (channel, i) => `analog${count + i + 1}=${escapeINI(names?.analog[i] ?? channel.name)}`,
+            ),
           ]
         : ['total analog=0']),
       '',

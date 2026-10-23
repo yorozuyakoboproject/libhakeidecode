@@ -10,10 +10,12 @@ export function reconcileRowOrder(
   order: readonly TimelineRow[],
   channels: readonly number[],
   protocols: readonly string[],
+  analogs: readonly number[] = [],
 ): TimelineRow[] {
   const available: TimelineRow[] = [
     ...channels.map((id) => ({ kind: 'channel' as const, id })),
     ...protocols.map((id) => ({ kind: 'protocol' as const, id })),
+    ...analogs.map((id) => ({ kind: 'analog' as const, id })),
   ];
   const valid = new Map(available.map((row) => [rowKey(row), row])),
     seen = new Set<string>();
