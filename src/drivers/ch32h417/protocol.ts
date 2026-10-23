@@ -1,6 +1,7 @@
 import { SS_RATES } from './descriptor.js';
+import { ComponentError } from '../../components.js';
 export { USB_VID, USB_PID, SS_RATES } from './descriptor.js';
-export const APP_PROTOCOL = 15;
+export const APP_PROTOCOL = 16;
 export const INTERFACE = 1,
   EP_OUT = 5,
   EP_IN = 6;
@@ -54,8 +55,9 @@ export function readCapabilities(frame: Frame): Capabilities {
   const v = new DataView(frame.payload.buffer, frame.payload.byteOffset + 16, 56);
   const packet = v.getUint16(2, true),
     count = v.getUint8(13);
-  if (v.getUint16(0, true) !== APP_PROTOCOL)
-    throw new Error('H417 application protocol v15 required; update the application firmware');
+  const actual = v.getUint16(0, true);
+  if (actual !== APP_PROTOCOL)
+    throw new ComponentError('driver.ch32h417.error.protocol', { actual, expected: APP_PROTOCOL });
   if (
     (packet !== 512 && packet !== 1024) ||
     v.getUint32(4, true) !== BLOCK_BYTES ||

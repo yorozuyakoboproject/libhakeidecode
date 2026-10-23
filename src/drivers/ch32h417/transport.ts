@@ -29,7 +29,6 @@ export interface UsbDevice {
   readonly opened: boolean;
   open(): Promise<void>;
   close(): Promise<void>;
-  selectConfiguration(value: number): Promise<void>;
   claimInterface(value: number): Promise<void>;
   releaseInterface(value: number): Promise<void>;
   transferOut(endpoint: number, data: Uint8Array): Promise<{ status: string; bytesWritten?: number }>;
@@ -110,13 +109,16 @@ export class H417Transport {
   }
   async open(): Promise<void> {
     await this.device.open();
-    if (this.device.configuration?.configurationValue !== 1) await this.device.selectConfiguration(1);
+    if (this.device.configuration?.configurationValue !== 1)
+      throw new Error('H417 is not configured; initialize UHSIF in the management webpage first');
     const iface = this.device.configuration?.interfaces.find((i) => i.interfaceNumber === INTERFACE);
     const endpoints = iface?.alternates[0]?.endpoints;
     const out = endpoints?.find((e) => e.endpointNumber === EP_OUT && e.direction === 'out' && e.type === 'bulk');
     const input = endpoints?.find((e) => e.endpointNumber === EP_IN && e.direction === 'in' && e.type === 'bulk');
     if (!out || !input || ![512, 1024].includes(input.packetSize) || out.packetSize !== input.packetSize)
-      throw new Error('H417 logic analyzer Interface 1 missing; update the application firmware');
+      throw new Error(
+        'H417 logic analyzer Interface 1 is unavailable; initialize UHSIF in the management webpage first, then reconnect the analyzer',
+      );
     this.packet = input.packetSize as 512 | 1024;
     await this.device.claimInterface(INTERFACE);
     this.claimed = true;
