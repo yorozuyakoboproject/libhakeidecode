@@ -24,6 +24,7 @@ export interface WorkspaceSettings {
   channelNames?: { digital: string[]; analog: string[] };
   analogChannels?: number[];
   analogSettings?: AnalogSettings[];
+  digitalHeights?: number[];
 }
 
 export function parseWorkspace(
@@ -146,6 +147,15 @@ export function parseWorkspace(
     if (!Array.isArray(obj.analogSettings) || obj.analogSettings.length !== analogCount)
       throw new Error('Invalid analog channel settings');
     result.analogSettings = obj.analogSettings.map(parseAnalogSettings);
+  }
+  if (obj.digitalHeights !== undefined) {
+    if (
+      !Array.isArray(obj.digitalHeights) ||
+      obj.digitalHeights.length !== channelCount ||
+      obj.digitalHeights.some((height) => !Number.isInteger(height) || height < 12 || height > 250)
+    )
+      throw new Error('Invalid digital channel heights');
+    result.digitalHeights = [...obj.digitalHeights];
   }
   if (obj.channelNames !== undefined) {
     const names = obj.channelNames,

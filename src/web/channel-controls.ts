@@ -1,6 +1,7 @@
 import {
   analogAxis,
   parseAnalogSettings,
+  roundAnalogResolution,
   thresholdPresets,
   schmittPresets,
   type AnalogSettings,
@@ -14,13 +15,14 @@ export function openAnalogSettings(
   settings: AnalogSettings,
   range: AnalogRange | null,
   update: (name: string, settings: AnalogSettings) => void,
+  nameEditable = true,
 ): void {
-  document.querySelector('dialog.analog-settings')?.remove();
+  document.querySelector('dialog.channel-settings-dialog')?.remove();
   const dialog = document.createElement('dialog'),
     form = document.createElement('form'),
     title = document.createElement('h2'),
     status = document.createElement('p');
-  dialog.className = 'analog-settings';
+  dialog.className = 'channel-settings-dialog';
   form.method = 'dialog';
   title.textContent = `${t('analog.settings')} · A${channel}`;
   dialog.setAttribute('aria-label', title.textContent);
@@ -57,25 +59,28 @@ export function openAnalogSettings(
     field(key, control);
     return control;
   };
-  const nameInput = input('analog.name', 'name', name, 'text');
+  const nameInput = input('channels.name', 'name', name, 'text');
   nameInput.maxLength = 80;
+  nameInput.disabled = !nameEditable;
   const color = input('analog.color', 'color', settings.color, 'color'),
     positive = input('analog.positiveDivs', 'positiveDivs', String(settings.positiveDivs), 'number', 0, 8),
     negative = input('analog.negativeDivs', 'negativeDivs', String(settings.negativeDivs), 'number', 0, 8),
-    height = input('analog.divHeight', 'divHeight', String(settings.divHeight), 'number', 12, 250),
+    height = input('channels.divHeight', 'divHeight', String(settings.divHeight), 'number', 12, 250),
     resolution = input(
       'analog.resolution',
       'resolution',
       String(settings.autorange && range ? analogAxis(range, settings).perDivision : settings.resolution),
       'number',
-      Number.MIN_VALUE,
+      0.1,
     ),
     auto = input('analog.autorange', 'autorange', '', 'checkbox');
   positive.step = negative.step = height.step = '1';
+  resolution.step = '0.1';
+  if (!settings.autorange) resolution.value = String(roundAnalogResolution(settings.resolution));
   auto.checked = settings.autorange;
   const choices = document.createElement('datalist');
   choices.id = `analog-resolution-${channel}`;
-  for (let exponent = -12; exponent <= 9; exponent++)
+  for (let exponent = -1; exponent <= 9; exponent++)
     for (const multiple of [1, 2, 5]) {
       const option = document.createElement('option');
       option.value = String(multiple * 10 ** exponent);
@@ -109,7 +114,7 @@ export function openAnalogSettings(
       ],
       settings.traces,
     );
-  status.className = 'analog-settings-error';
+  status.className = 'channel-settings-error';
   status.setAttribute('role', 'alert');
   form.append(status);
   const sync = () => {
@@ -119,8 +124,12 @@ export function openAnalogSettings(
   const apply = () => {
     if (auto.checked && range && Number(positive.value) + Number(negative.value) > 0)
       resolution.value = String(
-        analogAxis(range, { ...settings, positiveDivs: Number(positive.value), negativeDivs: Number(negative.value) })
-          .perDivision,
+        analogAxis(range, {
+          ...settings,
+          autorange: true,
+          positiveDivs: Number(positive.value),
+          negativeDivs: Number(negative.value),
+        }).perDivision,
       );
     sync();
     try {
@@ -151,17 +160,98 @@ export function openAnalogSettings(
     apply();
   });
   form.addEventListener('input', apply);
-  form.addEventListener('change', apply);
+  form.addEventListener('change', (event) => {
+    const control = event.target;
+    if (control instanceof HTMLInputElement && control.value !== '' && Number.isFinite(control.valueAsNumber)) {
+      if (control === resolution) control.value = String(roundAnalogResolution(control.valueAsNumber));
+      else if (control === positive || control === negative || control === height)
+        control.value = String(Math.round(control.valueAsNumber));
+    }
+    apply();
+  });
   const done = document.createElement('button');
   done.type = 'submit';
   done.className = 'button';
-  done.textContent = t('analog.done');
+  done.textContent = t('channels.done');
   form.append(done);
   form.addEventListener('submit', (event) => {
     if (!apply()) event.preventDefault();
   });
   dialog.addEventListener('close', () => dialog.remove());
   sync();
+  dialog.append(form);
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+export function openDigitalSettings(
+  channel: number,
+  name: string,
+  height: number,
+  update: (name: string, height: number) => void,
+  nameEditable = true,
+): void {
+  document.querySelector('dialog.channel-settings-dialog')?.remove();
+  const dialog = document.createElement('dialog'),
+    form = document.createElement('form'),
+    title = document.createElement('h2');
+  dialog.className = 'channel-settings-dialog';
+  form.method = 'dialog';
+  title.textContent = `${t('channels.digitalSettings')} · D${channel}`;
+  dialog.setAttribute('aria-label', title.textContent);
+  form.append(title);
+  const field = (key: MessageKey, input: HTMLInputElement) => {
+    const label = document.createElement('label'),
+      caption = document.createElement('span');
+    caption.textContent = t(key);
+    input.setAttribute('aria-label', t(key));
+    label.append(caption, input);
+    form.append(label);
+  };
+  const nameInput = document.createElement('input'),
+    heightInput = document.createElement('input');
+  nameInput.name = 'name';
+  nameInput.value = name;
+  nameInput.required = true;
+  nameInput.maxLength = 80;
+  nameInput.disabled = !nameEditable;
+  heightInput.name = 'divHeight';
+  heightInput.type = 'number';
+  heightInput.value = String(height);
+  heightInput.required = true;
+  heightInput.min = '12';
+  heightInput.max = '250';
+  heightInput.step = '1';
+  field('channels.name', nameInput);
+  field('channels.divHeight', heightInput);
+  const status = document.createElement('p');
+  status.className = 'channel-settings-error';
+  status.setAttribute('role', 'alert');
+  form.append(status);
+  const apply = () => {
+    if (!form.checkValidity() || !nameInput.value.trim()) {
+      status.textContent = t('channels.invalid');
+      return false;
+    }
+    update(nameInput.value.trim(), heightInput.valueAsNumber);
+    status.textContent = '';
+    return true;
+  };
+  form.addEventListener('input', apply);
+  form.addEventListener('change', () => {
+    if (heightInput.value !== '' && Number.isFinite(heightInput.valueAsNumber))
+      heightInput.value = String(Math.round(heightInput.valueAsNumber));
+    apply();
+  });
+  const done = document.createElement('button');
+  done.type = 'submit';
+  done.className = 'button';
+  done.textContent = t('channels.done');
+  form.append(done);
+  form.addEventListener('submit', (event) => {
+    if (!apply()) event.preventDefault();
+  });
+  dialog.addEventListener('close', () => dialog.remove());
   dialog.append(form);
   document.body.append(dialog);
   dialog.showModal();

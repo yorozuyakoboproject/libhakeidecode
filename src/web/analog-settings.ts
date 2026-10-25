@@ -49,6 +49,13 @@ export function defaultAnalogSettings(color = '#70d7a1'): AnalogSettings {
     traces: 'both',
   };
 }
+export function roundAnalogResolution(value: number, rounding: 'nearest' | 'up' = 'nearest'): number {
+  if (!Number.isFinite(value)) throw new Error('Invalid analog resolution');
+  if (value >= Number.MAX_SAFE_INTEGER / 10) return value;
+  const steps = Math.max(1, value * 10),
+    epsilon = Number.EPSILON * Math.max(1, Math.abs(steps));
+  return (rounding === 'up' ? Math.ceil(steps - epsilon) : Math.round(steps + epsilon)) / 10;
+}
 export function parseAnalogSettings(value: unknown): AnalogSettings {
   const s = value as AnalogSettings;
   if (
@@ -78,7 +85,7 @@ export function parseAnalogSettings(value: unknown): AnalogSettings {
     positiveDivs: s.positiveDivs,
     negativeDivs: s.negativeDivs,
     divHeight: s.divHeight,
-    resolution: s.resolution,
+    resolution: roundAnalogResolution(s.resolution),
     autorange: s.autorange,
     conversion: s.conversion,
     threshold: s.threshold,
@@ -93,20 +100,22 @@ export function analogAxis(
   maximum: number;
   perDivision: number;
 } {
-  if (!settings.autorange)
-    return {
-      minimum: -settings.negativeDivs * settings.resolution,
-      maximum: settings.positiveDivs * settings.resolution,
-      perDivision: settings.resolution,
-    };
-  const padding = range.max > range.min ? (range.max - range.min) * 0.05 : Math.max(Math.abs(range.min) * 0.05, 1),
-    minimum = range.min - padding,
-    maximum = range.max + padding;
-  if (settings.positiveDivs && settings.negativeDivs) {
-    const perDivision = Math.max(maximum / settings.positiveDivs, -minimum / settings.negativeDivs);
-    return { minimum: -settings.negativeDivs * perDivision, maximum: settings.positiveDivs * perDivision, perDivision };
+  let perDivision = roundAnalogResolution(settings.resolution);
+  if (settings.autorange) {
+    const padding = range.max > range.min ? (range.max - range.min) * 0.05 : Math.max(Math.abs(range.min) * 0.05, 1);
+    perDivision = roundAnalogResolution(
+      Math.max(
+        settings.positiveDivs ? Math.max(0, range.max + padding) / settings.positiveDivs : 0,
+        settings.negativeDivs ? Math.max(0, padding - range.min) / settings.negativeDivs : 0,
+      ),
+      'up',
+    );
   }
-  return { minimum, maximum, perDivision: (maximum - minimum) / (settings.positiveDivs + settings.negativeDivs) };
+  return {
+    minimum: settings.negativeDivs ? -Number((settings.negativeDivs * perDivision).toFixed(1)) : 0,
+    maximum: Number((settings.positiveDivs * perDivision).toFixed(1)),
+    perDivision,
+  };
 }
 export function analogHeight(settings: AnalogSettings): number {
   return (

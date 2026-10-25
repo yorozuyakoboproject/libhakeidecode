@@ -97,6 +97,7 @@ export class WaveformRenderer {
     return this.protocols.find((p) => p.id === this.selectedProtocolId)?.annotations ?? this.fallbackAnnotations;
   }
   channels: number[] = [];
+  digitalHeights: number[] = [];
   analogChannels: number[] = [];
   analogSettings: AnalogSettings[] = [];
   rowOrder: TimelineRow[] = [];
@@ -115,6 +116,10 @@ export class WaveformRenderer {
   onChange: () => void = () => {};
   onProtocolOrderChange: () => void = () => {};
   onAnalogSettings: (channel: number) => void = () => {};
+  onDigitalSettings: (channel: number) => void = () => {};
+  onProtocolSettings: (id: string) => void = () => {};
+  private readonly settingsLayer = document.createElement('div');
+  private readonly settingsButtons = new Map<string, HTMLButtonElement>();
   private pending = false;
   private viewRefresh: Promise<void> | null = null;
   private viewRefreshDirty = false;
@@ -170,6 +175,8 @@ export class WaveformRenderer {
   ) {
     window.addEventListener('hakei:themechange', this.themeChanged);
     const scroll = canvas.parentElement!;
+    this.settingsLayer.className = 'wave-row-settings';
+    scroll.append(this.settingsLayer);
     this.observer = new ResizeObserver(() => this.invalidateView());
     this.observer.observe(scroll);
     scroll.addEventListener(
@@ -292,11 +299,6 @@ export class WaveformRenderer {
     });
     target.addEventListener('pointercancel', () => this.finishPointer(target));
     target.addEventListener('pointerleave', () => this.moveHover(null));
-    target.addEventListener('dblclick', (event) => {
-      const rect = target.getBoundingClientRect(),
-        row = this.rowAt(event.clientX - rect.left, event.clientY - rect.top);
-      if (row?.entry.kind === 'analog') this.onAnalogSettings(row.entry.id);
-    });
     target.addEventListener('lostpointercapture', () => {
       if (this.pointerId !== null) this.finishPointer(target);
     });
@@ -323,6 +325,7 @@ export class WaveformRenderer {
     this.clearHover();
     this.capture = capture;
     this.channels = Array.from({ length: capture.logicChannelCount ?? capture.store.channelCount }, (_, i) => i);
+    this.digitalHeights = this.channels.map((id) => capture.workspace?.digitalHeights?.[id] ?? 22);
     this.analogChannels = Array.from({ length: capture.analogChannels?.length ?? 0 }, (_, i) => i);
     this.analogSettings = this.analogChannels.map(
       (id) =>
@@ -356,6 +359,7 @@ export class WaveformRenderer {
     this.clearHover();
     this.capture = null;
     this.channels = [];
+    this.digitalHeights = [];
     this.analogChannels = [];
     this.analogSettings = [];
     this.rowOrder = [];
@@ -379,6 +383,13 @@ export class WaveformRenderer {
     this.analogSettings[channel] = parseAnalogSettings(settings);
     this.settleRows();
     this.invalidateView();
+  }
+  setDigitalHeight(channel: number, height: number): void {
+    if (this.digitalHeights[channel] === undefined || !Number.isInteger(height) || height < 12 || height > 250)
+      throw new RangeError('Invalid digital channel height');
+    this.digitalHeights[channel] = height;
+    this.settleRows();
+    this.schedule();
   }
   setViewport(startInput: SampleInput, endInput: SampleInput): void {
     this.applyViewport(startInput, endInput);
@@ -503,7 +514,7 @@ export class WaveformRenderer {
         entry.kind === 'analog'
           ? analogHeight(this.analogSettings[entry.id]!)
           : entry.kind === 'channel'
-            ? 54
+            ? this.digitalHeights[entry.id]! + 32
             : this.protocolHeight(protocols.get(entry.id)!);
       const row = { entry, top, height };
       top += height;
@@ -612,13 +623,48 @@ export class WaveformRenderer {
     target.style.cursor = this.cursorMode ? 'crosshair' : 'grab';
     this.schedule();
   }
-  private drawGrip(ctx: CanvasRenderingContext2D, top: number, height: number, active: boolean): void {
+  private drawGrip(ctx: CanvasRenderingContext2D, top: number, height: number): void {
     ctx.fillStyle = this.palette['label'];
     for (const x of [4, 8]) for (const y of [-4, 0, 4]) ctx.fillRect(x, top + height / 2 + y, 1.5, 1.5);
-    if (active) {
-      ctx.strokeStyle = this.palette['label'];
-      ctx.lineWidth = 1;
-      ctx.strokeRect(1, top + 1, this.gutter - 14, height - 2);
+  }
+  private updateSettingsButtons(layout: readonly TimelineLayoutRow[], now: number): void {
+    const visible = new Set<string>();
+    for (const row of layout) {
+      const entry = row.entry;
+      const key = rowKey(entry);
+      visible.add(key);
+      let button = this.settingsButtons.get(key);
+      if (!button) {
+        button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '⚙';
+        button.style.left = `${this.gutter - 38}px`;
+        button.addEventListener('click', () => {
+          if (entry.kind === 'analog') this.onAnalogSettings(entry.id);
+          else if (entry.kind === 'channel') this.onDigitalSettings(entry.id);
+          else this.onProtocolSettings(entry.id);
+        });
+        this.settingsButtons.set(key, button);
+        this.settingsLayer.append(button);
+      }
+      const label =
+        entry.kind === 'analog'
+          ? `${t('analog.settings')} · A${this.capture?.deviceChannels?.analog[entry.id] ?? entry.id}`
+          : entry.kind === 'channel'
+            ? `${t('channels.digitalSettings')} · D${this.capture?.deviceChannels?.logic[entry.id] ?? entry.id}`
+            : `${t('decoder.settings')} · ${this.protocols.find((protocol) => protocol.id === entry.id)!.name}`;
+      if (button.title !== label) {
+        button.title = label;
+        button.setAttribute('aria-label', label);
+      }
+      const top = `${this.motionTop(row, now) + 5}px`;
+      if (button.style.top !== top) button.style.top = top;
+      if (button.hidden !== !!this.rowDrag) button.hidden = !!this.rowDrag;
+    }
+    for (const [key, button] of this.settingsButtons) {
+      if (visible.has(key)) continue;
+      button.remove();
+      this.settingsButtons.delete(key);
     }
   }
   private nearestCursor(x: number, label: boolean): 'a' | 'b' | null {
@@ -813,6 +859,7 @@ export class WaveformRenderer {
     ctx.fillStyle = this.palette['bg'];
     ctx.fillRect(0, 0, this.width, height);
     if (!capture) {
+      this.updateSettingsButtons([], started);
       this.presentFrame();
       return performance.now() - started;
     }
@@ -844,6 +891,7 @@ export class WaveformRenderer {
     ctx.textAlign = 'left';
     const now = performance.now(),
       floating = this.rowDrag?.moved ? rowKey(this.rowDrag.entry) : null;
+    this.updateSettingsButtons(layout, now);
     for (const row of layout)
       if (rowKey(row.entry) !== floating) this.drawTimelineRow(ctx, row, this.motionTop(row, now), toX, plotWidth);
     if (floating) {
@@ -1051,12 +1099,13 @@ export class WaveformRenderer {
     const capture = this.capture!,
       store = capture.store,
       y = top + 5,
+      rowHeight = this.digitalHeights[channel]! + 32,
       highY = y + 8,
-      lowY = y + 30,
+      lowY = highY + this.digitalHeights[channel]!,
       color = this.palette.channels[(capture.deviceChannels?.logic[channel] ?? channel) % this.palette.channels.length];
     ctx.fillStyle = this.palette['label-bg'];
-    ctx.fillRect(0, y - 5, this.gutter - 12, 46);
-    this.drawGrip(ctx, y - 5, 46, this.rowDrag?.entry.kind === 'channel' && this.rowDrag.entry.id === channel);
+    ctx.fillRect(0, top, this.gutter - 12, rowHeight - 8);
+    this.drawGrip(ctx, top, rowHeight - 8);
     ctx.fillStyle = color;
     ctx.fillRect(14, y + 5, 3, 25);
     ctx.font = '600 12px system-ui, sans-serif';
@@ -1070,8 +1119,8 @@ export class WaveformRenderer {
       ctx.strokeStyle = this.palette['divider'];
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(0, y + 46);
-      ctx.lineTo(this.width, y + 46);
+      ctx.moveTo(0, top + rowHeight - 3);
+      ctx.lineTo(this.width, top + rowHeight - 3);
       ctx.stroke();
       return;
     }
@@ -1087,8 +1136,8 @@ export class WaveformRenderer {
     ctx.strokeStyle = this.palette['divider'];
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, y + 46);
-    ctx.lineTo(this.width, y + 46);
+    ctx.moveTo(0, top + rowHeight - 3);
+    ctx.lineTo(this.width, top + rowHeight - 3);
     ctx.stroke();
   }
   private drawAnalog(ctx: CanvasRenderingContext2D, channel: number, top: number, plotWidth: number): void {
@@ -1101,7 +1150,7 @@ export class WaveformRenderer {
     const color = settings.color;
     ctx.fillStyle = this.palette['label-bg'];
     ctx.fillRect(0, top, this.gutter - 12, rowHeight - 8);
-    this.drawGrip(ctx, top, rowHeight - 8, this.rowDrag?.entry.kind === 'analog' && this.rowDrag.entry.id === channel);
+    this.drawGrip(ctx, top, rowHeight - 8);
     ctx.fillStyle = color;
     ctx.fillRect(14, y + 5, 3, Math.min(25, Math.max(4, rowHeight - 17)));
     ctx.font = '600 12px system-ui, sans-serif';
@@ -1109,22 +1158,9 @@ export class WaveformRenderer {
     ctx.fillStyle = this.palette['label'];
     ctx.font = '11px system-ui, sans-serif';
     if (rowHeight >= 40) ctx.fillText(item.name.slice(0, 12), 26, y + 28);
-    ctx.strokeStyle = this.palette['divider'];
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, top + rowHeight - 3);
-    ctx.lineTo(this.width, top + rowHeight - 3);
-    ctx.stroke();
     const range = item.store.range;
     if (!range) return;
-    const { minimum, maximum } = analogAxis(range, settings);
-    ctx.font = '10px system-ui, sans-serif';
-    ctx.textAlign = 'right';
-    if (height >= 32) {
-      ctx.fillText(String(Number(maximum.toPrecision(4))), this.gutter - 16, y + 1, 72);
-      ctx.fillText(String(Number(minimum.toPrecision(4))), this.gutter - 16, y - 2 + height, 72);
-    }
-    ctx.textAlign = 'left';
+    const { minimum, maximum, perDivision } = analogAxis(range, settings);
     ctx.strokeStyle = this.palette['grid'];
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -1135,7 +1171,17 @@ export class WaveformRenderer {
     }
     ctx.stroke();
     const queryStarted = performance.now();
-    const pointY = (value: number): number => y - 2 + ((maximum - value) / (maximum - minimum)) * height;
+    const zeroY = y - 2 + settings.positiveDivs * settings.divHeight;
+    const pointY = (value: number): number => zeroY - (value / perDivision) * settings.divHeight;
+    if (minimum <= 0 && maximum >= 0) {
+      ctx.strokeStyle = this.palette['axis'];
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.moveTo(this.gutter - 8, pointY(0));
+      ctx.lineTo(this.width - 16, pointY(0));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     let prepared: AnalogColumnView | undefined;
     ctx.save();
     ctx.beginPath();
@@ -1408,17 +1454,12 @@ export class WaveformRenderer {
       const y = annY + row * rowHeight;
       ctx.fillStyle = this.palette['label-bg'];
       ctx.fillRect(0, y, this.gutter - 12, rowHeight - 2);
-      this.drawGrip(
-        ctx,
-        y,
-        rowHeight - 2,
-        this.rowDrag?.entry.kind === 'protocol' && this.rowDrag.entry.id === protocol.id,
-      );
+      this.drawGrip(ctx, y, rowHeight - 2);
       ctx.fillStyle = protocol.color;
       ctx.fillRect(14, y + 2, 3, rowHeight - 4);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(23, y, this.gutter - 37, rowHeight - 2);
+      ctx.rect(23, y, this.gutter - (row === 0 ? 63 : 37), rowHeight - 2);
       ctx.clip();
       ctx.fillStyle = this.palette['label'];
       ctx.font = '600 10px system-ui, sans-serif';
@@ -1621,6 +1662,8 @@ export class WaveformRenderer {
     this.queryMaxMs = Math.max(this.queryMaxMs, elapsed);
   }
   dispose(): void {
+    this.settingsLayer.remove();
+    this.settingsButtons.clear();
     this.renderingEnabled = false;
     this.clearHover();
     window.removeEventListener('hakei:themechange', this.themeChanged);
