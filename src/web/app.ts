@@ -94,6 +94,9 @@ export class AnalyzerApp {
   private version = 0;
   private decodeVersion = 0;
   private nextId = 0;
+  private mappingChannels: readonly number[] = [];
+  private mappingDevice = '';
+  private selectingDeviceChannels = true;
   readonly deviceControls = new DeviceControls(
     element<HTMLFormElement>('device-form'),
     driverDefinitions.map((definition) => new DeviceClient(definition)),
@@ -184,7 +187,9 @@ export class AnalyzerApp {
     this.deviceControls.onConnectionChange = () => this.renderStatus();
     this.deviceControls.onChange = () => {
       this.cancelTask(false);
+      this.selectingDeviceChannels = true;
       this.refreshProtocolMappings();
+      this.renderChannelControls();
       this.setStatus('ready', 'status.updated');
       this.updateMemoryUsage();
     };
@@ -227,6 +232,8 @@ export class AnalyzerApp {
       } else if (event.key === 'Escape') this.cancelTask();
     });
     this.selectProtocol(null, false);
+    this.refreshProtocolMappings();
+    this.renderChannelControls();
   }
   private populateDecoderSelects(): void {
     for (const id of ['add-decoder-type', 'decoder-type']) {
@@ -439,9 +446,9 @@ export class AnalyzerApp {
       select.append(none);
       for (let i = 0; i < count; i++) {
         const item = document.createElement('option'),
-          labelText = capture?.labels[i] ?? 'D' + i;
+          labelText = capture?.labels[i] ?? 'D' + this.deviceControls.selectedChannels('logic')[i];
         item.value = String(i);
-        item.textContent = 'D' + i + ' · ' + labelText;
+        item.textContent = labelText;
         select.append(item);
       }
       select.value =
@@ -454,14 +461,23 @@ export class AnalyzerApp {
     translateDOM();
   }
   private refreshProtocolMappings(): void {
-    const count = this.capture
-      ? (this.capture.logicChannelCount ?? this.capture.store.channelCount)
-      : this.deviceControls.configuration().logicChannels;
+    const capture = this.capture;
+    const channels = capture
+      ? (capture.deviceChannels?.logic ??
+        Array.from({ length: capture.logicChannelCount ?? capture.store.channelCount }, (_, i) => i))
+      : this.deviceControls.selectedChannels('logic');
+    const device = capture ? (capture.deviceChannels?.driverId ?? 'file') : this.deviceControls.device.descriptor.id;
     for (const protocol of this.protocols) {
       const keys = new Set(decoderDefinition(protocol.decoder).ui.inputs.map((input) => input.key));
-      for (const [key, value] of Object.entries(protocol.mapping))
-        if (!keys.has(key) || value >= count) delete protocol.mapping[key];
+      for (const [key, value] of Object.entries(protocol.mapping)) {
+        const physical = this.mappingChannels[value],
+          next = physical === undefined ? -1 : channels.indexOf(physical);
+        if (!keys.has(key) || device !== this.mappingDevice || next < 0) delete protocol.mapping[key];
+        else protocol.mapping[key] = next;
+      }
     }
+    this.mappingChannels = [...channels];
+    this.mappingDevice = device;
     this.populateMapping();
   }
   changeDecoder(decoder: DecoderId): void {
@@ -665,13 +681,11 @@ export class AnalyzerApp {
     if (cancel) this.cancelTask(false);
     if (this.capture && this.capture !== capture) this.releaseCapture(this.capture);
     this.capture = capture;
-    const count = capture.logicChannelCount ?? capture.store.channelCount;
+    this.selectingDeviceChannels = !!capture.deviceChannels;
     for (const protocol of this.protocols) {
       this.clearProtocol(protocol);
-      const inputs = new Set(decoderDefinition(protocol.decoder).ui.inputs.map((input) => input.key));
-      for (const [key, value] of Object.entries(protocol.mapping))
-        if (!inputs.has(key) || value >= count) delete protocol.mapping[key];
     }
+    this.refreshProtocolMappings();
     if (capture.workspace) {
       this.protocols = capture.workspace.protocols.map((p) => this.createProtocol(p));
       this.selectedId = capture.workspace.selectedId;
@@ -682,58 +696,6 @@ export class AnalyzerApp {
     this.updateCaptureLabels();
     element<HTMLInputElement>('import-sample-rate').value = String(capture.store.samplerate);
     element<HTMLSelectElement>('import-channel-count').value = String(capture.store.channelCount);
-    element('channel-badge').textContent = String(count);
-    const list = element('channel-list');
-    list.replaceChildren();
-    for (let i = 0; i < count; i++) {
-      const chip = document.createElement('div');
-      chip.className = 'channel-chip';
-      chip.style.setProperty('--channel-color', 'var(--channel-' + (i % 8) + ')');
-      const check = document.createElement('input');
-      check.type = 'checkbox';
-      check.checked = !capture.workspace || capture.workspace.channels.includes(i);
-      check.setAttribute('aria-label', t('channels.show', { channel: i }));
-      const tag = document.createElement('strong');
-      tag.textContent = `D${i}`;
-      const name = this.channelNameInput(capture, 'D', i, capture.labels[i]);
-      chip.append(check, tag, name);
-      list.append(chip);
-      check.addEventListener('change', () => {
-        if (check.checked) {
-          if (!this.renderer.channels.includes(i)) this.renderer.channels.push(i);
-        } else this.renderer.channels = this.renderer.channels.filter((channel) => channel !== i);
-        this.renderer.schedule();
-      });
-    }
-    for (let i = 0; i < (capture.analogChannels?.length ?? 0); i++) {
-      const item = capture.analogChannels![i]!,
-        chip = document.createElement('div');
-      chip.className = 'channel-chip analog-chip';
-      chip.style.setProperty('--channel-color', this.renderer.analogSettings[i]!.color);
-      const check = document.createElement('input');
-      check.type = 'checkbox';
-      check.checked = capture.workspace?.analogChannels?.includes(i) ?? true;
-      check.setAttribute('aria-label', t('channels.showAnalog', { channel: i }));
-      const tag = document.createElement('strong');
-      tag.textContent = `A${i}`;
-      const name = this.channelNameInput(capture, 'A', i, item.name);
-      chip.append(check, tag, name);
-      const configure = document.createElement('button');
-      configure.type = 'button';
-      configure.className = 'channel-settings';
-      configure.textContent = '⚙';
-      configure.setAttribute('aria-label', `${t('analog.settings')} A${i}`);
-      configure.title = t('analog.settings');
-      configure.addEventListener('click', () => this.configureAnalog(i));
-      chip.append(configure);
-      list.append(chip);
-      check.addEventListener('change', () => {
-        if (check.checked) {
-          if (!this.renderer.analogChannels.includes(i)) this.renderer.analogChannels.push(i);
-        } else this.renderer.analogChannels = this.renderer.analogChannels.filter((channel) => channel !== i);
-        this.renderer.schedule();
-      });
-    }
     this.selectProtocol(this.selectedId, false);
     if (capture.workspace) {
       this.renderer.cursorA = capture.workspace.cursorA ?? capture.workspace.cursor;
@@ -745,6 +707,7 @@ export class AnalyzerApp {
       this.renderer.rowOrder = capture.workspace.rowOrder?.map((row) => ({ ...row })) ?? [];
       this.renderer.setViewport(...capture.workspace.viewport);
     }
+    this.renderChannelControls();
     if (!live) {
       this.showMessage('');
       this.setStatus('ready', 'status.ready');
@@ -753,9 +716,88 @@ export class AnalyzerApp {
       this.showCaptureOutcome();
     }
   }
-  private channelNameInput(capture: Capture, kind: 'D' | 'A', channel: number, value: string): HTMLInputElement {
+  private renderChannelControls(): void {
+    const capture = this.capture,
+      selection = capture?.deviceChannels;
+    const device = this.selectingDeviceChannels || !capture || !!selection;
+    const matching = selection?.driverId === this.deviceControls.device.descriptor.id;
+    const list = element('channel-list');
+    list.replaceChildren();
+    let enabled = 0;
+    for (const kind of ['logic', 'analog'] as const) {
+      const analog = kind === 'analog',
+        prefix = analog ? 'A' : 'D';
+      const capturedCount = analog
+        ? (capture?.analogChannels?.length ?? 0)
+        : capture
+          ? (capture.logicChannelCount ?? capture.store.channelCount)
+          : 0;
+      const count = device ? this.deviceControls.channelCapacity(kind) : capturedCount;
+      const selected = this.deviceControls.selectedChannels(kind);
+      for (let id = 0; id < count; id++) {
+        const index = device ? (matching ? selection![kind].indexOf(id) : -1) : id;
+        const chip = document.createElement('div');
+        chip.className = analog ? 'channel-chip analog-chip' : 'channel-chip';
+        chip.style.setProperty('--channel-color', `var(--channel-${id % 8})`);
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.dataset.channelKind = kind;
+        check.dataset.channelId = String(id);
+        check.checked = device
+          ? selected.includes(id)
+          : analog
+            ? this.renderer.analogChannels.includes(index)
+            : this.renderer.channels.includes(index);
+        check.disabled = !!this.captureAbort;
+        check.setAttribute(
+          'aria-label',
+          t(device ? 'channels.capture' : 'channels.display', { channel: `${prefix}${id}` }),
+        );
+        if (check.checked) enabled++;
+        const tag = document.createElement('strong');
+        tag.textContent = `${prefix}${id}`;
+        chip.append(check, tag);
+        if (capture && index >= 0) {
+          const name = analog ? capture.analogChannels![index]!.name : capture.labels[index]!;
+          chip.append(this.channelNameInput(capture, prefix, index, name, id));
+          if (analog) {
+            const configure = document.createElement('button');
+            configure.type = 'button';
+            configure.className = 'channel-settings';
+            configure.textContent = '⚙';
+            configure.setAttribute('aria-label', t('analog.settings'));
+            configure.title = t('analog.settings');
+            configure.addEventListener('click', () => this.configureAnalog(index));
+            chip.append(configure);
+          }
+        }
+        check.addEventListener('change', () => {
+          if (this.captureAbort) return;
+          if (device) this.deviceControls.selectChannel(kind, id, check.checked);
+          if (index >= 0) {
+            const visible = new Set(analog ? this.renderer.analogChannels : this.renderer.channels);
+            if (check.checked) visible.add(index);
+            else visible.delete(index);
+            if (analog) this.renderer.analogChannels = [...visible];
+            else this.renderer.channels = [...visible];
+            this.renderer.schedule();
+          }
+          element('channel-badge').textContent = String(list.querySelectorAll('input[type="checkbox"]:checked').length);
+        });
+        list.append(chip);
+      }
+    }
+    element('channel-badge').textContent = String(enabled);
+  }
+  private channelNameInput(
+    capture: Capture,
+    kind: 'D' | 'A',
+    channel: number,
+    value: string,
+    physical = channel,
+  ): HTMLInputElement {
     const input = document.createElement('input'),
-      tag = `${kind}${channel}`;
+      tag = `${kind}${physical}`;
     input.type = 'text';
     input.className = 'channel-name';
     input.maxLength = 80;
@@ -794,7 +836,10 @@ export class AnalyzerApp {
         if (this.capture !== capture) return;
         item.name = name;
         this.renderer.setAnalogSettings(channel, settings);
-        const chip = element('channel-list').querySelectorAll<HTMLElement>('.analog-chip')[channel];
+        const physical = capture.deviceChannels?.analog[channel] ?? channel;
+        const chip = element('channel-list')
+          .querySelector<HTMLInputElement>(`input[data-channel-kind="analog"][data-channel-id="${physical}"]`)
+          ?.closest<HTMLElement>('.channel-chip');
         if (chip) {
           chip.querySelector<HTMLInputElement>('.channel-name')!.value = name;
           chip.style.setProperty('--channel-color', settings.color);
@@ -813,14 +858,14 @@ export class AnalyzerApp {
   }
   private clearCaptureView(): void {
     this.capture = null;
+    this.refreshProtocolMappings();
     this.renderer.clearCapture();
     for (const protocol of this.protocols) this.clearProtocol(protocol);
     element('capture-name').textContent = t('capture.empty');
     element('sample-count').textContent = '—';
     element('rate-label').textContent = '—';
     element('duration-label').textContent = '—';
-    element('channel-badge').textContent = '0';
-    element('channel-list').replaceChildren();
+    this.renderChannelControls();
     this.updateDecodeSummary();
     this.updateViewport();
     this.updateMemoryUsage();
@@ -1265,6 +1310,8 @@ export class AnalyzerApp {
       ? !!this.captureStop?.signal.aborted
       : this.state === 'loading' || !this.deviceControls.ready;
     this.deviceControls.setBusy(!!this.captureAbort);
+    for (const check of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+      check.disabled = !!this.captureAbort;
     element<HTMLButtonElement>('save-capture').disabled = !this.capture || !!this.saveAbort;
     element<HTMLButtonElement>('cancel').disabled =
       this.state !== 'decoding' && this.state !== 'loading' && !this.saveAbort;
@@ -1316,7 +1363,9 @@ export class AnalyzerApp {
         'aria-label',
         input.type === 'text'
           ? t('channels.rename', { channel: tag })
-          : t(tag.startsWith('A') ? 'channels.showAnalog' : 'channels.show', { channel: Number(tag.slice(1)) }),
+          : t(this.selectingDeviceChannels || capture.deviceChannels ? 'channels.capture' : 'channels.display', {
+              channel: tag,
+            }),
       );
       if (input.type === 'text') input.disabled = Boolean(this.captureAbort);
     }

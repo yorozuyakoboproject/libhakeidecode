@@ -1053,14 +1053,14 @@ export class WaveformRenderer {
       y = top + 5,
       highY = y + 8,
       lowY = y + 30,
-      color = this.palette.channels[channel % this.palette.channels.length];
+      color = this.palette.channels[(capture.deviceChannels?.logic[channel] ?? channel) % this.palette.channels.length];
     ctx.fillStyle = this.palette['label-bg'];
     ctx.fillRect(0, y - 5, this.gutter - 12, 46);
     this.drawGrip(ctx, y - 5, 46, this.rowDrag?.entry.kind === 'channel' && this.rowDrag.entry.id === channel);
     ctx.fillStyle = color;
     ctx.fillRect(14, y + 5, 3, 25);
     ctx.font = '600 12px system-ui, sans-serif';
-    ctx.fillText(`D${channel}`, 26, y + 12);
+    ctx.fillText(`D${capture.deviceChannels?.logic[channel] ?? channel}`, 26, y + 12);
     ctx.fillStyle = this.palette['label'];
     ctx.font = '11px system-ui, sans-serif';
     ctx.fillText(capture.labels[channel].slice(0, 12), 26, y + 28);
@@ -1105,7 +1105,7 @@ export class WaveformRenderer {
     ctx.fillStyle = color;
     ctx.fillRect(14, y + 5, 3, Math.min(25, Math.max(4, rowHeight - 17)));
     ctx.font = '600 12px system-ui, sans-serif';
-    ctx.fillText(`A${channel}`, 26, y + 12);
+    ctx.fillText(`A${capture.deviceChannels?.analog[channel] ?? channel}`, 26, y + 12);
     ctx.fillStyle = this.palette['label'];
     ctx.font = '11px system-ui, sans-serif';
     if (rowHeight >= 40) ctx.fillText(item.name.slice(0, 12), 26, y + 28);

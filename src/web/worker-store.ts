@@ -440,11 +440,15 @@ export class WorkerCaptureStore implements SampleStore {
       }
     });
   }
+  updateMetadata(metadata: StoreMetadata): void {
+    if (metadata.length < this.state.metadata.length) return;
+    this.state.metadata = copyMetadata(metadata);
+    this.state.revision++;
+    this.syncAnalogs();
+  }
   private receive(response: StoreResponse): void {
     if (response.type === 'metadata') {
-      this.state.metadata = copyMetadata(response.metadata);
-      this.state.revision++;
-      this.syncAnalogs();
+      this.updateMetadata(response.metadata);
       return;
     }
     if (response.type === 'error') {

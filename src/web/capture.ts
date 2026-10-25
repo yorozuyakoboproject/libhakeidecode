@@ -7,6 +7,7 @@ import type { WorkspaceSettings } from './workspace.js';
 import type { Pipeline32Backend } from './transpose32-pipeline.js';
 import type { AnalogStore } from './data/analogStore.js';
 import type { DeviceConfiguration, DriverDiagnostics } from '../libhakei/device.js';
+import { deviceChannelIndices } from '../libhakei/device.js';
 
 import { MemoryBudget, DEFAULT_CAPTURE_BUDGET_BYTES, type BudgetSnapshot } from './memory.js';
 import { WorkerSampleSource } from './acquisition-source.js';
@@ -70,6 +71,7 @@ export interface AnalogCaptureChannel {
   store: AnalogStore;
 }
 export interface Capture {
+  deviceChannels?: { driverId: string; logic: readonly number[]; analog: readonly number[] };
   diagnostics?: CaptureDiagnostics;
   acquisition?: AcquisitionResult;
   sharedSource?: SharedCaptureConsumerSource;
@@ -222,7 +224,7 @@ async function captureSharedWorkerSource(
   budget: MemoryBudget,
 ): Promise<Capture> {
   const started = performance.now();
-  const labels = Array.from({ length: configuration.logicChannels }, (_, index) => 'D' + index);
+  const labels = deviceChannelIndices(configuration, 'logic').map((index) => 'D' + index);
   const store = new SharedWorkerSampleStore(source, configuration.logicChannels, configuration.sampleRate, labels);
   const diagnostics: CaptureDiagnostics = {
     mainThreadAppend: { calls: 0, totalMs: 0, maxMs: 0 },
@@ -239,6 +241,7 @@ async function captureSharedWorkerSource(
   let stopReason: AcquisitionResult['stopReason'] = 'complete',
     detail: string | undefined;
   const capture: Capture = {
+    deviceChannels: source.channelSelection,
     name,
     sharedSource: source,
     diagnostics,
@@ -345,12 +348,13 @@ async function captureLocalWorkerSource(
   const targetSamples = sampleIndex(configuration.sampleCount);
   let stopReason: AcquisitionResult['stopReason'] = 'complete',
     detail: string | undefined;
-  const labels = Array.from({ length: configuration.logicChannels }, (_, index) => `D${index}`);
+  const labels = deviceChannelIndices(configuration, 'logic').map((index) => `D${index}`);
   const analogChannels: AnalogCaptureChannel[] = store.analogStores.map((analog, index) => ({
-    name: `A${index}`,
+    name: `A${deviceChannelIndices(configuration, 'analog')[index]}`,
     store: analog,
   }));
   const capture: Capture = {
+    deviceChannels: source.channelSelection,
     name,
     diagnostics,
     labels,

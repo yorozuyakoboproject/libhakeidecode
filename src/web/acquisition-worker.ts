@@ -1,6 +1,7 @@
 import { componentFailure, type ComponentFailure } from '../components.js';
 import {
   validateDeviceConfiguration,
+  deviceChannelIndices,
   type AcquisitionChunk,
   type DeviceConfiguration,
   type DriverDiagnostics,
@@ -15,6 +16,8 @@ import { AnalogSampleStore } from './data/analogStore.js';
 import { channelWidthForProbes } from './data/channel-count.js';
 import { DEFAULT_CAPTURE_BUDGET_BYTES, MemoryBudget, type BudgetSnapshot } from './memory.js';
 import { WorkerStoreServer } from './worker-store-server.js';
+import { yieldWorkerTask } from './worker-task.js';
+import type { StoreMetadata } from './worker-store.js';
 export type AcquisitionRequest =
   | {
       type: 'start';
@@ -36,6 +39,7 @@ export type AcquisitionResponse =
   | { type: 'local-progress'; length: bigint; memory: BudgetSnapshot; driverDiagnostics?: DriverDiagnostics }
   | {
       type: 'local-done';
+      metadata: StoreMetadata;
       length: bigint;
       memory: BudgetSnapshot;
       stopReason: 'complete' | 'stopped' | 'error';
@@ -131,7 +135,7 @@ scope.onmessage = ({ data }) => {
         )
           throw new Error('Invalid packed logic chunk');
         if (!store) {
-          logicIds = Array.from({ length: input.channelCount }, (_, index) => `D${index}`);
+          logicIds = deviceChannelIndices(data.configuration, 'logic').map((index) => `D${index}`);
           analogIds = [];
           store = new PlanarSampleStore({
             channelCount: channelWidthForProbes(input.channelCount),
@@ -184,6 +188,14 @@ scope.onmessage = ({ data }) => {
         chunk.sampleRate !== config.sampleRate ||
         logicIds.length !== config.logicChannels ||
         analogIds.length !== config.analogChannels ||
+        logicIds.join('\0') !==
+          deviceChannelIndices(config, 'logic')
+            .map((index) => `D${index}`)
+            .join('\0') ||
+        analogIds.join('\0') !==
+          deviceChannelIndices(config, 'analog')
+            .map((index) => `A${index}`)
+            .join('\0') ||
         chunk.endSample > config.sampleCount
       )
         throw new Error('Device capture does not match the requested configuration');
@@ -209,9 +221,10 @@ scope.onmessage = ({ data }) => {
           budget ? budget.allocate(chunk.length, 'padding channel') : new ArrayBuffer(chunk.length),
         );
       }
+      const emptyChannel = padding?.subarray(0, chunk.length);
       store.appendChannels(
         Array.from({ length: store.channelCount }, (_, index) =>
-          index < logicIds.length ? chunk.channels[logicIds[index]!]! : padding!.subarray(0, chunk.length),
+          index < logicIds.length ? chunk.channels[logicIds[index]!]! : emptyChannel!,
         ),
       );
       analogIds.forEach((id, index) => analogStores[index]!.appendValidated(chunk.analogChannels[id]!));
@@ -297,9 +310,14 @@ scope.onmessage = ({ data }) => {
           ? device.createPackedSource(data.configuration, context)
           : device.createSource(data.configuration, context)
       )[Symbol.asyncIterator]();
+      let lastYield = performance.now();
       while (true) {
+        controller.signal.throwIfAborted();
         const result = await iterator.next();
-        if (result.done) break;
+        if (result.done) {
+          controller.signal.throwIfAborted();
+          break;
+        }
         if (!borrowed) throw new Error('Worker driver must use the managed buffer contract');
         if (producer && 'format' in result.value && result.value.format === 'packed-logic') {
           await producer.append(result.value.data.subarray(0, result.value.length));
@@ -315,6 +333,11 @@ scope.onmessage = ({ data }) => {
           available.push(buffer);
         } else {
           scope.postMessage({ type: 'chunk', chunk: result.value, buffer }, [buffer]);
+        }
+        if (performance.now() - lastYield >= 8) {
+          await yieldWorkerTask();
+          controller.signal.throwIfAborted();
+          lastYield = performance.now();
         }
       }
       if (producer && producer.length !== data.sharedSampleCount)
@@ -359,6 +382,7 @@ scope.onmessage = ({ data }) => {
         storeServer?.publish();
         scope.postMessage({
           type: 'local-done',
+          metadata: storeServer!.metadata(),
           length: finalStore.length,
           memory: budget.snapshot(),
           stopReason: terminal,

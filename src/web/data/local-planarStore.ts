@@ -157,21 +157,20 @@ export class LocalPlanarSampleStore implements SampleStore {
   appendChannels(channels: readonly ArrayLike<number>[]): void {
     if (channels.length !== this.channelCount || channels.some((channel) => channel.length !== channels[0]!.length))
       throw new Error('Logic layout mismatch');
-    if (
-      this.channelCount === 32 &&
-      channels[0] instanceof Uint8Array &&
-      channels.every((channel) => channel === channels[0])
-    ) {
-      this.appendRepeated8(channels[0]);
-      return;
-    }
     const count = channels[0]!.length,
       from = this.length,
       to = from + count;
     this.prepareAppend(count);
+    const packed = new Map<ArrayLike<number>, BitPlane>();
     for (let channel = 0; channel < this.channelCount; channel++) {
       const values = channels[channel]!,
         plane = this.base[channel]!;
+      const previous = packed.get(values);
+      if (previous) {
+        this.copyPlaneRange(previous, plane, from, to);
+        plane.bits = to;
+        continue;
+      }
       let index = 0;
       for (; index < count && (from + index) & 31; index++) plane.setBit(from + index, values[index]!);
       for (; index + 32 <= count; index += 32) {
@@ -182,39 +181,25 @@ export class LocalPlanarSampleStore implements SampleStore {
       }
       for (; index < count; index++) plane.setBit(from + index, values[index]!);
       plane.bits = to;
+      packed.set(values, plane);
     }
     this.length = to;
     this.validBins[0] = to;
     if (!this.deferPyramid) this.updatePyramid(from, to);
   }
 
-  private appendRepeated8(values: Uint8Array): void {
-    const count = values.length,
-      from = this.length,
-      to = from + count;
-    this.prepareAppend(count);
-    for (const plane of this.base) plane.extendTo(to);
-    let index = 0;
-    for (; index < count && (from + index) & 31; index++) {
-      const value = values[index]!;
-      for (const plane of this.base) plane.setBit(from + index, value);
-    }
-    const bodyEnd = index + (((count - index) >>> 5) << 5);
-    for (; index < bodyEnd; index += 32) {
-      let word = 0;
-      for (let bit = 0; bit < 32; bit++) word |= values[index + bit]! << bit;
-      const sample = from + index,
-        block = sample >>> BASE_BLOCK_BITS_LOG,
+  private copyPlaneRange(source: BitPlane, target: BitPlane, from: number, to: number): void {
+    let sample = from;
+    for (; sample < to && sample & 31; sample++) target.setBit(sample, source.getBit(sample));
+    const bodyEnd = to - (to % 32);
+    while (sample < bodyEnd) {
+      const block = sample >>> BASE_BLOCK_BITS_LOG,
         offset = (sample & (2 ** BASE_BLOCK_BITS_LOG - 1)) >>> 5;
-      for (const plane of this.base) plane.blocks[block]![offset] = word;
+      const words = Math.min((bodyEnd - sample) >>> 5, 2 ** (BASE_BLOCK_BITS_LOG - 5) - offset);
+      target.blocks[block]!.set(source.blocks[block]!.subarray(offset, offset + words), offset);
+      sample += words * 32;
     }
-    for (; index < count; index++) {
-      const value = values[index]!;
-      for (const plane of this.base) plane.setBit(from + index, value);
-    }
-    this.length = to;
-    this.validBins[0] = to;
-    if (!this.deferPyramid) this.updatePyramid(from, to);
+    for (; sample < to; sample++) target.setBit(sample, source.getBit(sample));
   }
 
   dispose(): void {

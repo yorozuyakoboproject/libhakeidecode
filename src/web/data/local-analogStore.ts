@@ -81,6 +81,8 @@ export class LocalAnalogSampleStore implements AnalogStore {
   length = 0;
   private readonly values: FloatBlocks;
   private preparedTo = 0;
+  private pendingMinimum = Infinity;
+  private pendingMaximum = -Infinity;
 
   private readonly levelMin: FloatBlocks[] = [];
   private readonly levelMax: FloatBlocks[] = [];
@@ -140,25 +142,59 @@ export class LocalAnalogSampleStore implements AnalogStore {
     this.appendValidated(values, startSample);
   }
 
-  appendValidated(values: ArrayLike<number>, startSample = this.length): void {
+  appendValidated(
+    values: ArrayLike<number>,
+    startSample = this.length,
+  ): { minimum: number; maximum: number; sum: number } {
     if (startSample !== this.length) throw new Error('analog chunks must be contiguous');
     this.prepareAppend(values.length);
+    let minimum = Infinity,
+      maximum = -Infinity,
+      sum = 0;
     for (let index = 0; index < values.length;) {
       const sample = this.length + index,
-        block = this.values.blocks[Math.floor(sample / ANALOG_BLOCK_SAMPLES)]!;
+        blockIndex = Math.floor(sample / ANALOG_BLOCK_SAMPLES),
+        block = this.values.blocks[blockIndex]!;
       const offset = sample % ANALOG_BLOCK_SAMPLES,
         count = Math.min(values.length - index, ANALOG_BLOCK_SAMPLES - offset);
       if (values instanceof Float32Array) block.set(values.subarray(index, index + count), offset);
       else for (let i = 0; i < count; i++) block[offset + i] = values[index + i]!;
+      const mins = this.levelMin[1]!.blocks[blockIndex],
+        maxs = this.levelMax[1]!.blocks[blockIndex];
+      for (let cursor = offset; cursor < offset + count;) {
+        const end = Math.min(offset + count, (Math.floor(cursor / 16) + 1) * 16);
+        let low = Infinity,
+          high = -Infinity;
+        for (; cursor < end; cursor++) {
+          const value = block[cursor]!;
+          low = Math.min(low, value);
+          high = Math.max(high, value);
+          sum += value;
+        }
+        minimum = Math.min(minimum, low);
+        maximum = Math.max(maximum, high);
+        this.pendingMinimum = Math.min(this.pendingMinimum, low);
+        this.pendingMaximum = Math.max(this.pendingMaximum, high);
+        if (cursor % 16 === 0) {
+          mins![cursor / 16 - 1] = this.pendingMinimum;
+          maxs![cursor / 16 - 1] = this.pendingMaximum;
+          this.pendingMinimum = Infinity;
+          this.pendingMaximum = -Infinity;
+        }
+      }
       index += count;
     }
     this.length += values.length;
+    this.validBins[1] = Math.floor(this.length / 16);
     this.updatePyramid();
+    return { minimum, maximum, sum };
   }
   dispose(): void {
     for (const plane of [this.values, ...this.levelMin.slice(1), ...this.levelMax.slice(1)]) plane.trim(0);
     this.length = 0;
     this.preparedTo = 0;
+    this.pendingMinimum = Infinity;
+    this.pendingMaximum = -Infinity;
     this.validBins.fill(0);
   }
 
@@ -215,7 +251,7 @@ export class LocalAnalogSampleStore implements AnalogStore {
   }
 
   private updatePyramid(): void {
-    for (let level = 1; level <= MAX_LEVEL; level++) {
+    for (let level = 2; level <= MAX_LEVEL; level++) {
       const size = this.binSize[level]!;
       const first = this.validBins[level]!;
       const last = Math.floor(this.length / size);
@@ -223,33 +259,22 @@ export class LocalAnalogSampleStore implements AnalogStore {
 
       const mins = this.levelMin[level]!;
       const maxs = this.levelMax[level]!;
-      if (level === 1) {
-        for (let bin = first; bin < last; bin++) {
-          const start = bin * size;
-          let low = Infinity,
-            high = -Infinity;
-          for (let sample = start; sample < start + size; sample++) {
-            const value = this.values.at(sample);
-            low = Math.min(low, value);
-            high = Math.max(high, value);
-          }
-          mins.set(bin, low);
-          maxs.set(bin, high);
+      const sourceMin = this.levelMin[level - 1]!,
+        sourceMax = this.levelMax[level - 1]!;
+      for (let bin = first; bin < last; bin++) {
+        const sourceStart = bin * 16,
+          block = Math.floor(sourceStart / sourceMin.blockSamples);
+        const offset = sourceStart % sourceMin.blockSamples,
+          lows = sourceMin.blocks[block]!,
+          highs = sourceMax.blocks[block]!;
+        let low = Infinity,
+          high = -Infinity;
+        for (let source = offset; source < offset + 16; source++) {
+          low = Math.min(low, lows[source]!);
+          high = Math.max(high, highs[source]!);
         }
-      } else {
-        const sourceMin = this.levelMin[level - 1]!;
-        const sourceMax = this.levelMax[level - 1]!;
-        for (let bin = first; bin < last; bin++) {
-          const sourceStart = bin * 16;
-          let low = Infinity,
-            high = -Infinity;
-          for (let source = sourceStart; source < sourceStart + 16; source++) {
-            low = Math.min(low, sourceMin.at(source));
-            high = Math.max(high, sourceMax.at(source));
-          }
-          mins.set(bin, low);
-          maxs.set(bin, high);
-        }
+        mins.set(bin, low);
+        maxs.set(bin, high);
       }
       this.validBins[level] = last;
     }

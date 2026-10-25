@@ -3,6 +3,7 @@ import { ComponentError } from '../../components.js';
 import { sampleIndex, type SampleSource } from '../../libhakei/index.js';
 import {
   validateDeviceConfiguration,
+  deviceChannelIndices,
   type PackedLogicAcquisitionDescription,
   type DeviceCapabilities,
   type DeviceConfiguration,
@@ -138,6 +139,10 @@ export class CH32H417Device implements PackedLogicDevice {
     validateDeviceConfiguration(this, configuration);
     if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
     const capacity = context.chunkSamples ?? 1_048_576;
+    const selected = deviceChannelIndices(configuration, 'logic');
+    const remap = Uint8Array.from({ length: 256 }, (_, value) =>
+      selected.reduce((packed, channel, index) => packed | (((value >>> channel) & 1) << index), 0),
+    );
     let buffer: ArrayBuffer | null = null,
       raw: Uint8Array | null = null,
       used = 0,
@@ -191,8 +196,7 @@ export class CH32H417Device implements PackedLogicDevice {
             const source = payload.subarray(offset, offset + n);
             if (configuration.logicChannels === 8) raw!.set(source, used);
             else {
-              const mask = (1 << configuration.logicChannels) - 1;
-              for (let i = 0; i < n; i++) raw![used + i] = source[i]! & mask;
+              for (let i = 0; i < n; i++) raw![used + i] = remap[source[i]!]!;
             }
             workerMetrics.packedCopyMs += performance.now() - copyStarted;
             used += n;
@@ -285,7 +289,9 @@ export class CH32H417Device implements PackedLogicDevice {
     };
     signal?.addEventListener('abort', stop, { once: true });
     try {
-      await transport.open();
+      await transport.open(
+        deviceChannelIndices(configuration, 'logic').reduce((mask, channel) => mask | (1 << channel), 0),
+      );
       const caps = readCapabilities(await transport.command(Command.caps));
       if (caps.packetBytes !== identity.capabilities.packetBytes || !caps.rates.includes(configuration.sampleRate))
         throw new Error('H417 USB speed changed; reconnect to refresh sampling rates');
@@ -376,7 +382,7 @@ export class CH32H417Device implements PackedLogicDevice {
     context?.signal?.addEventListener('abort', stop, { once: true });
     try {
       context?.signal?.throwIfAborted();
-      await transport.open();
+      await transport.open(deviceChannelIndices(config, 'logic').reduce((mask, channel) => mask | (1 << channel), 0));
       context?.signal?.throwIfAborted();
       const caps = readCapabilities(await transport.command(Command.caps));
       context?.signal?.throwIfAborted();
@@ -436,8 +442,8 @@ export class CH32H417Device implements PackedLogicDevice {
           const count = Math.min(chunkSamples, frame.payload.length - offset);
           const buffer = (await context?.acquireBuffer?.()) ?? new ArrayBuffer(count * config.logicChannels);
           const channels: Record<string, Uint8Array> = {};
-          for (let channel = 0; channel < config.logicChannels; channel++) {
-            const values = new Uint8Array(buffer, count * channel, count);
+          for (const [index, channel] of deviceChannelIndices(config, 'logic').entries()) {
+            const values = new Uint8Array(buffer, count * index, count);
             for (let i = 0; i < count; i++) values[i] = (frame.payload[offset + i]! >>> channel) & 1;
             channels[`D${channel}`] = values;
           }

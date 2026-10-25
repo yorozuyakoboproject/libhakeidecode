@@ -1,9 +1,10 @@
 import { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
 export { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
-import { sampleIndex, minSample, samplePhase, type SampleInput } from '../../libhakei/sample-index.js';
+import { sampleIndex, minSample, samplePhase, numberFraction, type SampleInput } from '../../libhakei/sample-index.js';
 import { createSampleChunk, type SampleChunk, type SampleChunkInput, type SampleSource } from '../../libhakei/index.js';
 import {
   validateDeviceConfiguration,
+  deviceChannelIndices,
   validateNumericValue,
   type DeviceConfiguration,
   type ChannelArrayDevice,
@@ -61,24 +62,31 @@ export class DemoDevice implements ChannelArrayDevice {
   getCapabilities(_configuration: DeviceConfiguration) {
     return this.descriptor.capabilities;
   }
-  getAcquisitionDescription(_configuration: DeviceConfiguration) {
+  getAcquisitionDescription(configuration: DeviceConfiguration) {
     return {
       layout: 'channel-arrays' as const,
       logicSampleBytes: 1 as const,
       analogSampleBytes: 4 as const,
       chunkSamples: 65_536,
-      workingBytes: 0,
+      workingBytes: configuration.analogChannels
+        ? analogTemplateLength(
+            configuration.options.analogPattern as DemoPattern,
+            configuration.options.frequencyHz as number,
+            configuration.sampleRate,
+            sampleIndex(configuration.sampleCount),
+          ) * 4
+        : 0,
     };
   }
   createSource(configuration: DeviceConfiguration, context: ManagedSampleSourceContext): SampleSource {
     validateDeviceConfiguration(this, configuration);
-    const { sampleRate, sampleCount, logicChannels, analogChannels, options } = configuration;
+    const { sampleRate, sampleCount, options } = configuration;
     return new DemoDriver(
       {
         sampleRate,
         length: sampleCount,
         channels: [
-          ...Array.from({ length: logicChannels }, (_, i): DemoChannelConfig => ({
+          ...deviceChannelIndices(configuration, 'logic').map((i): DemoChannelConfig => ({
             id: `D${i}`,
             kind: 'logic',
             pattern: options.logicPattern as DemoPattern,
@@ -86,7 +94,7 @@ export class DemoDevice implements ChannelArrayDevice {
             seed: (options.seed as number) + i,
             offset: 0,
           })),
-          ...Array.from({ length: analogChannels }, (_, i): DemoChannelConfig => ({
+          ...deviceChannelIndices(configuration, 'analog').map((i): DemoChannelConfig => ({
             id: `A${i}`,
             kind: 'analog',
             pattern: options.analogPattern as DemoPattern,
@@ -260,6 +268,54 @@ function repeatKey(channel: DemoChannelConfig): string | null {
   ].join('/');
 }
 
+function analogTemplateLength(pattern: DemoPattern, frequency: number, sampleRate: number, length: bigint): number {
+  if (pattern !== 'sine') return 0;
+  const [numerator, denominator] = numberFraction(frequency);
+  const samples = BigInt(sampleRate) * denominator;
+  if (samples % numerator) return 0;
+  const period = samples / numerator;
+  return period <= 1_048_576n && period < length ? Number(period) : 0;
+}
+
+function fillAnalog(
+  values: Float32Array,
+  channel: DemoChannelConfig,
+  start: bigint,
+  sampleRate: number,
+  template: { data: Float32Array; filled: number } | undefined,
+): void {
+  if (channel.pattern === 'constant') {
+    values.fill(channel.value ?? channel.offset ?? 0);
+    return;
+  }
+  if (template) {
+    const period = template.data.length,
+      first = Math.min(period, values.length);
+    let offset = Number(start % BigInt(period)),
+      copied = 0;
+    while (copied < first) {
+      const count = Math.min(first - copied, period - offset),
+        end = offset + count;
+      for (let i = template.filled; i < end; i++) template.data[i] = waveValue(channel, i, sampleRate);
+      template.filled = Math.max(template.filled, end);
+      values.set(template.data.subarray(offset, end), copied);
+      copied += count;
+      offset = 0;
+    }
+    while (copied < values.length) {
+      const count = Math.min(copied, values.length - copied);
+      values.copyWithin(copied, 0, count);
+      copied += count;
+    }
+    return;
+  }
+  const localStart =
+    channel.pattern === 'random'
+      ? Number(start & 0xffffffffn)
+      : (samplePhase(start, channel.frequencyHz ?? 1000, sampleRate) * sampleRate) / (channel.frequencyHz ?? 1000);
+  for (let i = 0; i < values.length; i++) values[i] = waveValue(channel, localStart + i, sampleRate);
+}
+
 export class DemoDriver implements SampleSource {
   static readonly descriptor = DEMO_DEVICE_DESCRIPTOR;
   readonly options: ReturnType<typeof validate>;
@@ -273,6 +329,13 @@ export class DemoDriver implements SampleSource {
   async *[Symbol.asyncIterator](): AsyncGenerator<SampleChunk> {
     const { sampleRate, length, chunkSamples, channels } = this.options;
     const logicCount = channels.filter((channel) => channel.kind === 'logic').length;
+    const templates = new Map<string, { data: Float32Array; filled: number }>();
+    for (const channel of channels) {
+      if (channel.kind !== 'analog') continue;
+      const key = repeatKey(channel),
+        period = analogTemplateLength(channel.pattern, channel.frequencyHz ?? 1000, sampleRate, length);
+      if (key && period && !templates.has(key)) templates.set(key, { data: new Float32Array(period), filled: 0 });
+    }
     for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
       this.context?.signal?.throwIfAborted();
       const count = Number(minSample(BigInt(chunkSamples), length - start));
@@ -308,14 +371,7 @@ export class DemoDriver implements SampleSource {
                 ? new Float32Array(managed, byteOffset, count)
                 : new Float32Array(count);
           byteOffset += count * 4;
-          if (!previous) {
-            const localStart =
-              channel.pattern === 'random'
-                ? Number(start & 0xffffffffn)
-                : (samplePhase(start, channel.frequencyHz ?? 1000, sampleRate) * sampleRate) /
-                  (channel.frequencyHz ?? 1000);
-            for (let i = 0; i < count; i++) values[i] = waveValue(channel, localStart + i, sampleRate);
-          }
+          if (!previous) fillAnalog(values, channel, start, sampleRate, key ? templates.get(key) : undefined);
           if (key) repeated.set(key, values);
           analog[channel.id] = values;
         }

@@ -12,14 +12,14 @@ const SELECTED_DEVICE_KEY = 'hakei.device';
 const fields = [
   ['sampleRate', 'sample-rate', 'capture.rate'],
   ['sampleCount', 'sample-limit', 'capture.sampleLimit'],
-  ['logicChannels', 'device-channel-count', 'device.logicChannels'],
-  ['analogChannels', 'device-analog-count', 'device.analogChannels'],
 ] as const;
 
 export class DeviceControls {
   onChange: (() => void) | null = null;
   onConnectionChange: (() => void) | null = null;
   private busy = false;
+  private logicSelection: number[] = [];
+  private analogSelection: number[] = [];
   private connecting = false;
   private configuring = false;
   private configurationSequence = 0;
@@ -82,7 +82,36 @@ export class DeviceControls {
     return device;
   }
   get ready(): boolean {
-    return !this.connecting && !this.configuring && !this.configurationError && this.device.connected !== false;
+    return (
+      this.logicSelection.length + this.analogSelection.length > 0 &&
+      !this.connecting &&
+      !this.configuring &&
+      !this.configurationError &&
+      this.device.connected !== false
+    );
+  }
+  channelCapacity(kind: 'logic' | 'analog'): number {
+    const capability = this.device.descriptor.capabilities[`${kind}Channels`];
+    return capability.kind === 'list' ? Math.max(...capability.values) : capability.max;
+  }
+  selectedChannels(kind: 'logic' | 'analog'): readonly number[] {
+    return kind === 'logic' ? this.logicSelection : this.analogSelection;
+  }
+  selectChannel(kind: 'logic' | 'analog', channel: number, enabled: boolean): void {
+    if (this.busy) return;
+    const selected = new Set(this.selectedChannels(kind));
+    if (enabled) selected.add(channel);
+    else selected.delete(channel);
+    const indices = [...selected].sort((a, b) => a - b);
+    if (kind === 'logic') this.logicSelection = indices;
+    else this.analogSelection = indices;
+    try {
+      localStorage.setItem(
+        `hakei.${this.device.descriptor.id}.channels`,
+        JSON.stringify({ logic: this.logicSelection, analog: this.analogSelection }),
+      );
+    } catch {}
+    void this.refreshCapabilities();
   }
   configuration(): DeviceConfiguration {
     const values = Object.fromEntries(
@@ -100,8 +129,10 @@ export class DeviceControls {
     return {
       sampleRate: Number(values.sampleRate!),
       sampleCount: values.sampleCount!,
-      logicChannels: Number(values.logicChannels!),
-      analogChannels: Number(values.analogChannels!),
+      logicChannels: this.logicSelection.length,
+      analogChannels: this.analogSelection.length,
+      logicChannelIndices: [...this.logicSelection],
+      analogChannelIndices: [...this.analogSelection],
       options,
     };
   }
@@ -126,6 +157,22 @@ export class DeviceControls {
   }
   private selectDevice(): void {
     const defaults = defaultDeviceConfiguration(this.device.descriptor);
+    this.logicSelection = Array.from({ length: defaults.logicChannels }, (_, i) => i);
+    this.analogSelection = Array.from({ length: defaults.analogChannels }, (_, i) => i);
+    try {
+      const saved = JSON.parse(localStorage.getItem(`hakei.${this.device.descriptor.id}.channels`) ?? 'null');
+      for (const kind of ['logic', 'analog'] as const) {
+        const indices: unknown = saved?.[kind];
+        if (
+          Array.isArray(indices) &&
+          indices.every((id) => Number.isInteger(id) && id >= 0 && id < this.channelCapacity(kind)) &&
+          new Set(indices).size === indices.length
+        ) {
+          if (kind === 'logic') this.logicSelection = [...indices].sort((a, b) => a - b);
+          else this.analogSelection = [...indices].sort((a, b) => a - b);
+        }
+      }
+    } catch {}
     const configuration = {
       ...defaults,
       sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
@@ -230,6 +277,10 @@ export class DeviceControls {
     this.refreshConnection();
     this.onConnectionChange?.();
     try {
+      if (!this.logicSelection.length && !this.analogSelection.length) {
+        this.onChange?.();
+        return;
+      }
       const settings = await device.configure(this.configuration());
       if (device !== this.device || sequence !== this.configurationSequence) return;
       this.renderSampling(settings.configuration, settings.capabilities);
@@ -240,6 +291,8 @@ export class DeviceControls {
       const key = JSON.stringify([
         device.descriptor.id,
         ...fields.map(([field]) => String(settings.configuration[field])),
+        settings.configuration.logicChannelIndices,
+        settings.configuration.analogChannelIndices,
         settings.configuration.options,
       ]);
       if (key !== this.configurationKey) {
@@ -343,41 +396,21 @@ export class DeviceControls {
     value: number | bigint,
     captionKey: MessageKey,
   ): void {
-    let input: HTMLInputElement | HTMLSelectElement;
+    const input = document.createElement('select');
+    input.required = true;
     const choices = numericChoices(capability);
-    if (capability.kind === 'list' || id === 'sample-rate' || id === 'sample-limit') {
-      input = document.createElement('select');
-      input.required = true;
-      for (const choice of choices) {
-        const option = document.createElement('option');
-        option.value = String(choice);
-        option.textContent = this.choiceLabel(choice, id);
-        option.title = numberLabel(choice) + (id === 'sample-rate' ? ' Hz' : '');
-        input.append(option);
-      }
-      if (!choices.some((choice) => String(choice) === String(value))) {
-        const option = document.createElement('option');
-        option.value = String(value);
-        option.textContent = this.choiceLabel(value, id);
-        input.append(option);
-      }
-    } else {
-      input = document.createElement('input');
-      input.type = 'number';
-      input.required = true;
-      input.min = String(capability.min);
-      input.max = String(capability.max);
-      input.step = String(capability.step);
-      const list = document.createElement('datalist');
-      list.id = `${id}-choices`;
-      input.setAttribute('list', list.id);
-      for (const choice of choices) {
-        const option = document.createElement('option');
-        option.value = String(choice);
-        option.label = numberLabel(choice);
-        list.append(option);
-      }
-      label.append(list);
+    for (const choice of choices) {
+      const option = document.createElement('option');
+      option.value = String(choice);
+      option.textContent = this.choiceLabel(choice, id);
+      option.title = numberLabel(choice) + (id === 'sample-rate' ? ' Hz' : '');
+      input.append(option);
+    }
+    if (!choices.some((choice) => String(choice) === String(value))) {
+      const option = document.createElement('option');
+      option.value = String(value);
+      option.textContent = this.choiceLabel(value, id);
+      input.append(option);
     }
     input.id = id;
     input.value = String(value);

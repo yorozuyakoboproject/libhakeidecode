@@ -12,6 +12,7 @@ import {
   readStatus,
   type Frame,
 } from './protocol.js';
+import { configureInputs } from './inputs.js';
 
 export interface UsbDevice {
   readonly vendorId: number;
@@ -107,7 +108,7 @@ export class H417Transport {
   get metrics(): Readonly<typeof this.counters> {
     return this.counters;
   }
-  async open(): Promise<void> {
+  async open(inputMask?: number): Promise<void> {
     await this.device.open();
     if (this.device.configuration?.configurationValue !== 1)
       throw new Error('H417 is not configured; initialize UHSIF in the management webpage first');
@@ -120,6 +121,7 @@ export class H417Transport {
         'H417 logic analyzer Interface 1 is unavailable; initialize UHSIF in the management webpage first, then reconnect the analyzer',
       );
     this.packet = input.packetSize as 512 | 1024;
+    if (inputMask !== undefined) await configureInputs(this.device, inputMask);
     await this.device.claimInterface(INTERFACE);
     this.claimed = true;
     void this.readLoop().catch((error) => this.fail(error));

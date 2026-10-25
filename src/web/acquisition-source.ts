@@ -1,4 +1,5 @@
 import { restoreComponentError } from '../components.js';
+import { deviceChannelIndices } from '../libhakei/device.js';
 import type { AcquisitionChunk, DeviceConfiguration, DriverDiagnostics } from '../libhakei/device.js';
 import type { WorkerAcquisitionDescription } from './device-protocol.js';
 import type { AcquisitionResponse, AcquisitionRequest } from './acquisition-worker.js';
@@ -46,6 +47,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   readonly captureStore?: WorkerCaptureStore;
   onLocalProgress: (() => void) | null = null;
   readonly capacity: number;
+  readonly channelSelection: { driverId: string; logic: readonly number[]; analog: readonly number[] };
   maxQueued = 0;
   constructor(
     description: WorkerAcquisitionDescription,
@@ -59,6 +61,11 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
       this.completionResolve = resolve;
     });
     this.capacity = buffers.length;
+    this.channelSelection = {
+      driverId: description.worker.driverId,
+      logic: deviceChannelIndices(configuration, 'logic'),
+      analog: deviceChannelIndices(configuration, 'analog'),
+    };
     this.shared = description.layout === 'packed-logic';
     if (this.shared && typeof SharedArrayBuffer === 'undefined')
       throw new Error('Packed capture requires cross-origin isolation (COOP same-origin and COEP require-corp)');
@@ -67,8 +74,8 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
     if (storeCapture) {
       const channel = new MessageChannel();
       storePort = channel.port1;
-      const labels = Array.from({ length: configuration.logicChannels }, (_, index) => `D${index}`);
-      const analogNames = Array.from({ length: configuration.analogChannels }, (_, index) => `A${index}`);
+      const labels = this.channelSelection.logic.map((index) => `D${index}`);
+      const analogNames = this.channelSelection.analog.map((index) => `A${index}`);
       this.captureStore = WorkerCaptureStore.empty(
         this.worker,
         channel.port2,
@@ -97,6 +104,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
         this.localMemory = { ...data.memory };
         this.onLocalProgress?.();
       } else if (data.type === 'local-done') {
+        this.captureStore?.updateMetadata(data.metadata);
         this.localLength = data.length;
         this.localMemory = { ...data.memory };
         this.localDone = {

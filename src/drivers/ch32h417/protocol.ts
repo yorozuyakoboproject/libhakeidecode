@@ -1,7 +1,7 @@
 import { SS_RATES } from './descriptor.js';
 import { ComponentError } from '../../components.js';
 export { USB_VID, USB_PID, SS_RATES } from './descriptor.js';
-export const APP_PROTOCOL = 16;
+export const APP_PROTOCOL = 17;
 export const INTERFACE = 1,
   EP_OUT = 5,
   EP_IN = 6;

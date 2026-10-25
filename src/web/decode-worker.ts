@@ -24,6 +24,7 @@ import type {
   WorkerDecodeMessage,
 } from './protocol.js';
 import type { DecodeReadResponse } from './worker-store.js';
+import { yieldWorkerTask } from './worker-task.js';
 
 type Scope = {
   onmessage: ((event: MessageEvent<DecodeStreamRequest>) => void) | null;
@@ -76,19 +77,6 @@ interface Session {
 
 let session: Session | null = null;
 let queue = Promise.resolve();
-const taskYieldChannel = new MessageChannel();
-let taskYieldResolve: (() => void) | null = null;
-taskYieldChannel.port1.onmessage = () => {
-  const resolve = taskYieldResolve;
-  taskYieldResolve = null;
-  resolve?.();
-};
-function yieldWorkerTask(): Promise<void> {
-  return new Promise((resolve) => {
-    taskYieldResolve = resolve;
-    taskYieldChannel.port2.postMessage(0);
-  });
-}
 scope.onmessage = (event) => {
   if (event.data.type === 'decode-query-annotations') {
     try {

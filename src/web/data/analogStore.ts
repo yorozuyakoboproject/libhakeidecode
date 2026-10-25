@@ -106,13 +106,10 @@ export class AnalogSampleStore implements AnalogStore {
         values instanceof Float32Array || values instanceof Float64Array
           ? values.subarray(done, done + n)
           : Array.from({ length: n }, (_, i) => values[done + i]!);
-      segment.appendValidated(part);
-      for (let i = 0; i < part.length; i++) {
-        const value = Math.fround(part[i]!);
-        this.minimum = Math.min(this.minimum, value);
-        this.maximum = Math.max(this.maximum, value);
-        this.sum += value;
-      }
+      const stats = segment.appendValidated(part);
+      this.minimum = Math.min(this.minimum, stats.minimum);
+      this.maximum = Math.max(this.maximum, stats.maximum);
+      this.sum += stats.sum;
       done += n;
       this.sampleCount += BigInt(n);
     }

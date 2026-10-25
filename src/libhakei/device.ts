@@ -34,7 +34,15 @@ export interface DeviceConfiguration {
   readonly sampleCount: number | bigint;
   readonly logicChannels: number;
   readonly analogChannels: number;
+  readonly logicChannelIndices?: readonly number[];
+  readonly analogChannelIndices?: readonly number[];
   readonly options: Readonly<Record<string, string | number>>;
+}
+
+export function deviceChannelIndices(configuration: DeviceConfiguration, kind: 'logic' | 'analog'): readonly number[] {
+  return (
+    configuration[`${kind}ChannelIndices`] ?? Array.from({ length: configuration[`${kind}Channels`] }, (_, i) => i)
+  );
 }
 
 export interface DeviceConfigurationState {
@@ -184,12 +192,16 @@ export function resolveDeviceConfiguration(
     adjusted.sampleCount = supportsNumericValue(capabilities.sampleCount, configuration.sampleCount)
       ? configuration.sampleCount
       : capabilities.sampleCount.default;
-    adjusted.logicChannels = supportsNumericValue(capabilities.logicChannels, configuration.logicChannels)
-      ? configuration.logicChannels
-      : capabilities.logicChannels.default;
-    adjusted.analogChannels = supportsNumericValue(capabilities.analogChannels, configuration.analogChannels)
-      ? configuration.analogChannels
-      : capabilities.analogChannels.default;
+    adjusted.logicChannels = configuration.logicChannelIndices
+      ? configuration.logicChannelIndices.length
+      : supportsNumericValue(capabilities.logicChannels, configuration.logicChannels)
+        ? configuration.logicChannels
+        : capabilities.logicChannels.default;
+    adjusted.analogChannels = configuration.analogChannelIndices
+      ? configuration.analogChannelIndices.length
+      : supportsNumericValue(capabilities.analogChannels, configuration.analogChannels)
+        ? configuration.analogChannels
+        : capabilities.analogChannels.default;
     if (
       adjusted.sampleRate === configuration.sampleRate &&
       adjusted.sampleCount === configuration.sampleCount &&
@@ -205,6 +217,22 @@ export function resolveDeviceConfiguration(
 }
 export function validateDeviceConfiguration(device: SampleDevice, configuration: DeviceConfiguration): void {
   const caps = device.getCapabilities(configuration);
+  if (configuration.logicChannels + configuration.analogChannels === 0)
+    throw new RangeError('Select at least one channel');
+  for (const kind of ['logic', 'analog'] as const) {
+    const indices = deviceChannelIndices(configuration, kind),
+      capability = caps[`${kind}Channels`];
+    const maximum = capability.kind === 'list' ? Math.max(...capability.values) : capability.max;
+    if (
+      indices.length !== configuration[`${kind}Channels`] ||
+      new Set(indices).size !== indices.length ||
+      indices.some(
+        (index, offset) =>
+          !Number.isInteger(index) || index < 0 || index >= maximum || (offset > 0 && index <= indices[offset - 1]!),
+      )
+    )
+      throw new RangeError(`Invalid ${kind} channel selection`);
+  }
   for (const key of ['sampleRate', 'sampleCount', 'logicChannels', 'analogChannels'] as const) {
     validateNumericValue(caps[key], configuration[key], key);
   }

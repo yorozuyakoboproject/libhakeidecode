@@ -77,18 +77,24 @@ export function createSampleChunk({
   if (!channels || typeof channels !== 'object' || Array.isArray(channels))
     throw new SampleFormatError('channels must be an object keyed by channel id.');
   const normalized: Record<string, LogicSamples> = {};
+  const validatedLogic = new Map<LogicSamples | readonly number[], LogicSamples>();
   let length: number | null = null;
   for (const [name, value] of Object.entries(channels)) {
-    const typed = asTypedArray(value, name);
+    const cached = validatedLogic.get(value);
+    const typed = cached ? (Array.isArray(value) ? cached.slice() : cached) : asTypedArray(value, name);
+    if (!cached) validatedLogic.set(value, typed);
     if (length === null) length = typed.length;
     if (typed.length !== length) throw new SampleFormatError('All channels in a chunk must have equal length.');
     Object.defineProperty(normalized, name, { value: typed, enumerable: true });
   }
   const normalizedAnalog: Record<string, AnalogSamples> = {};
+  const validatedAnalog = new Map<AnalogSamples | readonly number[], AnalogSamples>();
   for (const [name, value] of Object.entries(analogChannels)) {
     if (Object.hasOwn(normalized, name))
       throw new SampleFormatError(`Channel ${name} is present in both logic and analog channels.`);
-    const typed = asAnalogArray(value, name);
+    const cached = validatedAnalog.get(value);
+    const typed = cached ? (Array.isArray(value) ? cached.slice() : cached) : asAnalogArray(value, name);
+    if (!cached) validatedAnalog.set(value, typed);
     if (length === null) length = typed.length;
     if (typed.length !== length) throw new SampleFormatError('All channels in a chunk must have equal length.');
     Object.defineProperty(normalizedAnalog, name, { value: typed, enumerable: true });
