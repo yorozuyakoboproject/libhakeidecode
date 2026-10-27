@@ -181,7 +181,7 @@ export class DecodeClient {
         this.acknowledge?.();
         this.acknowledge = null;
       } else if (event.data.type === 'decode-progress')
-        onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.resultBytes);
+        onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.memory.totalBytes);
       else if (event.data.type === 'done') {
         if (settled) return;
         settled = true;
@@ -307,7 +307,12 @@ export class DecodeClient {
               this.acknowledge?.();
               this.acknowledge = null;
             } else if (event.data.type === 'decode-progress')
-              onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.resultBytes);
+              onProgress?.(
+                event.data.progress,
+                event.data.frames,
+                event.data.annotations,
+                event.data.memory.totalBytes,
+              );
             else if (event.data.type === 'done') {
               this.acknowledge?.();
               this.acknowledge = null;

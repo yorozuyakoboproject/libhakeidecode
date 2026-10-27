@@ -73,9 +73,6 @@ function decoderName(decoder: DecoderId): string {
   const key = 'decoder.' + decoder + '.name';
   return hasMessage(key) ? t(key) : (decoderDefinition(decoder).descriptor.name ?? decoder);
 }
-function binaryBytes(result: DecodeResult): number {
-  return Object.values(result.result.binarySizes).reduce((sum, bytes) => sum + bytes, 0);
-}
 export class AnalyzerApp {
   protocols: ProtocolInstance[] = [];
   selectedId: string | null = null;
@@ -285,7 +282,7 @@ export class AnalyzerApp {
       options: { ...defaults(settings.decoder), ...settings.options },
       mapping: { ...settings.mapping },
       client,
-      annotations: new PagedAnnotationIndex(client),
+      annotations: new PagedAnnotationIndex(client, () => this.updateMemoryUsage()),
       frameCount: 0,
       annotationCount: 0,
       resultBytes: 0,
@@ -1005,8 +1002,7 @@ export class AnalyzerApp {
           protocol.result = result;
           protocol.frameCount = result.stats.frames;
           protocol.annotationCount = result.stats.annotations;
-          protocol.resultBytes =
-            Math.max(protocol.resultBytes, protocol.annotations.reservedBytes) + binaryBytes(result);
+          protocol.resultBytes = result.stats.memory.totalBytes;
           if (protocol.annotations instanceof PagedAnnotationIndex)
             protocol.annotations.setTotal(protocol.annotationCount);
           protocol.state = 'done';
@@ -1155,7 +1151,7 @@ export class AnalyzerApp {
         protocol.result = result;
         protocol.frameCount = result.stats.frames;
         protocol.annotationCount = result.stats.annotations;
-        protocol.resultBytes = protocol.annotations.reservedBytes + binaryBytes(result);
+        protocol.resultBytes = result.stats.memory.totalBytes;
         protocol.state = 'done';
         protocol.progress = 1;
         if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
@@ -1388,21 +1384,26 @@ export class AnalyzerApp {
     }
   }
   private retainedDataBytes(): number {
-    return (
-      (this.capture ? captureMemory(this.capture).totalBytes : 0) +
-      this.protocols.reduce(
-        (sum, protocol) =>
-          sum +
-          protocol.resultBytes +
-          protocol.annotations.reservedBytes +
-          (protocol.result ? binaryBytes(protocol.result) : 0),
-        0,
-      )
+    return (this.capture ? captureMemory(this.capture).totalBytes : 0) + this.retainedDecodeBytes();
+  }
+  private retainedDecodeBytes(): number {
+    return this.protocols.reduce(
+      (sum, protocol) =>
+        sum +
+        protocol.resultBytes +
+        protocol.annotations.reservedBytes +
+        (protocol.result
+          ? Object.values(protocol.result.result.previews).reduce((bytes, preview) => bytes + preview.byteLength, 0)
+          : 0),
+      0,
     );
   }
   private updateMemoryUsage(): void {
     const shared = this.capture?.sharedSource;
-    const bytes = (this.acquisitionMemory?.usedBytes ?? this.retainedDataBytes()) + (shared?.allocatedBytes ?? 0);
+    const bytes =
+      (this.acquisitionMemory
+        ? this.acquisitionMemory.usedBytes + this.retainedDecodeBytes()
+        : this.retainedDataBytes()) + (shared?.allocatedBytes ?? 0);
     const storedSamples = this.capture?.store.length ?? 0n;
     const samples =
       shared?.publishedSamples && shared.publishedSamples > storedSamples ? shared.publishedSamples : storedSamples;

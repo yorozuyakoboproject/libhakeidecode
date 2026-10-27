@@ -11,7 +11,10 @@ export class PagedAnnotationIndex extends AnnotationIndex {
   private cachedKey = '';
   private queryPendingKey = '';
   private queryPending: Promise<void> | null = null;
-  constructor(private readonly client: DecodeClient) {
+  constructor(
+    private readonly client: DecodeClient,
+    private readonly onChange?: () => void,
+  ) {
     super();
   }
   override get reservedBytes(): number {
@@ -41,6 +44,7 @@ export class PagedAnnotationIndex extends AnnotationIndex {
     this.revision++;
     this.cachedKey = '';
     this.queryPending = null;
+    this.onChange?.();
   }
   override query(startInput: SampleInput, endInput: SampleInput, maxResults = Number.MAX_SAFE_INTEGER): Annotation[] {
     const start = samplePosition(startInput),
@@ -61,6 +65,7 @@ export class PagedAnnotationIndex extends AnnotationIndex {
         if (sequence === this.sequence) {
           this.records = records;
           this.cachedKey = key;
+          this.onChange?.();
         }
       })
       .finally(() => {

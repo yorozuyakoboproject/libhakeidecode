@@ -1,43 +1,26 @@
 import { samplePosition, maxSample, compareSamples, type SampleInput } from '../libhakei/sample-index.js';
 import type { Annotation } from './protocol.js';
+import { SampleColumn } from './sample-column.js';
 
 const PAGE_SIZE = 65_536;
-const MAX_OFFSET = (1n << 64n) - 1n;
 type AnnotationPage = {
-  base: bigint;
-  ssLo: Uint32Array;
-  ssHi: Uint32Array;
-  esLo: Uint32Array;
-  esHi: Uint32Array;
-  endLo: Uint32Array;
-  endHi: Uint32Array;
+  ss: SampleColumn;
+  es: SampleColumn;
+  end: SampleColumn;
   classes: Uint8Array;
   textIds: Uint32Array;
-  values: Float64Array;
-  hasValue: Uint8Array;
-  wideSs: Map<number, bigint>;
-  wideEs: Map<number, bigint>;
-  wideEnd: Map<number, bigint>;
+  values: Float64Array | null;
+  hasValue: Uint8Array | null;
 };
 const emptyPage = (base: bigint): AnnotationPage => ({
-  base,
-  ssLo: new Uint32Array(PAGE_SIZE),
-  ssHi: new Uint32Array(PAGE_SIZE),
-  esLo: new Uint32Array(PAGE_SIZE),
-  esHi: new Uint32Array(PAGE_SIZE),
-  endLo: new Uint32Array(PAGE_SIZE),
-  endHi: new Uint32Array(PAGE_SIZE),
+  ss: new SampleColumn(base, PAGE_SIZE),
+  es: new SampleColumn(base, PAGE_SIZE),
+  end: new SampleColumn(base, PAGE_SIZE),
   classes: new Uint8Array(PAGE_SIZE),
   textIds: new Uint32Array(PAGE_SIZE),
-  values: new Float64Array(PAGE_SIZE),
-  hasValue: new Uint8Array(PAGE_SIZE),
-  wideSs: new Map(),
-  wideEs: new Map(),
-  wideEnd: new Map(),
+  values: null,
+  hasValue: null,
 });
-const low32 = (value: bigint): number => Number(value & 0xffff_ffffn) >>> 0;
-const high32 = (value: bigint): number => Number((value >> 32n) & 0xffff_ffffn) >>> 0;
-const fromParts = (hi: number, lo: number): bigint => (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
 
 export class AnnotationIndex {
   private pages: AnnotationPage[] = [];
@@ -47,12 +30,28 @@ export class AnnotationIndex {
   private lastSs = -1n;
   private lastEs = -1n;
   private maximumEnd = -1n;
-  private byteReservation = 0;
+  private pendingBytes = 0;
+  private textBytes = 0;
   private readonly textPool: (readonly string[])[] = [];
   private readonly textIds = new Map<string, number>();
 
   get reservedBytes(): number {
-    return this.byteReservation;
+    return (
+      this.pendingBytes +
+      this.textBytes +
+      this.pages.reduce(
+        (sum, page) =>
+          sum +
+          page.ss.reservedBytes +
+          page.es.reservedBytes +
+          page.end.reservedBytes +
+          page.classes.byteLength +
+          page.textIds.byteLength +
+          (page.values?.byteLength ?? 0) +
+          (page.hasValue?.byteLength ?? 0),
+        0,
+      )
+    );
   }
   get length(): number {
     return this.count + this.pending.length;
@@ -68,7 +67,7 @@ export class AnnotationIndex {
       this.pending.push(record);
       this.lastSs = record.ss;
       this.lastEs = record.es;
-      this.byteReservation += 40 + record.texts.reduce((bytes, text) => bytes + 2 + text.length * 2, 0);
+      this.pendingBytes += 40 + record.texts.reduce((bytes, text) => bytes + 2 + text.length * 2, 0);
     }
     if (this.pending.length >= 1024) this.flushPending();
   }
@@ -81,7 +80,8 @@ export class AnnotationIndex {
     this.lastSs = -1n;
     this.lastEs = -1n;
     this.maximumEnd = -1n;
-    this.byteReservation = 0;
+    this.pendingBytes = 0;
+    this.textBytes = 0;
     this.textPool.length = 0;
     this.textIds.clear();
   }
@@ -93,8 +93,7 @@ export class AnnotationIndex {
       throw new RangeError('maxResults must be a positive safe integer');
     const start = samplePosition(startInput),
       end = samplePosition(endInput);
-    this.flushPending();
-    if (!this.ordered) this.rebuildOrdered();
+    this.finalize();
     let low = this.lowerBoundEnd(start),
       after = this.upperBoundStart(end);
     if (after < low) after = low;
@@ -114,6 +113,12 @@ export class AnnotationIndex {
     const pending = this.pending;
     this.pending = [];
     for (const record of pending) this.write(record);
+    this.pendingBytes = 0;
+  }
+
+  finalize(): void {
+    this.flushPending();
+    if (!this.ordered) this.rebuildOrdered();
   }
 
   private write(record: Annotation): void {
@@ -124,28 +129,17 @@ export class AnnotationIndex {
     if (!page) page = this.pages[pageIndex] = emptyPage(record.ss);
     const end = maxSample(this.maximumEnd, record.es);
     this.maximumEnd = end;
-    this.writePosition(page, offset, 'ss', record.ss);
-    this.writePosition(page, offset, 'es', record.es);
-    this.writePosition(page, offset, 'end', end);
+    page.ss.set(offset, record.ss);
+    page.es.set(offset, record.es);
+    page.end.set(offset, end);
     page.classes[offset] = record.classIndex & 0xff;
     page.textIds[offset] = this.textId(record.texts);
     if (record.value !== undefined) {
+      page.values ??= new Float64Array(PAGE_SIZE);
+      page.hasValue ??= new Uint8Array(PAGE_SIZE / 8);
       page.values[offset] = record.value;
-      page.hasValue[offset] = 1;
+      page.hasValue[offset >>> 3] |= 1 << (offset & 7);
     }
-  }
-
-  private writePosition(page: AnnotationPage, offset: number, kind: 'ss' | 'es' | 'end', value: bigint): void {
-    const relative = value - page.base;
-    const lo = kind === 'ss' ? page.ssLo : kind === 'es' ? page.esLo : page.endLo;
-    const hi = kind === 'ss' ? page.ssHi : kind === 'es' ? page.esHi : page.endHi;
-    const wide = kind === 'ss' ? page.wideSs : kind === 'es' ? page.wideEs : page.wideEnd;
-    if (relative < 0n || relative > MAX_OFFSET) {
-      wide.set(offset, value);
-      return;
-    }
-    lo[offset] = low32(relative);
-    hi[offset] = high32(relative);
   }
 
   private textId(texts: readonly string[]): number {
@@ -155,18 +149,14 @@ export class AnnotationIndex {
     const id = this.textPool.length;
     this.textPool.push(texts);
     this.textIds.set(key, id);
+    this.textBytes += key.length * 2 + texts.length * 8 + texts.reduce((bytes, text) => bytes + text.length * 2, 0);
     return id;
   }
 
   private part(index: number, kind: 'ss' | 'es' | 'end'): bigint {
     const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
       offset = index % PAGE_SIZE;
-    const wide = kind === 'ss' ? page.wideSs : kind === 'es' ? page.wideEs : page.wideEnd;
-    const value = wide.get(offset);
-    if (value !== undefined) return value;
-    const lo = kind === 'ss' ? page.ssLo : kind === 'es' ? page.esLo : page.endLo;
-    const hi = kind === 'ss' ? page.ssHi : kind === 'es' ? page.esHi : page.endHi;
-    return page.base + fromParts(hi[offset]!, lo[offset]!);
+    return page[kind].get(offset);
   }
 
   private recordAt(index: number): Annotation {
@@ -178,7 +168,7 @@ export class AnnotationIndex {
       classIndex: page.classes[offset]!,
       texts: this.textPool[page.textIds[offset]!]!,
     };
-    if (page.hasValue[offset]) record.value = page.values[offset]!;
+    if (page.hasValue && page.hasValue[offset >>> 3]! & (1 << (offset & 7))) record.value = page.values![offset]!;
     return record;
   }
 
@@ -208,7 +198,6 @@ export class AnnotationIndex {
     const records: Annotation[] = [];
     for (let index = 0; index < this.count; index++) records.push(this.recordAt(index));
     records.sort((a, b) => compareSamples(a.ss, b.ss) || compareSamples(a.es, b.es));
-    const bytes = this.byteReservation;
     this.pages = [];
     this.count = 0;
     this.maximumEnd = -1n;
@@ -220,6 +209,5 @@ export class AnnotationIndex {
       this.lastEs = record.es;
       this.write(record);
     }
-    this.byteReservation = bytes;
   }
 }

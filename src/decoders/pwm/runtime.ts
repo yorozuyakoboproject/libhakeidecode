@@ -2,6 +2,8 @@ import { createPWMBatchReader } from './batch.js';
 import { createPWMScanEngine } from './engine.js';
 import type { PWMScanBatch } from './engine.js';
 import { PWMFrameStore } from './frame-store.js';
+import { BinaryStore } from '../binary-store.js';
+import { resultMemory } from '../definition.js';
 import type { PWMFrame } from './frame-store.js';
 import type { PWMOptions } from './index.js';
 import type {
@@ -21,9 +23,7 @@ class PWMRuntime implements DecodeRuntime {
   private readonly pagedAutomatic: boolean;
   private paged = false;
   private progress = 0;
-  private rawPages: Uint8Array[] = [];
-  private rawLength = 0;
-  private rawOffset = 0;
+  private readonly binaries = new BinaryStore();
   constructor(context: DecodeRuntimeContext) {
     this.host = context.host;
     this.store.setRate(context.sampleRate);
@@ -44,8 +44,8 @@ class PWMRuntime implements DecodeRuntime {
   get annotationCount(): number {
     return this.store.length * 3;
   }
-  get resultBytes(): number {
-    return this.store.reservedBytes + this.rawLength;
+  memory() {
+    return resultMemory(0, this.store.reservedBytes, this.binaries.reservedBytes);
   }
   async push(window: Parameters<DecodeRuntime['push']>[0], progress: number): Promise<void> {
     this.progress = progress;
@@ -61,13 +61,14 @@ class PWMRuntime implements DecodeRuntime {
   async finish(progress: number): Promise<DecodeRuntimeResult> {
     this.progress = progress;
     await this.engine.flush();
-    const raw = this.raw(),
+    const binaries = this.binaries.finish(),
       averageDutyCycle = this.engine.averageDuty,
       frames = this.engine.frames,
       annotations = frames * 3;
+    binaries.raw ??= new Uint8Array(0);
     if (!this.paged) this.store.clear();
     return {
-      binaries: { raw },
+      binaries,
       values: { averageDutyCycle },
       frames,
       annotations,
@@ -83,7 +84,7 @@ class PWMRuntime implements DecodeRuntime {
   }
   private consume(batch: PWMScanBatch): void | Promise<void> {
     this.store.append(batch.cycles, batch.averages);
-    this.appendRaw(batch.raw);
+    this.binaries.append('raw', batch.raw);
     const frames = this.store.length,
       annotations = frames * 3;
     if (!this.pagedRequested && !this.paged && (!this.pagedAutomatic || frames <= 16_384)) {
@@ -97,35 +98,8 @@ class PWMRuntime implements DecodeRuntime {
     }
     if (!this.paged) {
       this.paged = true;
-      this.host.postPaged(frames, annotations, this.resultBytes);
+      this.host.postPaged(frames, annotations, this.memory().totalBytes);
     }
-  }
-  private appendRaw(values: Uint8Array): void {
-    let offset = 0;
-    while (offset < values.length) {
-      let page = this.rawPages.at(-1);
-      if (!page || this.rawOffset === page.length) {
-        page = new Uint8Array(65_536);
-        this.rawPages.push(page);
-        this.rawOffset = 0;
-      }
-      const length = Math.min(page.length - this.rawOffset, values.length - offset);
-      page.set(values.subarray(offset, offset + length), this.rawOffset);
-      this.rawOffset += length;
-      this.rawLength += length;
-      offset += length;
-    }
-  }
-  private raw(): Uint8Array {
-    const output = new Uint8Array(this.rawLength);
-    let offset = 0;
-    for (const page of this.rawPages) {
-      const length = Math.min(page.length, this.rawLength - offset);
-      output.set(page.subarray(0, length), offset);
-      offset += length;
-      if (offset === this.rawLength) break;
-    }
-    return output;
   }
 }
 

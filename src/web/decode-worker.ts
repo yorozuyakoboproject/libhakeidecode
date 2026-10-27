@@ -4,13 +4,12 @@ import { compareSamples } from '../libhakei/sample-index.js';
 import { decoderWorkerDefinition } from '../decoders/workers.js';
 import { createDecodeRuntime } from './decode-runtime.js';
 import type { DecodeRuntime, DecodeRuntimeResult } from './decode-runtime.js';
-import { AnnotationIndex } from './event-index.js';
+import { DecodeResultStore } from './decode-result-store.js';
 import { SharedCaptureError, SharedChunkReader } from './shared-chunks.js';
 import type {
   DecodeChunkRequest,
   DecodeEdgeChunkRequest,
   DecodeFinishRequest,
-  DecodeFrame,
   DecodeGapRequest,
   DecodePackedReaderStartRequest,
   DecodeQueryAnnotationsRequest,
@@ -42,11 +41,7 @@ interface Session {
   channels: string[];
   gaps: DecodeStartRequest['gaps'];
   runtime: DecodeRuntime;
-  output: DecodeRuntimeResult | null;
-  annotations: AnnotationIndex;
-  frames: DecodeFrame[];
-  framesSorted: boolean;
-  compareFrames: (a: DecodeFrame, b: DecodeFrame) => number;
+  results: DecodeResultStore;
   completed: boolean;
   lastProgressPost: number;
   sharedTask: Promise<void> | null;
@@ -136,7 +131,7 @@ function maybePostProgress(s: Session): void {
     frames: s.runtime.frameCount,
     annotations: s.runtime.annotationCount,
     samples: s.decodedSamples,
-    resultBytes: s.runtime.resultBytes,
+    memory: s.results.memory(s.runtime.memory()),
   });
 }
 function start(request: DecodeStartRequest): void {
@@ -153,11 +148,7 @@ function start(request: DecodeStartRequest): void {
     channels: request.channels,
     gaps: request.gaps,
     runtime: null as unknown as DecodeRuntime,
-    annotations: new AnnotationIndex(),
-    frames: [],
-    framesSorted: true,
-    output: null,
-    compareFrames: compareFrames ? (a, b) => compareFrames(a, b) : (a, b) => compareSamples(a.ss, b.ss),
+    results: new DecodeResultStore(compareFrames ?? ((a, b) => compareSamples(a.ss, b.ss))),
     completed: false,
     lastProgressPost: 0,
     sharedTask: null,
@@ -185,9 +176,7 @@ function start(request: DecodeStartRequest): void {
   session = s;
   s.runtime = createDecodeRuntime(request, {
     postBatch: (batch) => {
-      s.annotations.append(batch.annotations);
-      for (const frame of batch.frames) s.frames.push(frame);
-      if (batch.frames.length) s.framesSorted = false;
+      s.results.append(batch);
       return Promise.resolve();
     },
     postPaged: () => {},
@@ -197,7 +186,7 @@ function queryAnnotations(request: DecodeQueryAnnotationsRequest): void {
   const s = session;
   const annotations =
     s?.runtime.queryAnnotations?.(request.start, request.end, request.maxResults) ??
-    s?.annotations.query(request.start, request.end, request.maxResults) ??
+    s?.results.annotations.query(request.start, request.end, request.maxResults) ??
     [];
   scope.postMessage({ type: 'decode-query-annotations-result', requestId: request.requestId, annotations });
 }
@@ -205,7 +194,7 @@ function readFrames(request: DecodeReadFramesRequest): void {
   const s = session;
   const frames =
     s?.runtime.readFrames?.(request.offset, request.count) ??
-    s?.frames.slice(request.offset, request.offset + request.count) ??
+    s?.results.readFrames(request.offset, request.count) ??
     [];
   scope.postMessage({ type: 'decode-read-frames-result', requestId: request.requestId, frames });
 }
@@ -217,18 +206,16 @@ function readCsv(request: DecodeReadCsvRequest): void {
   }
   const definition = decoderWorkerDefinition(s.decoder);
   const frames =
-    s.runtime.readFrames?.(request.offset, request.count) ??
-    s.frames.slice(request.offset, request.offset + request.count);
+    s.runtime.readFrames?.(request.offset, request.count) ?? s.results.readFrames(request.offset, request.count);
   const rows = frames.map((frame) => definition.csvRow(frame, request.sampleRate, request.triggerSample));
   const csv = (request.includeHeader ? definition.csvHeader + '\r\n' : '') + rows.join('\r\n');
   scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv });
 }
 function readBinary(request: Extract<DecodeStreamRequest, { type: 'decode-read-binary' }>): void {
-  const data = session?.output?.binaries[request.key];
   scope.postMessage({
     type: 'decode-read-binary-result',
     requestId: request.requestId,
-    blob: data ? new Blob([data.slice().buffer], { type: 'application/octet-stream' }) : null,
+    blob: session?.results.readBinary(request.key) ?? null,
   });
 }
 function startShared(s: Session, request: DecodeSharedStartRequest): void {
@@ -525,14 +512,10 @@ async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
   s.finalLength = request.length !== undefined && request.length < s.length ? request.length : s.length;
   if (s.sharedTask) await s.sharedTask;
   const output: DecodeRuntimeResult = await s.runtime.finish(1);
-  if (!s.framesSorted && s.frames.length) {
-    s.frames.sort(s.compareFrames);
-    s.framesSorted = true;
-  }
+  s.results.finish(output.binaries);
   const stages = { ...s.stages };
   maybePostProgress(s);
   s.completed = true;
-  s.output = output;
   const { binaries, ...details } = output;
   const binarySizes = Object.fromEntries(Object.entries(binaries).map(([key, data]) => [key, data.byteLength]));
   const previews = Object.fromEntries(Object.entries(binaries).map(([key, data]) => [key, data.slice(0, 100)]));
@@ -546,6 +529,7 @@ async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
       annotations: output.annotations,
       truncated: output.truncated,
       binaryTruncated: output.binaryTruncated,
+      memory: s.results.memory(s.runtime.memory()),
       stages,
     },
     result: { ...details, binarySizes, previews },

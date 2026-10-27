@@ -1,4 +1,6 @@
 import { OUTPUT_ANN } from '../libhakeidecode/index.js';
+import { BinaryStore } from './binary-store.js';
+import { resultMemory } from './definition.js';
 import type { DecoderEngine, DecoderPlugin, OutputEvent, SignalWindow } from '../libhakeidecode/index.js';
 import type {
   Annotation,
@@ -25,11 +27,10 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   private readonly handler: EventRuntimeHandler<F>;
   private annotations: Annotation[] = [];
   private frames: F[] = [];
-  private readonly binaryChunks = new Map<string, number[]>();
+  private readonly binaries = new BinaryStore();
   private readonly values = new Map<string, number>();
   private annotationsCount = 0;
   private framesCount = 0;
-  private binaryBytes = 0;
 
   constructor(plugin: DecoderPlugin<any, any>, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
     this.host = context.host;
@@ -49,21 +50,15 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   get annotationCount(): number {
     return this.annotationsCount;
   }
-  get resultBytes(): number {
-    return this.binaryBytes;
+  memory() {
+    return resultMemory(0, 0, this.binaries.reservedBytes);
   }
   addFrame(frame: F): void {
     this.frames.push(frame);
     this.framesCount++;
   }
   addBinary(key: string, bytes: Uint8Array): void {
-    let chunks = this.binaryChunks.get(key);
-    if (!chunks) {
-      chunks = [];
-      this.binaryChunks.set(key, chunks);
-    }
-    for (let index = 0; index < bytes.length; index++) chunks.push(bytes[index]!);
-    this.binaryBytes += bytes.length;
+    this.binaries.append(key, bytes);
   }
   addValue(key: string, value: number): void {
     if (Number.isFinite(value)) this.values.set(key, value);
@@ -87,10 +82,8 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     await this.engine.finish();
     this.handler.finish?.(this);
     await this.flush(progress);
-    const binaries: Record<string, Uint8Array> = {};
-    for (const [key, chunks] of this.binaryChunks) binaries[key] = Uint8Array.from(chunks);
     return {
-      binaries,
+      binaries: this.binaries.finish(),
       values: { ...Object.fromEntries(this.values) },
       frames: this.framesCount,
       annotations: this.annotationsCount,

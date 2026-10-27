@@ -30,6 +30,16 @@ export interface DecodeResultSummary extends Omit<DecodeRuntimeResult, 'binaries
   readonly binarySizes: Readonly<Record<string, number>>;
   readonly previews: Readonly<Record<string, Uint8Array>>;
 }
+// Result buffers and value payloads, excluding JavaScript engine overhead.
+export interface DecodeResultMemory {
+  readonly annotationsBytes: number;
+  readonly framesBytes: number;
+  readonly binaryBytes: number;
+  readonly totalBytes: number;
+}
+export function resultMemory(annotationsBytes = 0, framesBytes = 0, binaryBytes = 0): DecodeResultMemory {
+  return { annotationsBytes, framesBytes, binaryBytes, totalBytes: annotationsBytes + framesBytes + binaryBytes };
+}
 export interface DecodeRuntimeHost {
   postBatch(batch: DecodeBatch): Promise<void>;
   postPaged(frames: number, annotations: number, resultBytes: number): void;
@@ -37,7 +47,8 @@ export interface DecodeRuntimeHost {
 export interface DecodeRuntime {
   readonly frameCount: number;
   readonly annotationCount: number;
-  readonly resultBytes: number;
+  // The host counts stored batches and finished binary outputs it owns.
+  memory(): DecodeResultMemory;
   push(window: SignalWindow, progress: number): Promise<void>;
   flush(progress: number): Promise<void>;
   reset(): void;

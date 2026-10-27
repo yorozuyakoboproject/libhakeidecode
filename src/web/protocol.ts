@@ -1,6 +1,12 @@
 import type { ComponentFailure } from '../components.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
-import type { Annotation, DecodeFrame, DecodeRuntimeResult, DecodeResultSummary } from '../decoders/definition.js';
+import type {
+  Annotation,
+  DecodeFrame,
+  DecodeRuntimeResult,
+  DecodeResultSummary,
+  DecodeResultMemory,
+} from '../decoders/definition.js';
 import type { GapSpan } from './data/types.js';
 
 export type DecoderId = string;
@@ -13,6 +19,7 @@ export interface DecodeStats {
   annotations: number;
   truncated: boolean;
   binaryTruncated: boolean;
+  memory: DecodeResultMemory;
   stages?: {
     sharedUnpackMs: number;
     decoderPushMs: number;
@@ -31,7 +38,7 @@ export interface DecodeProgressMessage {
   frames: number;
   annotations: number;
   samples: bigint;
-  resultBytes: number;
+  memory: DecodeResultMemory;
 }
 export interface DecodeQueryAnnotationsRequest {
   type: 'decode-query-annotations';
