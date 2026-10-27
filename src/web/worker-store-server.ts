@@ -3,7 +3,6 @@ import type { AnalogStore, AnalogColumnView } from './data/analogStore.js';
 import { channelStoreRange, packStoreRange } from './data/channel-range.js';
 import type { PlanarSampleStore } from './data/planarStore.js';
 import type { RleSampleStore } from './data/rleStore.js';
-import { serializeSR } from './sr.js';
 import { AnalogConversion } from './analog-conversion.js';
 import { parseAnalogSettings } from './analog-settings.js';
 import type {
@@ -175,6 +174,8 @@ export class WorkerStoreServer {
     const controller = new AbortController();
     this.exportControllers.set(request.id, controller);
     try {
+      const { serializeSR } = await import('./sr.js');
+      controller.signal.throwIfAborted();
       const blob = await serializeSR(
         {
           name: 'capture.sr',

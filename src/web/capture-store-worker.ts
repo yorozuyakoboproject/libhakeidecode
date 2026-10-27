@@ -1,4 +1,3 @@
-import { serializeSR } from './sr.js';
 import type { Capture } from './capture.js';
 import { SharedCaptureError, SharedChunkReader, SHARED_SUMMARY_GROUP_SAMPLES } from './shared-chunks.js';
 
@@ -502,6 +501,8 @@ async function exportSR(s: StorageSession, request: Extract<StorageRequest, { ty
     ...(request.acquisition ? { acquisition: request.acquisition } : {}),
   } as Capture;
   try {
+    const { serializeSR } = await import('./sr.js');
+    controller.signal.throwIfAborted();
     const blob = await serializeSR(
       capture,
       request.workspace,

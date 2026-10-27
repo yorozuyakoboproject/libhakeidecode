@@ -59,6 +59,7 @@
     "dist",
     "web",
     "scripts",
+    "tests/decoder-roundtrip.mjs",
     "index.html",
     "README.md",
     "tsconfig.json",

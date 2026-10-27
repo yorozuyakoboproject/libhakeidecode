@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { build } from 'vite';
 import { generateComponents, validateComponents } from './generate-components.mjs';
+import { runDecoderRoundtrips } from '../tests/decoder-roundtrip.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const components = await generateComponents();
@@ -21,5 +22,6 @@ execFileSync(
   },
 );
 await validateComponents(components);
+await runDecoderRoundtrips(components);
 await build({ root });
 console.log('Built deployable static site in dist/ and ESM library, declarations and source maps in dist/src.');

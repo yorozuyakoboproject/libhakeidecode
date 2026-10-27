@@ -125,7 +125,6 @@ export class PWMScanEngine implements DecoderEngine<PWMScanBatch> {
       const next = ((data[offset]! >>> bit) & 1) as 0 | 1;
       if (next === level) continue;
       level = next;
-      this.level = level;
       this.transition(startSample + BigInt(offset));
       if (this.cycles.length >= 3 * FLUSH_CYCLES) {
         const pending = this.flush();

@@ -6,7 +6,7 @@
   "ignorePatterns": [".cache/", "dist/", "src/generated/"],
   "overrides": [
     {
-      "files": ["scripts/*.mjs", "vite.config.mjs"],
+      "files": ["scripts/*.mjs", "tests/*.mjs", "vite.config.mjs"],
       "env": { "browser": false, "worker": false, "node": true }
     }
   ]

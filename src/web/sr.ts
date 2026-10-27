@@ -3,7 +3,7 @@ import { AnalogSampleStore, type AnalogStore } from './data/analogStore.js';
 import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore } from './data/rleStore.js';
 import { splitAroundGaps } from './data/gaps.js';
-import { validRate, validWidth, parseAcquisitionResult } from './capture-import.js';
+import { validRate, validWidth, parseAcquisitionResult } from './capture-metadata.js';
 import type { Capture } from './capture.js';
 import { parseWorkspace, type WorkspaceSettings } from './workspace.js';
 import { readZip, writeZip, type ZipEntry } from './zip.js';
