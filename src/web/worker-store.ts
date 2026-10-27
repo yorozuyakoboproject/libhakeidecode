@@ -92,6 +92,7 @@ export type StoreResponse =
   | { type: 'analog-range-result'; id: number; data: Float32Array }
   | { type: 'analog-probe'; id: number; sample: bigint; values: (number | null)[] }
   | { type: 'export-sr-result'; id: number; blob: Blob }
+  | { type: 'export-sr-progress'; id: number; fraction: number }
   | { type: 'error'; id?: number; message: string };
 
 export interface DecodeReadRequest {
@@ -128,7 +129,7 @@ interface SharedStoreState {
   metadata: StoreMetadata;
   revision: number;
 }
-type Pending = { resolve(value: StoreResponse): void; reject(error: Error): void };
+type Pending = { resolve(value: StoreResponse): void; reject(error: Error): void; progress?(fraction: number): void };
 type StoreQueryRequest = Extract<
   StoreRequest,
   { type: 'prepare-digital' | 'prepare-analog' | 'pack-range' | 'analog-range' | 'probe-analog' }
@@ -332,6 +333,7 @@ export class WorkerCaptureStore implements SampleStore {
     triggerSample: bigint,
     acquisition: AcquisitionResult | undefined,
     signal?: AbortSignal,
+    progress?: (fraction: number) => void,
   ): Promise<Blob> {
     if (this.failure) return Promise.reject(this.failure);
     if (this.disposed) return Promise.reject(new DOMException('Capture storage disposed', 'AbortError'));
@@ -341,6 +343,7 @@ export class WorkerCaptureStore implements SampleStore {
         onAbort = (): void => {};
       const cleanup = (): void => {
         signal?.removeEventListener('abort', onAbort);
+        this.pending.delete(id);
       };
       const finish = (action: () => void): void => {
         if (settled) return;
@@ -354,6 +357,7 @@ export class WorkerCaptureStore implements SampleStore {
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       this.pending.set(id, {
+        progress,
         resolve: (response) =>
           finish(() =>
             response.type === 'export-sr-result'
@@ -447,6 +451,10 @@ export class WorkerCaptureStore implements SampleStore {
     this.syncAnalogs();
   }
   private receive(response: StoreResponse): void {
+    if (response.type === 'export-sr-progress') {
+      this.pending.get(response.id)?.progress?.(response.fraction);
+      return;
+    }
     if (response.type === 'metadata') {
       this.updateMetadata(response.metadata);
       return;

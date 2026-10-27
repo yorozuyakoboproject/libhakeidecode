@@ -36,6 +36,7 @@ type Response =
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'pack-result'; id: number; data: Uint8Array }
   | { type: 'export-sr-result'; id: number; blob: Blob }
+  | { type: 'export-sr-progress'; id: number; fraction: number }
   | {
       type: 'done';
       state: SharedCaptureState;
@@ -107,7 +108,7 @@ type ViewResponse =
   | { type: 'done'; state: 'complete' | 'stopped' | 'error'; length: bigint; error?: string; summaryBytes: number }
   | { type: 'error'; message: string };
 type RemoteView = { view: ColumnView; edges: bigint[] | null; availableEnd: bigint };
-type Pending = { resolve(value: Response): void; reject(error: Error): void };
+type Pending = { resolve(value: Response): void; reject(error: Error): void; progress?(fraction: number): void };
 type PendingView = { resolve(value: ViewResponse): void; reject(error: Error): void };
 const keyFor = (channel: number, start: bigint, end: bigint, bins: number): string =>
   `${channel}:${start}:${end}:${bins}`;
@@ -191,6 +192,10 @@ export class SharedWorkerSampleStore implements SampleStore {
       }
       const pending = this.pending.get(data.id);
       if (!pending) return;
+      if (data.type === 'export-sr-progress') {
+        pending.progress?.(data.fraction);
+        return;
+      }
       this.pending.delete(data.id);
       pending.resolve(data);
     };
@@ -440,6 +445,7 @@ export class SharedWorkerSampleStore implements SampleStore {
     triggerSample: bigint,
     acquisition: AcquisitionResult | undefined,
     signal?: AbortSignal,
+    progress?: (fraction: number) => void,
   ): Promise<Blob> {
     if (this.failure) return Promise.reject(this.failure);
     if (this.disposed) return Promise.reject(new DOMException('Shared capture store disposed', 'AbortError'));
@@ -449,6 +455,7 @@ export class SharedWorkerSampleStore implements SampleStore {
         onAbort = (): void => {};
       const cleanup = (): void => {
         signal?.removeEventListener('abort', onAbort);
+        this.pending.delete(id);
       };
       const finish = (action: () => void): void => {
         if (settled) return;
@@ -462,6 +469,7 @@ export class SharedWorkerSampleStore implements SampleStore {
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       this.pending.set(id, {
+        progress,
         resolve: (response) =>
           finish(() =>
             response.type === 'export-sr-result'

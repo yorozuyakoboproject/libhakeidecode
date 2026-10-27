@@ -376,7 +376,8 @@ export class WaveformRenderer {
 
   updateCapture(capture: Capture): void {
     this.capture = capture;
-    this.schedule();
+    if (this.end > this.viewLength(capture)) this.applyViewport(this.start, this.end);
+    else this.schedule();
   }
   setAnalogSettings(channel: number, settings: AnalogSettings): void {
     if (!this.analogSettings[channel]) throw new RangeError('Analog channel out of range');
@@ -460,7 +461,9 @@ export class WaveformRenderer {
     return Number(this.end - this.start) / ticks / this.capture.store.samplerate;
   }
   private viewLength(capture: Capture | null = this.capture): bigint {
-    return capture?.acquisition?.targetSamples ?? capture?.store.length ?? 0n;
+    return capture?.acquisition?.stopReason === 'complete'
+      ? capture.acquisition.targetSamples
+      : (capture?.store.length ?? 0n);
   }
   private setCursor(x: number, which: 'a' | 'b' = 'a'): void {
     if (!this.capture) return;

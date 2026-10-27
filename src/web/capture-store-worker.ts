@@ -55,6 +55,7 @@ type StorageResponse =
   | { type: 'edges-result'; id: number; channel: number; startSample: bigint; endSample: bigint; edges: bigint[] }
   | { type: 'pack-result'; id: number; data: Uint8Array }
   | { type: 'export-sr-result'; id: number; blob: Blob }
+  | { type: 'export-sr-progress'; id: number; fraction: number }
   | {
       type: 'done';
       state: 'complete' | 'stopped' | 'error';
@@ -501,7 +502,14 @@ async function exportSR(s: StorageSession, request: Extract<StorageRequest, { ty
     ...(request.acquisition ? { acquisition: request.acquisition } : {}),
   } as Capture;
   try {
-    const blob = await serializeSR(capture, request.workspace, undefined, controller.signal);
+    const blob = await serializeSR(
+      capture,
+      request.workspace,
+      (fraction) => {
+        if (!controller.signal.aborted) scope.postMessage({ type: 'export-sr-progress', id: request.id, fraction });
+      },
+      controller.signal,
+    );
     if (!controller.signal.aborted) scope.postMessage({ type: 'export-sr-result', id: request.id, blob });
   } finally {
     exportControllers.delete(request.id);

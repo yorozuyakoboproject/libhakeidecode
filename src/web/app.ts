@@ -588,8 +588,14 @@ export class AnalyzerApp {
       return start >= 0n && end > start && end <= limit ? [start, end] : undefined;
     };
     const device = this.deviceControls.device,
-      configuration = this.deviceControls.configuration();
+      configuration = this.deviceControls.configuration(),
+      deviceNameKey = `driver.${device.descriptor.id}.name`,
+      nameKey = hasMessage(deviceNameKey) ? (deviceNameKey as MessageKey) : undefined;
     this.clearCaptureForAcquisition();
+    const heading = element('capture-name');
+    if (nameKey) heading.dataset.i18n = nameKey;
+    else delete heading.dataset.i18n;
+    heading.textContent = nameKey ? t(nameKey) : device.descriptor.name;
     const token = ++this.version,
       abort = new AbortController(),
       stop = new AbortController();
@@ -615,6 +621,7 @@ export class AnalyzerApp {
         },
         onCapture: (capture) => {
           if (token !== this.version) return;
+          capture.nameKey = nameKey;
           const diagnostics = capture.diagnostics;
           let stageStarted = performance.now();
           if (!this.capture) {
@@ -646,8 +653,7 @@ export class AnalyzerApp {
       this.captureAbort = null;
       this.captureStop = null;
       this.acquisitionMemory = null;
-      if (hasMessage(`driver.${device.descriptor.id}.name`))
-        capture.nameKey = `driver.${device.descriptor.id}.name` as MessageKey;
+      capture.nameKey = nameKey;
       if (!this.capture) this.setCapture(capture, false, true, initialView(capture));
       else {
         this.capture = capture;
@@ -696,8 +702,6 @@ export class AnalyzerApp {
     this.syncTraces();
     this.renderer.setCapture(capture, viewport);
     this.updateCaptureLabels();
-    element<HTMLInputElement>('import-sample-rate').value = String(capture.store.samplerate);
-    element<HTMLSelectElement>('import-channel-count').value = String(capture.store.channelCount);
     this.selectProtocol(this.selectedId, false);
     if (capture.workspace) {
       this.renderer.cursorA = capture.workspace.cursorA ?? capture.workspace.cursor;
@@ -884,13 +888,7 @@ export class AnalyzerApp {
     this.setStatus('loading', 'status.loading');
     this.showMessage('');
     try {
-      const capture = await importCapture(
-        file,
-        Number(element<HTMLInputElement>('import-sample-rate').value),
-        Number(element<HTMLSelectElement>('import-channel-count').value),
-        undefined,
-        this.importAbort.signal,
-      );
+      const capture = await importCapture(file, 2_000_000, 8, undefined, this.importAbort.signal);
       if (token !== this.version) {
         this.releaseCapture(capture);
         return;
@@ -1261,6 +1259,11 @@ export class AnalyzerApp {
       abort = new AbortController();
     this.saveAbort = abort;
     button.disabled = true;
+    const progress = element<HTMLProgressElement>('save-fraction'),
+      percent = element('save-percent');
+    progress.value = 0;
+    percent.textContent = '0%';
+    element('save-progress').hidden = false;
     this.renderStatus();
     try {
       const exporter = capture.store as unknown as {
@@ -1269,17 +1272,28 @@ export class AnalyzerApp {
           triggerSample: bigint,
           acquisition: Capture['acquisition'],
           signal?: AbortSignal,
+          progress?: (fraction: number) => void,
         ) => Promise<Blob>;
       };
       if (!exporter.exportSR) throw new UIError('error.worker');
-      const blob = await exporter.exportSR(workspace, capture.triggerSample, capture.acquisition, abort.signal);
+      const blob = await exporter.exportSR(
+        workspace,
+        capture.triggerSample,
+        capture.acquisition,
+        abort.signal,
+        (fraction) => {
+          if (this.saveAbort !== abort || abort.signal.aborted) return;
+          progress.value = fraction;
+          percent.textContent = `${Math.floor(fraction * 100)}%`;
+        },
+      );
       abort.signal.throwIfAborted();
       downloadBlob('capture.sr', blob);
     } catch (error) {
       if (!abort.signal.aborted) this.showMessage(error instanceof UIError ? error : errorLabel(error), true);
     } finally {
       if (this.saveAbort === abort) this.saveAbort = null;
-      button.disabled = false;
+      element('save-progress').hidden = !this.saveAbort;
       this.renderStatus();
     }
   }

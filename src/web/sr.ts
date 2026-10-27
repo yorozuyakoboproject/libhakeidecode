@@ -10,7 +10,6 @@ import { readZip, writeZip, type ZipEntry } from './zip.js';
 import { UIError } from './i18n.js';
 const encoder = new TextEncoder(),
   decoder = new TextDecoder('utf-8', { fatal: true });
-const LIMIT = 256 * 1024 * 1024;
 function parseINI(text: string): Map<string, Record<string, string>> {
   const sections = new Map<string, Record<string, string>>();
   let section: Record<string, string> | null = null;
@@ -103,8 +102,7 @@ export async function importSR(
 ): Promise<Capture> {
   const started = performance.now();
   try {
-    if (file.size > LIMIT + 4 * 1024 * 1024) throw new Error('Session file exceeds 256 MiB');
-    const members = await readZip(file, LIMIT, signal);
+    const members = await readZip(file, signal);
     const versionFile = members.get('version'),
       metadataFile = members.get('metadata');
     if (!versionFile || !metadataFile || versionFile.size > 16 || metadataFile.size > 1024 * 1024)
@@ -149,7 +147,7 @@ export async function importSR(
       }
     }
     const logicBytes = logic.reduce((sum, member) => sum + member.size, 0);
-    if (logicBytes > LIMIT || (count && (!logic.length || logic.some((chunk) => chunk.size % unit))))
+    if (count && (!logic.length || logic.some((chunk) => chunk.size % unit)))
       throw new Error('Invalid logic sample length');
     const analogDescriptions = Array.from({ length: analogCount }, (_, index) => ({
       name: unescapeINI(data[`analog${count + index + 1}`] ?? `A${index}`).slice(0, 80),
@@ -160,7 +158,6 @@ export async function importSR(
       0,
     );
     if (
-      analogBytes > LIMIT ||
       analogDescriptions.some((description) => description.chunks.some((member) => member.size < 4 || member.size % 4))
     )
       throw new Error('Invalid analog sample data');
@@ -304,8 +301,7 @@ export async function serializeSR(
     unit = Math.ceil(count / 8);
   if (!Number.isInteger(count) || count < 0 || count > store.channelCount || (count === 0 && !analogChannels.length))
     throw new Error('Invalid channel count');
-  if (store.length < 1 || store.length * BigInt(unit + analogChannels.length * 4) > BigInt(LIMIT))
-    throw new UIError('error.srLimit');
+  if (store.length < 1) throw new Error('Invalid sample length');
   for (const channel of analogChannels)
     if (channel.store.length !== store.length || channel.store.samplerate !== store.samplerate)
       throw new Error('Inconsistent analog timeline');
@@ -365,8 +361,7 @@ export async function serializeSR(
         signal?.throwIfAborted();
         const end = minSample(store.length, start + BigInt(chunkSamples)),
           packed = await packStoreRange(store, start, end, count);
-        yield { name: `logic-1-${++chunk}`, data: packed, compression: 'store' };
-        report(packed.length);
+        yield { name: `logic-1-${++chunk}`, data: packed, onWritten: () => report(packed.length) };
       }
     for (let channel = 0; channel < analogChannels.length; channel++) {
       const analog = analogChannels[channel]!.store;
@@ -375,8 +370,7 @@ export async function serializeSR(
         const end = minSample(store.length, start + BigInt(chunkSamples)),
           values = copyAnalogRange(analog, start, end);
         const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
-        yield { name: `analog-1-${count + channel + 1}-${index}`, data: bytes, compression: 'store' };
-        report(bytes.length);
+        yield { name: `analog-1-${count + channel + 1}-${index}`, data: bytes, onWritten: () => report(bytes.length) };
       }
     }
     if (!totalBytes) progress(1);

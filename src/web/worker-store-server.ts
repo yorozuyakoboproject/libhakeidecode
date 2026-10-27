@@ -191,7 +191,10 @@ export class WorkerStoreServer {
           ...(request.acquisition ? { acquisition: request.acquisition } : {}),
         },
         request.workspace,
-        undefined,
+        (fraction) => {
+          if (!controller.signal.aborted)
+            this.port?.postMessage({ type: 'export-sr-progress', id: request.id, fraction } satisfies StoreResponse);
+        },
         controller.signal,
       );
       if (!controller.signal.aborted && this.port)

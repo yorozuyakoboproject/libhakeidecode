@@ -74,34 +74,13 @@
               ▶ 开始采集
             </button>
           </form>
-          <details class="advanced">
-            <summary data-i18n="capture.importSettings">二进制导入设置</summary>
-            <label class="field"
-              ><span data-i18n="capture.rate">采样率</span><span class="unit">Hz</span
-              ><input
-                id="import-sample-rate"
-                type="number"
-                value="2000000"
-                min="1"
-                step="1"
-                data-i18n-attrs="aria-label:capture.rateAria"
-            /></label>
-            <label class="field"
-              ><span data-i18n="capture.channels">二进制通道数</span
-              ><select id="import-channel-count">
-                <option>4</option>
-                <option selected>8</option>
-                <option>16</option>
-                <option>32</option>
-              </select></label
-            >
-          </details>
           <button id="open-file" class="button full" data-i18n="capture.open">↥ 打开文件</button>
           <input id="file-input" type="file" accept=".sr,.json,.bin,.raw,.dat" hidden />
-          <p class="hint" data-i18n="capture.hint">
-            .sr 使用文件内采样率和通道信息；BIN 使用二进制导入设置，D0 为最低位。
-          </p>
-          <button id="save-capture" class="text-button" disabled data-i18n="capture.save">↓ 保存 .sr 文件</button>
+          <button id="save-capture" class="button full" disabled data-i18n="capture.save">↓ 保存 .sr 文件</button>
+          <div id="save-progress" hidden>
+            <span data-i18n="capture.saving">正在保存 .sr</span> <output id="save-percent">0%</output>
+            <progress id="save-fraction" max="1" value="0" data-i18n-attrs="aria-label:capture.saving"></progress>
+          </div>
         </section>
         <section class="side-section">
           <div class="section-title">

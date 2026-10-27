@@ -928,7 +928,26 @@ export class LocalPlanarSampleStore implements SampleStore {
       for (; sample < endSample; sample++) fillSample(sample);
       return out;
     }
-    for (let sample = startSample; sample < endSample; sample++) {
+    let packedEnd = startSample;
+    if (unit === 1 && (startSample & 31) === 0) {
+      const words = new Uint32Array(out.buffer, 0, Math.floor(out.length / 4)),
+        spread = Uint32Array.from(
+          { length: 16 },
+          (_, bits) => (bits & 1) | ((bits & 2) << 7) | ((bits & 4) << 14) | ((bits & 8) << 21),
+        );
+      for (; packedEnd + 32 <= endSample; packedEnd += 32) {
+        const word = packedEnd >>> 5,
+          target = (packedEnd - startSample) >>> 2;
+        for (let channel = 0; channel < channels; channel++) {
+          const plane = this.base[channel]!,
+            block = plane.blocks[word >>> (BASE_BLOCK_BITS_LOG - 5)]!,
+            bits = block[word & ((1 << (BASE_BLOCK_BITS_LOG - 5)) - 1)]!;
+          for (let group = 0; group < 8; group++)
+            words[target + group] |= spread[(bits >>> (group * 4)) & 15]! << channel;
+        }
+      }
+    }
+    for (let sample = packedEnd; sample < endSample; sample++) {
       const valueOffset = (sample - startSample) * unit;
       for (let channel = 0; channel < channels; channel++)
         if (this.base[channel]!.getBit(sample)) out[valueOffset + (channel >>> 3)] |= 1 << (channel & 7);
