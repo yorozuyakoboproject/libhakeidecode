@@ -5,6 +5,7 @@ import type { PlanarSampleStore } from './data/planarStore.js';
 import type { RleSampleStore } from './data/rleStore.js';
 import { AnalogConversion } from './analog-conversion.js';
 import { parseAnalogSettings } from './analog-settings.js';
+import { TimedAnalogStore } from './data/timed-analogStore.js';
 import type {
   DecodeReadRequest,
   DecodeReadResponse,
@@ -70,6 +71,9 @@ export class WorkerStoreServer {
         bytes: channel.store.memory().totalBytes,
         range: channel.store.range,
         mean: channel.store.mean,
+        ...(channel.store instanceof TimedAnalogStore
+          ? { timing: channel.store.timing, nativeLength: channel.store.native.length }
+          : {}),
       })),
       gaps: store.gaps().map((gap) => ({ ...gap })),
       digitalBytes: store.memory().totalBytes,
@@ -134,7 +138,9 @@ export class WorkerStoreServer {
       const sample = request.sample,
         inGap = capture.store.gaps().some((gap) => sample >= gap.startSample && sample < gap.endSample),
         values = (capture.analogChannels ?? []).map(({ store }) =>
-          sample >= 0n && sample < store.length && !inGap ? store.sampleAt(sample) : null,
+          sample >= 0n && sample < store.length && !inGap && Number.isFinite(store.sampleAt(sample))
+            ? store.sampleAt(sample)
+            : null,
         );
       this.port!.postMessage({ type: 'analog-probe', id: request.id, sample, values } satisfies StoreResponse);
       return;

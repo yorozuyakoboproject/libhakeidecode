@@ -1,5 +1,7 @@
 import { sampleIndex, minSample, localNumber, stringifySamples } from '../libhakei/sample-index.js';
 import { AnalogSampleStore, type AnalogStore } from './data/analogStore.js';
+import { TimedAnalogStore, PendingAnalogStore } from './data/timed-analogStore.js';
+import type { AnalogTiming } from '../libhakei/device.js';
 import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore } from './data/rleStore.js';
 import { splitAroundGaps } from './data/gaps.js';
@@ -109,6 +111,10 @@ export async function importSR(
       throw new Error('Missing session version or metadata');
     const version = decoder.decode(await versionFile.read(signal)).trim();
     if (version !== '1' && version !== '2') throw new Error('Unsupported sigrok session version');
+    const extension = members.get('hakei-session.json');
+    if (extension && extension.size > 1024 * 1024) throw new Error('Oversized workspace settings');
+    const extra = extension ? JSON.parse(decoder.decode(await extension.read(signal))) : undefined;
+    const multiRate = extra?.format === 'libhakei.session/v3';
     const metadata = parseINI(decoder.decode(await metadataFile.read(signal)));
     const devices = [...metadata.entries()].filter(([name]) => /^device \d+$/.test(name));
     if (devices.length !== 1) throw new Error('A single digital device is required');
@@ -124,7 +130,7 @@ export async function importSR(
       !Number.isInteger(analogCount) ||
       analogCount < 0 ||
       analogCount > 128 ||
-      (!count && !analogCount)
+      (!count && !analogCount && !multiRate)
     )
       throw new Error('Session has no channels');
     if (count && (!Number.isInteger(unit) || unit < Math.ceil(count / 8) || unit > 4))
@@ -165,7 +171,7 @@ export async function importSR(
     const analogLengths = analogDescriptions.map(
       (description) => description.chunks.reduce((sum, member) => sum + member.size, 0) / 4,
     );
-    const length = logicLength || analogLengths[0] || 0;
+    const length = logicLength || analogLengths[0] || (multiRate ? Number(sampleIndex(extra.referenceLength)) : 0);
     if (
       !Number.isInteger(length) ||
       length < 1 ||
@@ -228,12 +234,9 @@ export async function importSR(
       loadedMs: performance.now() - started,
       ...(standardAnalog.length ? { analogChannels: standardAnalog } : {}),
     };
-    const extension = members.get('hakei-session.json');
     if (extension) {
-      if (extension.size > 1024 * 1024) throw new Error('Oversized workspace settings');
-      const extra = JSON.parse(decoder.decode(await extension.read(signal)));
       if (
-        !['libhakei.session/v1', 'libhakei.session/v2'].includes(extra.format) ||
+        !['libhakei.session/v1', 'libhakei.session/v2', 'libhakei.session/v3'].includes(extra.format) ||
         sampleIndex(extra.triggerSample) >= BigInt(length) ||
         !Array.isArray(extra.gaps)
       )
@@ -241,6 +244,84 @@ export async function importSR(
       for (const gap of extra.gaps) store.noteGap(gap.startSample, gap.endSample);
       capture.triggerSample = sampleIndex(extra.triggerSample);
       capture.acquisition = parseAcquisitionResult(extra.acquisition, BigInt(length));
+      if (multiRate) {
+        if (
+          !Array.isArray(extra.analogChannels) ||
+          !extra.analogChannels.length ||
+          extra.analogChannels.length > 128 ||
+          sampleIndex(extra.referenceLength) !== BigInt(length) ||
+          analogCount
+        )
+          throw new Error('Invalid multi-rate session');
+        capture.analogChannels = [];
+        for (let channel = 0; channel < extra.analogChannels.length; ++channel) {
+          const description = extra.analogChannels[channel],
+            rawTiming = description?.timing;
+          if (
+            description &&
+            typeof description.name === 'string' &&
+            rawTiming === null &&
+            Array.isArray(description.chunks) &&
+            description.chunks.length === 0 &&
+            sampleIndex(description.nativeLength) === 0n
+          ) {
+            capture.analogChannels.push({
+              name: description.name.slice(0, 160),
+              store: new PendingAnalogStore(samplerate),
+            });
+            continue;
+          }
+          if (
+            !rawTiming ||
+            typeof description.name !== 'string' ||
+            !Array.isArray(description.chunks) ||
+            !description.chunks.length
+          )
+            throw new Error('Invalid analog stream metadata');
+          const timing: AnalogTiming = {
+            ...rawTiming,
+            periodTicks: sampleIndex(rawTiming.periodTicks),
+            firstTick: sampleIndex(rawTiming.firstTick),
+          };
+          if (
+            !Number.isSafeInteger(timing.clockHz) ||
+            timing.clockHz < 1 ||
+            timing.periodTicks < 1n ||
+            ![10, 12].includes(timing.bits) ||
+            !Number.isInteger(timing.referenceMv) ||
+            timing.referenceMv < 1 ||
+            timing.referenceMv > 5000 ||
+            !Number.isInteger(timing.uncertaintyTicks) ||
+            timing.uncertaintyTicks < 0 ||
+            timing.uncertaintyTicks > 0xffffffff
+          )
+            throw new Error('Invalid analog timing');
+          const native = new AnalogSampleStore(timing.clockHz / Number(timing.periodTicks));
+          for (let index = 0; index < description.chunks.length; ++index) {
+            const name = `hakei-analog-${channel}-${index + 1}.f32`,
+              member = members.get(name);
+            if (
+              description.chunks[index] !== name ||
+              !member ||
+              member.size < 4 ||
+              member.size > 65536 * 4 ||
+              member.size % 4
+            )
+              throw new Error('Invalid analog stream chunk');
+            const values = floatValues(await member.read(signal));
+            for (const value of values)
+              if (!Number.isInteger(value) || value < 0 || value >= 1 << timing.bits)
+                throw new Error('Invalid ADC code');
+            native.append(values);
+            signal?.throwIfAborted();
+          }
+          if (native.length !== sampleIndex(description.nativeLength)) throw new Error('Incomplete analog stream');
+          capture.analogChannels.push({
+            name: description.name.slice(0, 160),
+            store: new TimedAnalogStore(native, timing, samplerate, BigInt(length)),
+          });
+        }
+      }
       if (capture.analogChannels === undefined && extra.analogChannels !== undefined) {
         if (!Array.isArray(extra.analogChannels) || extra.analogChannels.length > 128)
           throw new Error('Invalid analog extension');
@@ -302,13 +383,27 @@ export async function serializeSR(
   if (!Number.isInteger(count) || count < 0 || count > store.channelCount || (count === 0 && !analogChannels.length))
     throw new Error('Invalid channel count');
   if (store.length < 1) throw new Error('Invalid sample length');
+  const multiRate = analogChannels.some(
+    (channel) => channel.store instanceof TimedAnalogStore || channel.store instanceof PendingAnalogStore,
+  );
   for (const channel of analogChannels)
-    if (channel.store.length !== store.length || channel.store.samplerate !== store.samplerate)
+    if (
+      (!multiRate && channel.store.length !== store.length) ||
+      channel.store.samplerate !== store.samplerate ||
+      (multiRate && !(channel.store instanceof TimedAnalogStore) && !(channel.store instanceof PendingAnalogStore))
+    )
       throw new Error('Inconsistent analog timeline');
   if (workspace) parseWorkspace(workspace, count, store.length, analogChannels.length);
   const names = workspace?.channelNames;
   if (names && names.analog.length !== analogChannels.length) throw new Error('Invalid analog channel names');
-  const totalBytes = Number(store.length * BigInt(unit + analogChannels.length * 4)),
+  const totalBytes =
+      Number(store.length * BigInt(unit)) +
+      analogChannels.reduce(
+        (sum, channel) =>
+          sum +
+          Number(channel.store instanceof TimedAnalogStore ? channel.store.native.length : channel.store.length) * 4,
+        0,
+      ),
     chunkSamples = 1_048_576;
   async function* entries(): AsyncGenerator<ZipEntry> {
     yield { name: 'version', data: encoder.encode('2') };
@@ -327,7 +422,7 @@ export async function serializeSR(
             (_, i) => `probe${i + 1}=${escapeINI(names?.digital[i] ?? capture.labels[i] ?? `D${i}`)}`,
           )
         : []),
-      ...(analogChannels.length
+      ...(analogChannels.length && !multiRate
         ? [
             `total analog=${analogChannels.length}`,
             ...analogChannels.map(
@@ -342,7 +437,27 @@ export async function serializeSR(
       name: 'hakei-session.json',
       data: encoder.encode(
         stringifySamples({
-          format: 'libhakei.session/v2',
+          format: multiRate ? 'libhakei.session/v3' : 'libhakei.session/v2',
+          ...(multiRate
+            ? {
+                referenceLength: store.length,
+                analogChannels: analogChannels.map((channel) => {
+                  const timed = channel.store;
+                  if (timed instanceof PendingAnalogStore)
+                    return { name: channel.name, timing: null, nativeLength: 0n, chunks: [] };
+                  if (!(timed instanceof TimedAnalogStore)) throw new Error('Invalid analog stream');
+                  return {
+                    name: channel.name,
+                    timing: timed.timing,
+                    nativeLength: timed.native.length,
+                    chunks: Array.from(
+                      { length: Number((timed.native.length + 65535n) / 65536n) },
+                      (_, i) => `hakei-analog-${analogChannels.indexOf(channel)}-${i + 1}.f32`,
+                    ),
+                  };
+                }),
+              }
+            : {}),
           triggerSample: capture.triggerSample,
           gaps: store.gaps(),
           ...(capture.acquisition ? { acquisition: capture.acquisition } : {}),
@@ -364,13 +479,19 @@ export async function serializeSR(
         yield { name: `logic-1-${++chunk}`, data: packed, onWritten: () => report(packed.length) };
       }
     for (let channel = 0; channel < analogChannels.length; channel++) {
-      const analog = analogChannels[channel]!.store;
-      for (let start = 0n, index = 1; start < store.length; start += BigInt(chunkSamples), index++) {
+      const view = analogChannels[channel]!.store;
+      const analog = view instanceof TimedAnalogStore ? view.native : view;
+      const block = multiRate ? 65536 : chunkSamples;
+      for (let start = 0n, index = 1; start < analog.length; start += BigInt(block), index++) {
         signal?.throwIfAborted();
-        const end = minSample(store.length, start + BigInt(chunkSamples)),
+        const end = minSample(analog.length, start + BigInt(block)),
           values = copyAnalogRange(analog, start, end);
         const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
-        yield { name: `analog-1-${count + channel + 1}-${index}`, data: bytes, onWritten: () => report(bytes.length) };
+        yield {
+          name: multiRate ? `hakei-analog-${channel}-${index}.f32` : `analog-1-${count + channel + 1}-${index}`,
+          data: bytes,
+          onWritten: () => report(bytes.length),
+        };
       }
     }
     if (!totalBytes) progress(1);

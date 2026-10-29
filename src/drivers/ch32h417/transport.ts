@@ -2,6 +2,7 @@ import {
   BLOCK_BYTES,
   Command,
   DATA,
+  ANALOG,
   EP_IN,
   EP_OUT,
   FrameParser,
@@ -12,7 +13,6 @@ import {
   readStatus,
   type Frame,
 } from './protocol.js';
-import { configureInputs } from './inputs.js';
 
 export interface UsbDevice {
   readonly vendorId: number;
@@ -68,6 +68,7 @@ const errors = [
   'heartbeat expired',
   'USB failure',
   'capture stopped',
+  'input pins are occupied; change the channel selection or release the pins in the management page',
 ];
 export function statusError(error: number, samples?: bigint): Error {
   const detail = samples === undefined ? '' : ` after ${samples.toString()} samples`;
@@ -84,10 +85,9 @@ export class H417Transport {
   packet: 512 | 1024 = 1024;
   session = 0;
   active = false;
-  private claimed = false;
   private closed = false;
   private error: Error | null = null;
-  private requestId = 0;
+  private requestId = crypto.getRandomValues(new Uint32Array(1))[0]!;
   private serial: Promise<unknown> = Promise.resolve();
   private readonly pending = new Map<
     number,
@@ -101,6 +101,7 @@ export class H417Transport {
   private discarding = false;
   private starting = false;
   private first = 0n;
+  private analogFirst = [0n, 0n];
   private sequence = 0;
   private shutdown: Promise<void> | null = null;
   private readonly counters = { reads: 0, receivedBytes: 0, parserMs: 0, queuePeak: 0, dataFrames: 0 };
@@ -108,7 +109,7 @@ export class H417Transport {
   get metrics(): Readonly<typeof this.counters> {
     return this.counters;
   }
-  async open(inputMask?: number): Promise<void> {
+  async open(): Promise<void> {
     await this.device.open();
     if (this.device.configuration?.configurationValue !== 1)
       throw new Error('H417 is not configured; initialize UHSIF in the management webpage first');
@@ -121,13 +122,11 @@ export class H417Transport {
         'H417 logic analyzer Interface 1 is unavailable; initialize UHSIF in the management webpage first, then reconnect the analyzer',
       );
     this.packet = input.packetSize as 512 | 1024;
-    if (inputMask !== undefined) await configureInputs(this.device, inputMask);
     await this.device.claimInterface(INTERFACE);
-    this.claimed = true;
     void this.readLoop().catch((error) => this.fail(error));
   }
   private fail(value: unknown): void {
-    if (this.closed) return;
+    if (this.closed || this.error) return;
     this.error = value instanceof Error ? value : new Error(String(value));
     for (const pending of this.pending.values()) pending.reject(this.error);
     this.pending.clear();
@@ -141,18 +140,20 @@ export class H417Transport {
   private receive(frame: Frame): void {
     if (frame.type & RESPONSE) {
       const pending = this.pending.get(frame.requestId);
+      if (!pending && !this.active && !this.starting) return;
       if (!pending || frame.type !== (pending.type | RESPONSE)) throw new Error('Unexpected H417 response');
       this.pending.delete(frame.requestId);
       pending.resolve(frame);
       return;
     }
+    if (!this.active && !this.starting && !this.session) return;
     if (!this.active && !this.starting) throw new Error('Unexpected H417 sample session');
     if (!this.session && this.starting) this.session = frame.session;
     if (
       !frame.session ||
       frame.session !== this.session ||
       frame.sequence !== this.sequence ||
-      frame.firstSample !== this.first ||
+      (frame.type !== ANALOG && frame.firstSample !== this.first) ||
       frame.requestId !== 0
     )
       throw new Error('H417 stream discontinuity (session, sequence or sample index)');
@@ -160,9 +161,24 @@ export class H417Transport {
       this.first += BigInt(frame.payload.length);
       this.sequence = (this.sequence + 1) >>> 0;
       this.counters.dataFrames++;
+    } else if (frame.type === ANALOG) {
+      const a = frame.analog!;
+      const stream = a.timing.bits === 10 ? 1 : 0;
+      const channels = (a.mask & 1 ? 1 : 0) + (a.mask & 2 ? 1 : 0);
+      if (frame.firstSample !== this.analogFirst[stream] || frame.payload.length % (2 * channels))
+        throw new Error('H417 analog stream discontinuity');
+      this.analogFirst[stream] += BigInt(frame.payload.length / 2 / channels);
+      this.sequence = (this.sequence + 1) >>> 0;
+      this.counters.dataFrames++;
     } else {
       const status = readStatus(frame.payload);
-      if (frame.payload.length !== 16 || status.samples !== this.first)
+      const counts = new DataView(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
+      if (
+        frame.payload.length !== 32 ||
+        status.samples !== this.first ||
+        counts.getBigUint64(16, true) !== this.analogFirst[0] ||
+        counts.getBigUint64(24, true) !== this.analogFirst[1]
+      )
         throw new Error('Invalid H417 final sample count');
       this.ended = true;
       this.endWake?.();
@@ -211,7 +227,8 @@ export class H417Transport {
   command(type: number, payload?: Uint8Array): Promise<Frame> {
     const run = this.serial.then(async () => {
       if (this.closed || this.error) throw this.error ?? new Error('H417 connection closed');
-      const id = ++this.requestId >>> 0;
+      this.requestId = (this.requestId + 1) >>> 0 || 1;
+      const id = this.requestId;
       const bytes = encodeCommand(type, id, this.session, this.packet, payload);
       let rejectReply!: (error: unknown) => void;
       const reply = new Promise<Frame>((resolve, reject) => {
@@ -269,6 +286,7 @@ export class H417Transport {
     return null;
   }
   stop(): Promise<void> {
+    if (!this.active || this.ended || this.closed || this.error) return Promise.resolve();
     return (this.shutdown ??= (async () => {
       this.discarding = true;
       this.queue.length = 0;
@@ -295,18 +313,14 @@ export class H417Transport {
   }
   async close(): Promise<void> {
     if (this.closed) return;
+    await this.serial;
+    if (this.closed) return;
     this.closed = true;
     this.wake?.();
     this.room?.();
     this.endWake?.();
     for (const pending of this.pending.values()) pending.reject(new Error('H417 connection closed'));
     this.pending.clear();
-    if (this.claimed) {
-      try {
-        await deadline(this.device.releaseInterface(INTERFACE), 250, 'H417 release timeout');
-      } catch {}
-      this.claimed = false;
-    }
-    if (this.device.opened) await deadline(this.device.close(), 250, 'H417 close timeout');
+    if (this.device.opened) await deadline(this.device.close(), 2000, 'H417 close timeout');
   }
 }

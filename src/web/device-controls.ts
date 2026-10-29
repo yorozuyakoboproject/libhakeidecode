@@ -97,8 +97,19 @@ export class DeviceControls {
   selectedChannels(kind: 'logic' | 'analog'): readonly number[] {
     return kind === 'logic' ? this.logicSelection : this.analogSelection;
   }
+  channelAvailable(kind: 'logic' | 'analog', index: number): boolean {
+    const inputs = kind === 'analog' ? this.device.descriptor.analogInputs : undefined;
+    return !inputs || inputs.some((input) => input.index === index);
+  }
+  channelName(kind: 'logic' | 'analog', index: number): string {
+    return (
+      (kind === 'analog'
+        ? this.device.descriptor.analogInputs?.find((input) => input.index === index)?.name
+        : undefined) ?? `${kind === 'analog' ? 'A' : 'D'}${index}`
+    );
+  }
   selectChannel(kind: 'logic' | 'analog', channel: number, enabled: boolean): void {
-    if (this.busy) return;
+    if (this.busy || !this.channelAvailable(kind, channel)) return;
     const selected = new Set(this.selectedChannels(kind));
     if (enabled) selected.add(channel);
     else selected.delete(channel);
@@ -323,7 +334,9 @@ export class DeviceControls {
       const label = document.createElement('label');
       label.className = 'field';
       const caption = document.createElement('span');
-      this.caption(caption, captionKey, captionKey);
+      if (key === 'sampleRate' && capabilities.timebaseOnly)
+        this.caption(caption, `driver.${this.device.descriptor.id}.timebase`, 'Timebase (Hz)');
+      else this.caption(caption, captionKey, captionKey);
       label.append(caption);
       this.numericControl(label, id, capability, selected, captionKey);
       container.append(label);

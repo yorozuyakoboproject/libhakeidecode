@@ -8,6 +8,8 @@ import type { WorkspaceSettings } from './workspace.js';
 import type { AnalogSettings } from './analog-settings.js';
 
 export interface StoreAnalogMetadata {
+  readonly timing?: import('../libhakei/device.js').AnalogTiming;
+  readonly nativeLength?: bigint;
   readonly name: string;
   readonly length: bigint;
   readonly samplerate: number;

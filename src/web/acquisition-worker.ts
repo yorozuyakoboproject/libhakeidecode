@@ -18,6 +18,7 @@ import { DEFAULT_CAPTURE_BUDGET_BYTES, MemoryBudget, type BudgetSnapshot } from 
 import { WorkerStoreServer } from './worker-store-server.js';
 import { yieldWorkerTask } from './worker-task.js';
 import type { StoreMetadata } from './worker-store.js';
+import { MultiRateCapture } from './multirate-capture.js';
 export type AcquisitionRequest =
   | {
       type: 'start';
@@ -99,24 +100,31 @@ scope.onmessage = ({ data }) => {
     let driverDiagnostics: DriverDiagnostics | undefined;
     let store: PlanarSampleStore | null = null,
       analogStores: AnalogSampleStore[] = [];
+    let multiRate: MultiRateCapture | null = null;
     let logicIds: string[] = [],
       analogIds: string[] = [],
       padding: Uint8Array | null = null;
     const budget = data.store ? new MemoryBudget(data.store.budgetBytes ?? DEFAULT_CAPTURE_BUDGET_BYTES) : null;
     let lastProgressAt = -Infinity;
     const storeServer = data.store
-      ? new WorkerStoreServer(() =>
-          store
-            ? {
-                store,
-                labels: logicIds,
-                logicChannelCount: logicIds.length,
-                analogChannels: analogIds.map((id, index) => ({ name: id, store: analogStores[index]! })),
-              }
-            : null,
+      ? new WorkerStoreServer(
+          () =>
+            multiRate ??
+            (store
+              ? {
+                  store,
+                  labels: logicIds,
+                  logicChannelCount: logicIds.length,
+                  analogChannels: analogIds.map((id, index) => ({ name: id, store: analogStores[index]! })),
+                }
+              : null),
         )
       : null;
     const appendChunk = (input: AcquisitionChunk): number => {
+      if (multiRate) {
+        multiRate.append(input);
+        return 0;
+      }
       if ('format' in input) {
         if (
           input.format !== 'packed-logic' ||
@@ -231,12 +239,17 @@ scope.onmessage = ({ data }) => {
       return chunk.length;
     };
     const reportLocal = (force = false): void => {
-      if (!store || !budget || !storeServer) return;
+      if ((!store && !multiRate) || !budget || !storeServer) return;
       const now = performance.now();
       if (!force && now - lastProgressAt < 100) return;
       lastProgressAt = now;
       storeServer.publish();
-      scope.postMessage({ type: 'local-progress', length: store.length, memory: budget.snapshot(), driverDiagnostics });
+      scope.postMessage({
+        type: 'local-progress',
+        length: (multiRate?.store ?? store!).length,
+        memory: budget.snapshot(),
+        driverDiagnostics,
+      });
     };
     try {
       if (data.sharedSampleCount !== undefined) {
@@ -284,11 +297,15 @@ scope.onmessage = ({ data }) => {
       controller.signal.throwIfAborted();
       const device = createDriverDevice(data.driverId, data.initialization);
       validateDeviceConfiguration(device, data.configuration);
-      if (
-        device.getAcquisitionDescription(data.configuration).layout !== device.layout ||
-        !!producer !== (device.layout === 'packed-logic')
-      )
+      const description = device.getAcquisitionDescription(data.configuration);
+      if (!!producer !== (description.layout === 'packed-logic'))
         throw new Error('Driver acquisition layout does not match the capture pipeline');
+      if (description.layout === 'multi-rate') {
+        if (!budget || !storeServer || !data.storePort)
+          throw new Error('Multi-rate acquisition requires Worker storage');
+        multiRate = new MultiRateCapture(data.configuration, budget);
+        storeServer.connect(data.storePort);
+      }
       let borrowed: ArrayBuffer | null = null;
       const context: ManagedSampleSourceContext = {
         signal: controller.signal,
@@ -306,9 +323,11 @@ scope.onmessage = ({ data }) => {
         },
       };
       iterator = (
-        device.layout === 'packed-logic'
-          ? device.createPackedSource(data.configuration, context)
-          : device.createSource(data.configuration, context)
+        description.layout === 'multi-rate' && device.layout === 'multi-rate'
+          ? device.createMultiRateSource(data.configuration, context)
+          : device.layout !== 'channel-arrays'
+            ? device.createPackedSource(data.configuration, context)
+            : device.createSource(data.configuration, context)
       )[Symbol.asyncIterator]();
       let lastYield = performance.now();
       while (true) {
@@ -392,6 +411,25 @@ scope.onmessage = ({ data }) => {
         });
       }
       if (finalPadding) budget?.release(finalPadding.buffer);
+      const finalMultiRate = multiRate as MultiRateCapture | null;
+      if (finalMultiRate && budget) {
+        try {
+          finalMultiRate.finalize();
+        } catch (error) {
+          terminal = 'error';
+          failure = componentFailure(error);
+        }
+        storeServer!.publish();
+        scope.postMessage({
+          type: 'local-done',
+          metadata: storeServer!.metadata(),
+          length: finalMultiRate.store.length,
+          memory: budget.snapshot(),
+          stopReason: terminal,
+          ...(failure.message ? { error: failure.message } : {}),
+          driverDiagnostics,
+        });
+      }
       if (terminal === 'error')
         scope.postMessage({ type: 'error', ...failure, message: failure.message || 'Acquisition failed' });
       else scope.postMessage({ type: 'done' });

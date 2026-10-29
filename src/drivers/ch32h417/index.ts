@@ -8,12 +8,24 @@ import {
   type DeviceCapabilities,
   type DeviceConfiguration,
   type DeviceDescriptor,
-  type PackedLogicDevice,
+  type MultiRateDevice,
+  type MultiRateAcquisitionDescription,
+  type AcquisitionChunk,
   type PackedLogicChunk,
   type ManagedSampleSourceContext,
   type SampleSourceContext,
 } from '../../libhakei/device.js';
-import { Command, DATA, END, USB_PID, USB_VID, readCapabilities, readStatus, type Capabilities } from './protocol.js';
+import {
+  Command,
+  DATA,
+  END,
+  ANALOG,
+  USB_PID,
+  USB_VID,
+  readCapabilities,
+  readStatus,
+  type Capabilities,
+} from './protocol.js';
 import { H417Transport, TRANSPORT_WORKING_BYTES, browserUsb, statusError, type UsbApi } from './transport.js';
 export type { Capabilities } from './protocol.js';
 export interface H417Identity {
@@ -45,8 +57,8 @@ export interface H417WorkerMetrics {
 export interface H417StreamOptions {
   readonly onBlock?: (samples: bigint, packed: Uint8Array, transport: H417TransportMetrics) => void | Promise<void>;
 }
-export class CH32H417Device implements PackedLogicDevice {
-  readonly layout = 'packed-logic';
+export class CH32H417Device implements MultiRateDevice {
+  readonly layout = 'multi-rate';
   private identity?: H417Identity;
   private api: UsbApi | null = null;
   onConnectionChange: (() => void) | null = null;
@@ -114,18 +126,204 @@ export class CH32H417Device implements PackedLogicDevice {
   get descriptor(): DeviceDescriptor {
     return descriptor(this.identity?.capabilities);
   }
-  getCapabilities(_configuration: DeviceConfiguration): DeviceCapabilities {
-    return this.descriptor.capabilities;
+  getCapabilities(configuration: DeviceConfiguration): DeviceCapabilities {
+    const caps = this.descriptor.capabilities;
+    const result: DeviceCapabilities = configuration.logicChannels
+      ? caps
+      : { ...caps, timebaseOnly: true, sampleRate: { kind: 'list', values: [400000000], default: 400000000 } };
+    if (!configuration.analogChannels) return result;
+    const rate = configuration.logicChannels ? configuration.sampleRate : 400000000;
+    const samples = BigInt(Math.max(1, Math.round((Number(configuration.options.durationMs ?? 200) * rate) / 1000)));
+    return { ...result, sampleCount: { kind: 'list', values: [samples], default: samples } };
   }
   createSource(configuration: DeviceConfiguration, context?: SampleSourceContext): SampleSource {
     validateDeviceConfiguration(this, configuration);
     if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
     return this.capture(configuration, context);
   }
-  getAcquisitionDescription(_configuration: DeviceConfiguration): PackedLogicAcquisitionDescription {
+  async *createMultiRateSource(
+    configuration: DeviceConfiguration,
+    context: ManagedSampleSourceContext,
+  ): AsyncGenerator<AcquisitionChunk> {
+    validateDeviceConfiguration(this, configuration);
+    const identity = this.identity;
+    if (!identity) throw new ComponentError('driver.ch32h417.error.disconnected');
+    const matches = (await browserUsb().getDevices()).filter(
+      (d) => d.serialNumber === identity.serialNumber && d.vendorId === USB_VID && d.productId === USB_PID,
+    );
+    if (matches.length !== 1) throw new Error('Authorized H417 device disconnected or ambiguous');
+    const transport = new H417Transport(matches[0]!);
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const stop = () => {
+      void transport.stop().catch((error) => transport.abort(error));
+    };
+    context.signal?.addEventListener('abort', stop, { once: true });
+    try {
+      await transport.open();
+      const caps = readCapabilities(await transport.command(Command.caps));
+      if (
+        caps.packetBytes !== identity.capabilities.packetBytes ||
+        caps.adc1Mask !== identity.capabilities.adc1Mask ||
+        caps.hsadcMask !== identity.capabilities.hsadcMask ||
+        (configuration.logicChannels && !caps.rates.includes(configuration.sampleRate))
+      )
+        throw new Error('Device sampling capabilities changed; reconnect the analyzer');
+      const analog = deviceChannelIndices(configuration, 'analog');
+      const mask = analog.reduce((m, i) => m | (1 << i), 0),
+        adc1 = mask & caps.adc1Mask,
+        hsadc = mask & caps.hsadcMask;
+      if (mask !== (adc1 | hsadc))
+        throw new Error('Initialize the selected PC1/PC2 ADC modes in the management page first');
+      const adc1Hz = Number(configuration.options.adc1Hz),
+        hsadcHz = Number(configuration.options.hsadcHz);
+      const adcCount = Number(!!(adc1 & 1)) + Number(!!(adc1 & 2));
+      if (adc1 && Number(configuration.options.durationMs) * adc1Hz <= 1000)
+        throw new Error('Capture duration must exceed one ADC1 sample period');
+      const scans = Math.max(1, Math.min(Math.floor(1024 / Math.max(1, adcCount)), Math.floor(adc1Hz / 1000)));
+      const bandwidth =
+        (configuration.logicChannels ? configuration.sampleRate * (1 + caps.packetBytes / caps.blockBytes) : 0) +
+        (adc1 ? adc1Hz * adcCount * 2 + Math.ceil((adc1Hz * caps.packetBytes) / scans) : 0) +
+        (hsadc ? hsadcHz * 2 + Math.ceil((hsadcHz * caps.packetBytes) / 1024) : 0);
+      if (adc1Hz * adcCount > caps.adc1Budget || bandwidth > caps.mixedBytesPerSecond)
+        throw new Error('ADC conversion or USB bandwidth exceeded');
+      const selected = deviceChannelIndices(configuration, 'logic');
+      const payload = new Uint8Array(24),
+        view = new DataView(payload.buffer);
+      view.setUint32(0, configuration.sampleRate, true);
+      view.setBigUint64(4, BigInt(configuration.sampleCount), true);
+      view.setUint8(12, selected.length);
+      view.setUint8(
+        13,
+        selected.reduce((m, i) => m | (1 << i), 0),
+      );
+      view.setUint8(14, adc1);
+      view.setUint8(15, hsadc);
+      view.setUint32(16, hsadc ? hsadcHz : 0, true);
+      view.setUint32(20, adc1 ? adc1Hz : 0, true);
+      await transport.start(payload);
+      let beating = false;
+      heartbeat = setInterval(() => {
+        if (beating) return;
+        beating = true;
+        void transport
+          .command(Command.keepalive)
+          .catch((error) => transport.abort(error))
+          .finally(() => {
+            beating = false;
+          });
+      }, 1000);
+      let digital = 0n;
+      const referenceMv = new Map<number, number>();
+      const expected = new Map<number, bigint>(),
+        received = new Map<number, bigint>();
+      const endTick = (BigInt(configuration.sampleCount) * 400000000n) / BigInt(configuration.sampleRate);
+      while (true) {
+        context.signal?.throwIfAborted();
+        const frame = await transport.next();
+        if (!frame) {
+          context.signal?.throwIfAborted();
+          throw new Error('H417 stream ended without END');
+        }
+        context.reportDiagnostics?.({
+          'transport.receivedBytes': transport.metrics.receivedBytes,
+          'timing.verified': 0,
+        });
+        if (frame.type === END) {
+          const status = readStatus(frame.payload);
+          if (
+            status.sampleRate !== configuration.sampleRate ||
+            status.channels !== selected.length ||
+            status.samples !== digital
+          )
+            throw new Error('H417 final configuration/count mismatch');
+          if (status.error) throw statusError(status.error, digital);
+          if (configuration.logicChannels && digital !== BigInt(configuration.sampleCount))
+            throw new Error('Incomplete digital capture');
+          if (analog.some((pin) => !expected.has(pin) || expected.get(pin) !== received.get(pin)))
+            throw new Error('Incomplete analog capture');
+          await context.acquireBuffer();
+          yield { format: 'timeline', length: BigInt(configuration.sampleCount) };
+          return;
+        }
+        if (frame.type === DATA) {
+          const buffer = await context.acquireBuffer(),
+            data = new Uint8Array(buffer, 0, frame.payload.length);
+          const remap = Uint8Array.from({ length: 256 }, (_, v) =>
+            selected.reduce((m, c, i) => m | (((v >> c) & 1) << i), 0),
+          );
+          for (let i = 0; i < data.length; ++i) data[i] = remap[frame.payload[i]!]!;
+          yield {
+            format: 'packed-logic',
+            startSample: digital,
+            sampleRate: configuration.sampleRate,
+            channelCount: selected.length,
+            length: data.length,
+            encoding: 'raw8',
+            data,
+          };
+          digital += BigInt(data.length);
+          continue;
+        }
+        if (frame.type !== ANALOG || !frame.analog) throw new Error('Unexpected acquisition frame');
+        const info = frame.analog;
+        if (
+          info.adc1Mask !== adc1 ||
+          info.hsadcMask !== hsadc ||
+          info.mask !== (info.timing.bits === 10 ? hsadc : adc1)
+        )
+          throw new Error('Analog configuration changed');
+        const pins = [0, 1].filter((i) => info.mask & (1 << i)),
+          count = frame.payload.length / 2 / pins.length;
+        const raw = new DataView(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
+        for (let rank = 0; rank < pins.length; ++rank) {
+          const pin = pins[rank]!;
+          const firstTick = info.timing.firstTick + BigInt(info.timing.bits === 12 ? rank * 640 : 0);
+          const target =
+            endTick > firstTick ? (endTick - firstTick + info.timing.periodTicks - 1n) / info.timing.periodTicks : 0n;
+          if (!expected.has(pin)) expected.set(pin, target);
+          if (frame.firstSample !== (received.get(pin) ?? 0n) || target !== expected.get(pin))
+            throw new Error('Analog stream discontinuity');
+          const remaining = target - frame.firstSample;
+          const take = remaining < BigInt(count) ? Number(remaining) : count;
+          if (take <= 0) continue;
+          const buffer = await context.acquireBuffer(),
+            values = new Float32Array(buffer, 0, take);
+          for (let i = 0; i < take; ++i) {
+            const value = raw.getUint16((i * pins.length + rank) * 2, true);
+            if (value >= 1 << info.timing.bits) throw new Error('ADC result out of range');
+            values[i] = value;
+          }
+          if (!referenceMv.has(pin)) referenceMv.set(pin, info.timing.referenceMv);
+          yield {
+            format: 'analog',
+            channel: pin,
+            startSample: frame.firstSample,
+            data: values,
+            timing: {
+              ...info.timing,
+              firstTick,
+              referenceMv: referenceMv.get(pin)!,
+            },
+          };
+          received.set(pin, frame.firstSample + BigInt(take));
+        }
+      }
+    } finally {
+      clearInterval(heartbeat);
+      context.signal?.removeEventListener('abort', stop);
+      try {
+        await transport.stop();
+      } finally {
+        await transport.close();
+      }
+    }
+  }
+  getAcquisitionDescription(
+    configuration: DeviceConfiguration,
+  ): PackedLogicAcquisitionDescription | MultiRateAcquisitionDescription {
     if (!this.identity) throw new ComponentError('driver.ch32h417.error.disconnected');
     return {
-      layout: 'packed-logic',
+      layout: configuration.analogChannels ? 'multi-rate' : 'packed-logic',
       logicSampleBytes: 1,
       analogSampleBytes: 4,
       chunkSamples: 1_048_576,
@@ -289,17 +487,19 @@ export class CH32H417Device implements PackedLogicDevice {
     };
     signal?.addEventListener('abort', stop, { once: true });
     try {
-      await transport.open(
-        deviceChannelIndices(configuration, 'logic').reduce((mask, channel) => mask | (1 << channel), 0),
-      );
+      await transport.open();
       const caps = readCapabilities(await transport.command(Command.caps));
       if (caps.packetBytes !== identity.capabilities.packetBytes || !caps.rates.includes(configuration.sampleRate))
         throw new Error('H417 USB speed changed; reconnect to refresh sampling rates');
-      const payload = new Uint8Array(16),
+      const payload = new Uint8Array(24),
         view = new DataView(payload.buffer);
       view.setUint32(0, configuration.sampleRate, true);
       view.setBigUint64(4, sampleIndex(configuration.sampleCount), true);
       view.setUint8(12, configuration.logicChannels);
+      view.setUint8(
+        13,
+        deviceChannelIndices(configuration, 'logic').reduce((mask, channel) => mask | (1 << channel), 0),
+      );
       await transport.start(payload);
       let beating = false;
       heartbeat = setInterval(() => {
@@ -315,7 +515,10 @@ export class CH32H417Device implements PackedLogicDevice {
       while (true) {
         signal?.throwIfAborted();
         const frame = await transport.next();
-        if (!frame) throw stopError ?? new Error('H417 stream ended without END');
+        if (!frame) {
+          signal?.throwIfAborted();
+          throw stopError ?? new Error('H417 stream ended without END');
+        }
         if (frame.type === END) {
           const status = readStatus(frame.payload);
           if (
@@ -382,7 +585,7 @@ export class CH32H417Device implements PackedLogicDevice {
     context?.signal?.addEventListener('abort', stop, { once: true });
     try {
       context?.signal?.throwIfAborted();
-      await transport.open(deviceChannelIndices(config, 'logic').reduce((mask, channel) => mask | (1 << channel), 0));
+      await transport.open();
       context?.signal?.throwIfAborted();
       const caps = readCapabilities(await transport.command(Command.caps));
       context?.signal?.throwIfAborted();
@@ -392,11 +595,15 @@ export class CH32H417Device implements PackedLogicDevice {
         !caps.rates.includes(config.sampleRate)
       )
         throw new Error('H417 USB speed changed; reconnect to refresh sampling rates');
-      const payload = new Uint8Array(16),
+      const payload = new Uint8Array(24),
         v = new DataView(payload.buffer);
       v.setUint32(0, config.sampleRate, true);
       v.setBigUint64(4, sampleIndex(config.sampleCount), true);
       v.setUint8(12, config.logicChannels);
+      v.setUint8(
+        13,
+        deviceChannelIndices(config, 'logic').reduce((mask, channel) => mask | (1 << channel), 0),
+      );
       await transport.start(payload);
       context?.signal?.throwIfAborted();
       let beating = false;

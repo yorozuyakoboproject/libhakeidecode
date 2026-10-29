@@ -5,6 +5,7 @@ export type NumericCapability<T extends number | bigint = number> =
   | { readonly kind: 'list'; readonly values: readonly T[]; readonly default: T }
   | { readonly kind: 'range'; readonly min: T; readonly max: T; readonly step: T; readonly default: T };
 export interface DeviceCapabilities {
+  readonly timebaseOnly?: boolean;
   readonly sampleRate: NumericCapability;
   readonly sampleCount: NumericCapability<number | bigint>;
   readonly logicChannels: NumericCapability;
@@ -24,6 +25,7 @@ export type DeviceOption = {
     }
 );
 export interface DeviceDescriptor {
+  readonly analogInputs?: readonly { readonly index: number; readonly name: string }[];
   readonly id: string;
   readonly name: string;
   readonly capabilities: DeviceCapabilities;
@@ -62,7 +64,13 @@ export interface PackedLogicAcquisitionDescription extends AcquisitionBuffers {
   readonly layout: 'packed-logic';
   readonly logicSampleBytes: 1;
 }
-export type AcquisitionDescription = ChannelArrayAcquisitionDescription | PackedLogicAcquisitionDescription;
+export interface MultiRateAcquisitionDescription extends AcquisitionBuffers {
+  readonly layout: 'multi-rate';
+}
+export type AcquisitionDescription =
+  | ChannelArrayAcquisitionDescription
+  | PackedLogicAcquisitionDescription
+  | MultiRateAcquisitionDescription;
 export type DriverDiagnostics = Readonly<Record<string, number>>;
 
 export interface PackedLogicChunk {
@@ -74,7 +82,30 @@ export interface PackedLogicChunk {
   readonly encoding: 'raw8';
   readonly data: Uint8Array;
 }
-export type AcquisitionChunk = import('./index.js').SampleChunkInput | PackedLogicChunk;
+export interface AnalogTiming {
+  readonly clockHz: number;
+  readonly periodTicks: bigint;
+  readonly firstTick: bigint;
+  readonly uncertaintyTicks: number;
+  readonly bits: 10 | 12;
+  readonly referenceMv: number;
+}
+export interface AnalogStreamChunk {
+  readonly format: 'analog';
+  readonly channel: number;
+  readonly startSample: bigint;
+  readonly timing: AnalogTiming;
+  readonly data: Float32Array;
+}
+export interface TimelineChunk {
+  readonly format: 'timeline';
+  readonly length: bigint;
+}
+export type AcquisitionChunk =
+  | import('./index.js').SampleChunkInput
+  | PackedLogicChunk
+  | AnalogStreamChunk
+  | TimelineChunk;
 export interface SampleSourceContext {
   readonly signal?: AbortSignal;
   readonly chunkSamples?: number;
@@ -112,7 +143,21 @@ export interface PackedLogicDevice extends DeviceBase {
     context: ManagedSampleSourceContext,
   ): AsyncIterable<PackedLogicChunk>;
 }
-export type SampleDevice = ChannelArrayDevice | PackedLogicDevice;
+export interface MultiRateDevice extends DeviceBase {
+  readonly layout: 'multi-rate';
+  getAcquisitionDescription(
+    configuration: DeviceConfiguration,
+  ): MultiRateAcquisitionDescription | PackedLogicAcquisitionDescription;
+  createMultiRateSource(
+    configuration: DeviceConfiguration,
+    context: ManagedSampleSourceContext,
+  ): AsyncIterable<AcquisitionChunk>;
+  createPackedSource(
+    configuration: DeviceConfiguration,
+    context: ManagedSampleSourceContext,
+  ): AsyncIterable<PackedLogicChunk>;
+}
+export type SampleDevice = ChannelArrayDevice | PackedLogicDevice | MultiRateDevice;
 export function supportsNumericValue(capability: NumericCapability<number | bigint>, value: number | bigint): boolean {
   try {
     const n = sampleIndex(value);
@@ -223,6 +268,12 @@ export function validateDeviceConfiguration(device: SampleDevice, configuration:
     const indices = deviceChannelIndices(configuration, kind),
       capability = caps[`${kind}Channels`];
     const maximum = capability.kind === 'list' ? Math.max(...capability.values) : capability.max;
+    if (
+      kind === 'analog' &&
+      device.descriptor.analogInputs &&
+      indices.some((index) => !device.descriptor.analogInputs!.some((input) => input.index === index))
+    )
+      throw new RangeError('Analog input is not initialized');
     if (
       indices.length !== configuration[`${kind}Channels`] ||
       new Set(indices).size !== indices.length ||

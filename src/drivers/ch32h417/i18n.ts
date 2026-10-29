@@ -2,6 +2,10 @@ import type { ComponentMessages } from '../../components.js';
 
 export const messages = {
   en: {
+    'driver.ch32h417.timebase': 'Timeline clock (Hz, not ADC rate)',
+    'driver.ch32h417.option.hsadcHz': 'HSADC sampling rate (Hz)',
+    'driver.ch32h417.option.adc1Hz': 'ADC1 rate per channel (Hz)',
+    'driver.ch32h417.option.durationMs': 'Analog/mixed capture duration (ms)',
     'driver.ch32h417.name': 'CH32H417 Logic Analyzer',
     'driver.ch32h417.error.browser': 'WebUSB requires Google Chrome on HTTPS or localhost',
     'driver.ch32h417.error.identity': 'A uniquely identified H417 device is required',
@@ -12,6 +16,10 @@ export const messages = {
       'H417 protocol mismatch: device v{actual}, analyzer requires v{expected}. Update the analyzer and firmware to matching versions.',
   },
   'zh-CN': {
+    'driver.ch32h417.timebase': '时间轴时钟（Hz，非 ADC 采样率）',
+    'driver.ch32h417.option.hsadcHz': 'HSADC 采样率（Hz）',
+    'driver.ch32h417.option.adc1Hz': 'ADC1 每通道采样率（Hz）',
+    'driver.ch32h417.option.durationMs': '模拟／混合采集时长（ms）',
     'driver.ch32h417.name': 'CH32H417 逻辑分析仪',
     'driver.ch32h417.error.browser': 'WebUSB 需要在 HTTPS 或 localhost 下使用谷歌浏览器',
     'driver.ch32h417.error.identity': '需要具有唯一序列号的 H417 设备',

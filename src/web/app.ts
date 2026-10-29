@@ -751,14 +751,16 @@ export class AnalyzerApp {
           : analog
             ? this.renderer.analogChannels.includes(index)
             : this.renderer.channels.includes(index);
-        check.disabled = !!this.captureAbort;
+        check.disabled = !!this.captureAbort || (device && !this.deviceControls.channelAvailable(kind, id));
         check.setAttribute(
           'aria-label',
-          t(device ? 'channels.capture' : 'channels.display', { channel: `${prefix}${id}` }),
+          t(device ? 'channels.capture' : 'channels.display', {
+            channel: device ? this.deviceControls.channelName(kind, id) : `${prefix}${id}`,
+          }),
         );
         if (check.checked) enabled++;
         const tag = document.createElement('strong');
-        tag.textContent = `${prefix}${id}`;
+        tag.textContent = device ? this.deviceControls.channelName(kind, id) : `${prefix}${id}`;
         chip.append(check, tag);
         if (capture && index >= 0) {
           const name = analog ? capture.analogChannels![index]!.name : capture.labels[index]!;

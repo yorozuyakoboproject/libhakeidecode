@@ -35,7 +35,10 @@ scope.onmessage = ({ data }) => {
       else if (data.type === 'prepare') {
         validateDeviceConfiguration(device, data.configuration);
         const acquisition = device.getAcquisitionDescription(data.configuration);
-        if (acquisition.layout !== device.layout)
+        if (
+          acquisition.layout !== device.layout &&
+          !(device.layout === 'multi-rate' && acquisition.layout === 'packed-logic')
+        )
           throw new Error('Driver acquisition layout does not match its data source');
         description = { ...acquisition, worker: { driverId: data.driverId, initialization: device.initialization } };
       } else throw new Error('Unknown device control request');

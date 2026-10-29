@@ -116,7 +116,7 @@ function capturePlan(
   if (!Number.isSafeInteger(chunkSamples) || chunkSamples < 1 || chunkSamples > 2 ** 26)
     throw new RangeError('Invalid acquisition block size');
   if (
-    !['channel-arrays', 'packed-logic'].includes(description.layout) ||
+    !['channel-arrays', 'packed-logic', 'multi-rate'].includes(description.layout) ||
     ![1, 2, 4, 8].includes(description.logicSampleBytes) ||
     (description.layout === 'packed-logic' && description.logicSampleBytes !== 1) ||
     ![4, 8].includes(description.analogSampleBytes)
@@ -183,7 +183,7 @@ export async function deviceCapture(
       plan.chunkSamples,
       buffers,
       sourceSignal,
-      plan.description.layout === 'channel-arrays',
+      plan.description.layout !== 'packed-logic',
     );
     if (source.sharedCapture) {
       sharedSource = source;
