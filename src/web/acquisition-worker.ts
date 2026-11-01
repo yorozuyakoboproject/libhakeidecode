@@ -6,6 +6,7 @@ import {
   type DeviceConfiguration,
   type DriverDiagnostics,
   type ManagedSampleSourceContext,
+  type TransferProgress,
 } from '../libhakei/device.js';
 import { createDriverDevice } from '../drivers/workers.js';
 import { createSampleChunk } from '../libhakei/index.js';
@@ -36,6 +37,7 @@ export type AcquisitionRequest =
   | { type: 'recycle'; buffer: ArrayBuffer }
   | { type: 'stop' };
 export type AcquisitionResponse =
+  | { type: 'transfer-progress'; progress: TransferProgress }
   | { type: 'chunk'; chunk: AcquisitionChunk; buffer: ArrayBuffer }
   | { type: 'local-progress'; length: bigint; memory: BudgetSnapshot; driverDiagnostics?: DriverDiagnostics }
   | {
@@ -313,6 +315,7 @@ scope.onmessage = ({ data }) => {
         reportDiagnostics: (snapshot) => {
           driverDiagnostics = { ...snapshot };
         },
+        reportTransferProgress: (progress) => scope.postMessage({ type: 'transfer-progress', progress }),
         acquireBuffer: async () => {
           controller.signal.throwIfAborted();
           return (borrowed =

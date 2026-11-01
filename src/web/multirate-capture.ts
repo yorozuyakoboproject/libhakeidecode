@@ -1,5 +1,6 @@
 import type { AcquisitionChunk, DeviceConfiguration, AnalogTiming } from '../libhakei/device.js';
 import { deviceChannelIndices } from '../libhakei/device.js';
+import { formatRate } from '../libhakei/units.js';
 import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore } from './data/rleStore.js';
 import { AnalogSampleStore, type AnalogStore } from './data/analogStore.js';
@@ -76,7 +77,7 @@ export class MultiRateCapture {
         BigInt(this.config.sampleCount),
       );
       const rate = chunk.timing.clockHz / Number(chunk.timing.periodTicks);
-      channel.name = `PC${chunk.channel + 1} · ${chunk.timing.bits === 10 ? 'HSADC' : 'ADC1'} · ${rate.toLocaleString(undefined, { maximumFractionDigits: 3 })} S/s · ${chunk.timing.uncertaintyTicks === 0xffffffff ? '同步未验证' : `±${chunk.timing.uncertaintyTicks / chunk.timing.clockHz}s`}`;
+      channel.name = `PC${chunk.channel + 1} · ${(chunk.timing.nativeBits ?? chunk.timing.bits) === 10 ? 'HSADC' : 'ADC1'} · ${formatRate(rate)} · ${chunk.timing.bits} bit · ${chunk.timing.uncertaintyTicks === 0xffffffff ? '同步未验证' : `±${chunk.timing.uncertaintyTicks / chunk.timing.clockHz}s`}`;
     }
     const store = channel.store as TimedAnalogStore;
     const fields: (keyof AnalogTiming)[] = [

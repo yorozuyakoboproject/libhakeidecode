@@ -12,7 +12,6 @@ export const en = {
   'device.connected': 'Connected',
   'device.disconnected': 'Connect the device before capture',
   'device.select': 'Capture device',
-  'device.settings': 'Device settings',
   'device.run': '▶ Run capture',
   'device.stop': '■ Stop capture',
   'device.stopping': 'Stopping capture…',
@@ -20,6 +19,12 @@ export const en = {
   'device.acquiring': 'Acquiring samples…',
   'device.captureError': 'Capture failed',
   'capture.durationPreview': 'Estimated duration {duration}',
+  'capture.usbRate': 'USB receive rate',
+  'capture.usbAverageRate': 'USB average rate',
+  'capture.usbShortAverageRate': 'USB average rate · reference only',
+  'capture.usbShortTransfer': 'Short transfer; for reference only',
+  'capture.usbRateHint':
+    'Received capture traffic, including frame headers and padding. Excludes other USB endpoints and bus overhead.',
   'capture.memoryUsage': 'Data memory {used} MiB · {samples} samples · {progress}%',
   'capture.progress': 'Acquiring {samples} / {target} · actual data and buffers {memory} MiB',
   'capture.partial': 'Kept {actual} / {target} samples · {reason}',
@@ -143,6 +148,7 @@ export const en = {
   'error.noMapping': 'Map the required input channels',
   'error.worker': 'Could not start the decoder Worker',
   'error.cancelled': 'Decoding cancelled',
+  'error.capture': 'Acquisition error: {detail}',
   'error.decoder': 'Decoder error: {detail}',
 } as const;
 export type MessageKey = keyof typeof en | DecoderMessageKey | DriverMessageKey;
@@ -157,7 +163,6 @@ export const zh: Record<keyof typeof en, string> = {
   'device.connected': '已连接',
   'device.disconnected': '请先连接设备再开始采集',
   'device.select': '采集设备',
-  'device.settings': '设备设置',
   'device.run': '▶ 开始采集',
   'device.stop': '■ 结束采集',
   'device.stopping': '正在结束采集…',
@@ -165,6 +170,11 @@ export const zh: Record<keyof typeof en, string> = {
   'device.acquiring': '正在采集…',
   'device.captureError': '采集失败',
   'capture.durationPreview': '预计时长 {duration}',
+  'capture.usbRate': 'USB 实时速率',
+  'capture.usbAverageRate': 'USB 平均速率',
+  'capture.usbShortAverageRate': 'USB 平均速率 · 仅供参考',
+  'capture.usbShortTransfer': '传输过短，仅供参考',
+  'capture.usbRateHint': '采集端点的实际接收流量，包含帧头和填充；不含其他 USB 端点及总线开销。',
   'capture.memoryUsage': '数据内存 {used} MiB · 有效数据 {samples} 点 · 进度 {progress}%',
   'capture.progress': '正在采集 {samples} / {target} · 实际内存 {memory} MiB',
   'capture.partial': '已保留 {actual} / {target} 点 · {reason}',
@@ -286,6 +296,7 @@ export const zh: Record<keyof typeof en, string> = {
   'error.noMapping': '请映射所需的输入通道',
   'error.worker': '解码 Worker 启动失败',
   'error.cancelled': '解码已取消',
+  'error.capture': '采集错误：{detail}',
   'error.decoder': '解码器错误：{detail}',
 };
 export const messages = { en: { ...en }, 'zh-CN': { ...zh } } as Record<Locale, Record<MessageKey, string>>;
@@ -330,10 +341,10 @@ export class UIError extends Error {
     this.name = 'UIError';
   }
 }
-export function errorLabel(error: unknown): string {
+export function errorLabel(error: unknown, category: MessageKey = 'error.decoder'): string {
   if (error instanceof UIError) return t(error.key, error.params);
   if (error instanceof ComponentError && hasMessage(error.key)) return t(error.key, error.params);
-  return t('error.decoder', { detail: error instanceof Error ? error.message : String(error) });
+  return t(category, { detail: error instanceof Error ? error.message : String(error) });
 }
 export function translateDOM(root: ParentNode = document): void {
   for (const node of root.querySelectorAll<HTMLElement>('[data-i18n]')) {

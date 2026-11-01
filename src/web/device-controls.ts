@@ -6,6 +6,7 @@ import {
   type NumericCapability,
 } from '../libhakei/device.js';
 import type { DeviceControl } from './device-protocol.js';
+import { formatRate } from '../libhakei/units.js';
 import { errorLabel, hasMessage, numberLabel, t, translateDOM, type MessageKey } from './i18n.js';
 
 const SELECTED_DEVICE_KEY = 'hakei.device';
@@ -18,12 +19,15 @@ export class DeviceControls {
   onChange: (() => void) | null = null;
   onConnectionChange: (() => void) | null = null;
   private busy = false;
+  private timebaseOnly = false;
+  private digitalRate = 0;
   private logicSelection: number[] = [];
   private analogSelection: number[] = [];
   private connecting = false;
   private configuring = false;
   private configurationSequence = 0;
   private configurationKey = '';
+  private optionsKey = '';
   private connectionSequence = 0;
   private configurationError: unknown = null;
   private connectionError: unknown = null;
@@ -43,6 +47,7 @@ export class DeviceControls {
     for (const device of devices)
       device.onConnectionChange = () => {
         if (device === this.device) {
+          if (!this.busy) this.renderOptions();
           this.refreshConnection();
           this.onConnectionChange?.();
         }
@@ -66,7 +71,7 @@ export class DeviceControls {
       void this.restoreAuthorizedDevices();
     });
     form.addEventListener('change', (event) => {
-      if (event.target === select) return;
+      if (event.target === select || this.busy) return;
       void this.refreshCapabilities();
     });
     void this.restoreAuthorizedDevices();
@@ -138,7 +143,7 @@ export class DeviceControls {
       }),
     );
     return {
-      sampleRate: Number(values.sampleRate!),
+      sampleRate: this.logicSelection.length && this.timebaseOnly ? this.digitalRate : Number(values.sampleRate!),
       sampleCount: values.sampleCount!,
       logicChannels: this.logicSelection.length,
       analogChannels: this.analogSelection.length,
@@ -166,10 +171,7 @@ export class DeviceControls {
       localStorage.setItem(SELECTED_DEVICE_KEY, this.control<HTMLSelectElement>('device-select').value);
     } catch {}
   }
-  private selectDevice(): void {
-    const defaults = defaultDeviceConfiguration(this.device.descriptor);
-    this.logicSelection = Array.from({ length: defaults.logicChannels }, (_, i) => i);
-    this.analogSelection = Array.from({ length: defaults.analogChannels }, (_, i) => i);
+  private restoreChannelSelection(): void {
     try {
       const saved = JSON.parse(localStorage.getItem(`hakei.${this.device.descriptor.id}.channels`) ?? 'null');
       for (const kind of ['logic', 'analog'] as const) {
@@ -184,13 +186,35 @@ export class DeviceControls {
         }
       }
     } catch {}
+  }
+  private selectDevice(): void {
+    const defaults = defaultDeviceConfiguration(this.device.descriptor);
+    this.logicSelection = Array.from({ length: defaults.logicChannels }, (_, i) => i);
+    this.analogSelection = Array.from({ length: defaults.analogChannels }, (_, i) => i);
+    this.restoreChannelSelection();
     const configuration = {
       ...defaults,
       sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
       sampleCount: this.savedSampling('sampleCount') ?? defaults.sampleCount,
     };
     this.renderSampling(configuration, this.device.descriptor.capabilities);
-    const container = this.form.querySelector('#device-options')!;
+    this.renderOptions(true);
+    this.connectionError = null;
+    this.refreshConnection();
+    void this.refreshCapabilities();
+    translateDOM();
+  }
+  private renderOptions(reset = false): void {
+    const key = JSON.stringify([this.device.descriptor.id, this.device.descriptor.options]);
+    if (!reset && key === this.optionsKey) return;
+    const previous = new Map<string, string>();
+    if (!reset)
+      for (const input of this.form.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+        '#device-options input, #device-options select',
+      ))
+        previous.set(input.id, input.value);
+    this.optionsKey = key;
+    const container = this.form.querySelector<HTMLElement>('#device-options')!;
     container.replaceChildren();
     for (const option of this.device.descriptor.options) {
       const label = document.createElement('label');
@@ -204,7 +228,7 @@ export class DeviceControls {
         for (const value of option.values) {
           const item = document.createElement('option');
           item.value = value;
-          this.caption(item, `driver.${this.device.descriptor.id}.value.${value}`, value);
+          this.caption(item, `driver.${this.device.descriptor.id}.value.${value}`, option.labels?.[value] ?? value);
           input.append(item);
         }
       } else {
@@ -216,16 +240,25 @@ export class DeviceControls {
         if (option.max !== undefined) input.max = String(option.max);
       }
       input.id = `device-option-${option.id}`;
-      input.value = String(option.default);
+      const saved = previous.get(input.id);
+      const valid =
+        saved !== undefined &&
+        (option.kind === 'choice'
+          ? option.values.includes(saved)
+          : Number.isFinite(Number(saved)) &&
+            (option.min === undefined || Number(saved) >= option.min) &&
+            (option.max === undefined || Number(saved) <= option.max));
+      input.value = valid ? saved! : String(option.default);
       label.append(input);
+      if (option.description) {
+        const hint = document.createElement('small');
+        hint.className = 'hint';
+        this.caption(hint, `driver.${this.device.descriptor.id}.hint.${option.id}`, option.description);
+        label.append(hint);
+      }
       container.append(label);
     }
-    const details = this.form.querySelector<HTMLElement>('#device-settings')!;
-    details.hidden = !this.device.descriptor.options.length;
-    this.connectionError = null;
-    this.refreshConnection();
-    void this.refreshCapabilities();
-    translateDOM();
+    container.hidden = !this.device.descriptor.options.length;
   }
   setBusy(busy: boolean): void {
     this.busy = busy;
@@ -242,10 +275,14 @@ export class DeviceControls {
     connect.hidden = disconnect.hidden = device.connected === undefined;
     connect.disabled = this.busy || this.connecting || device.connected === true;
     disconnect.disabled = this.busy || this.connecting || !device.connected;
+    for (const input of this.form.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+      '#device-options input, #device-options select, #device-sampling input, #device-sampling select',
+    ))
+      input.disabled = this.busy || this.connecting || this.configuring;
     const status = row.querySelector<HTMLElement>('#device-connection-status')!;
     const error = this.connectionError ?? this.configurationError;
     status.textContent = error
-      ? errorLabel(error)
+      ? errorLabel(error, 'error.capture')
       : t(
           this.connecting
             ? 'device.connecting'
@@ -269,7 +306,10 @@ export class DeviceControls {
     this.onConnectionChange?.();
     try {
       await device[action]();
-      if (device === this.device && sequence === this.connectionSequence) await this.refreshCapabilities();
+      if (device === this.device && sequence === this.connectionSequence) {
+        if (action !== 'disconnect') this.restoreChannelSelection();
+        await this.refreshCapabilities();
+      }
     } catch (error) {
       if (device === this.device && sequence === this.connectionSequence) this.connectionError = error;
     } finally {
@@ -285,6 +325,7 @@ export class DeviceControls {
       sequence = ++this.configurationSequence;
     this.configuring = true;
     this.configurationError = null;
+    this.renderOptions();
     this.refreshConnection();
     this.onConnectionChange?.();
     try {
@@ -321,6 +362,8 @@ export class DeviceControls {
     }
   }
   private renderSampling(configuration: DeviceConfiguration, capabilities: DeviceCapabilities): void {
+    this.timebaseOnly = !!capabilities.timebaseOnly;
+    if (!this.timebaseOnly) this.digitalRate = configuration.sampleRate;
     const container = this.form.querySelector('#device-sampling')!;
     container.replaceChildren();
     let previewRate: number | undefined;
@@ -333,13 +376,22 @@ export class DeviceControls {
       if (key === 'sampleCount') previewCount = BigInt(selected);
       const label = document.createElement('label');
       label.className = 'field';
+      label.hidden = key === 'sampleRate' && !!capabilities.timebaseOnly;
       const caption = document.createElement('span');
       if (key === 'sampleRate' && capabilities.timebaseOnly)
         this.caption(caption, `driver.${this.device.descriptor.id}.timebase`, 'Timebase (Hz)');
+      else if (key === 'sampleRate' && hasMessage(`driver.${this.device.descriptor.id}.digitalRate`))
+        this.caption(caption, `driver.${this.device.descriptor.id}.digitalRate`, 'Digital sample rate');
       else this.caption(caption, captionKey, captionKey);
       label.append(caption);
-      this.numericControl(label, id, capability, selected, captionKey);
+      this.numericControl(label, id, capability, selected, captionKey, capabilities.timebaseOnly ? 'Hz' : 'S/s');
       container.append(label);
+    }
+    for (const timing of capabilities.analogTiming ?? []) {
+      const details = document.createElement('p');
+      details.className = 'hint';
+      details.textContent = `${this.channelName('analog', timing.channel)} · ${formatRate(timing.sampleRate)} · ${timing.outputBits} bit`;
+      container.append(details);
     }
     const preview = document.createElement('p');
     preview.id = 'capture-duration-preview';
@@ -366,6 +418,7 @@ export class DeviceControls {
       ['sampleRate', 'sample-rate'],
       ['sampleCount', 'sample-limit'],
     ] as const) {
+      if (key === 'sampleRate' && this.timebaseOnly) continue;
       const input = this.form.querySelector<HTMLInputElement | HTMLSelectElement>('#' + id);
       if (!input) continue;
       try {
@@ -388,8 +441,9 @@ export class DeviceControls {
               : `${(seconds / 60).toFixed(2)} min`;
     return t('capture.durationPreview', { duration: value });
   }
-  private choiceLabel(value: number | bigint, id: string): string {
-    if (id !== 'sample-rate' && id !== 'sample-limit') return numberLabel(value);
+  private choiceLabel(value: number | bigint, id: string, rateUnit: 'S/s' | 'Hz'): string {
+    if (id === 'sample-rate') return formatRate(Number(value), rateUnit);
+    if (id !== 'sample-limit') return numberLabel(value);
     const units = [
       [1e15, 'P'],
       [1e12, 'T'],
@@ -399,7 +453,7 @@ export class DeviceControls {
       [1, ''],
     ] as const;
     const [scale, prefix] = units.find(([scale]) => value >= scale) ?? [1, ''];
-    const unit = prefix + (id === 'sample-rate' ? 'Hz' : '');
+    const unit = prefix;
     return numberLabel(Number(value) / scale, { maximumSignificantDigits: 16 }) + (unit ? ` ${unit}` : '');
   }
   private numericControl(
@@ -408,6 +462,7 @@ export class DeviceControls {
     capability: NumericCapability<number | bigint>,
     value: number | bigint,
     captionKey: MessageKey,
+    rateUnit: 'S/s' | 'Hz',
   ): void {
     const input = document.createElement('select');
     input.required = true;
@@ -415,14 +470,14 @@ export class DeviceControls {
     for (const choice of choices) {
       const option = document.createElement('option');
       option.value = String(choice);
-      option.textContent = this.choiceLabel(choice, id);
-      option.title = numberLabel(choice) + (id === 'sample-rate' ? ' Hz' : '');
+      option.textContent = this.choiceLabel(choice, id, rateUnit);
+      option.title = id === 'sample-rate' ? option.textContent : numberLabel(choice);
       input.append(option);
     }
     if (!choices.some((choice) => String(choice) === String(value))) {
       const option = document.createElement('option');
       option.value = String(value);
-      option.textContent = this.choiceLabel(value, id);
+      option.textContent = this.choiceLabel(value, id, rateUnit);
       input.append(option);
     }
     input.id = id;

@@ -14,6 +14,7 @@ import {
   type PackedLogicChunk,
   type ManagedSampleSourceContext,
   type SampleSourceContext,
+  type TransferProgress,
 } from '../../libhakei/device.js';
 import {
   Command,
@@ -27,6 +28,56 @@ import {
   type Capabilities,
 } from './protocol.js';
 import { H417Transport, TRANSPORT_WORKING_BYTES, browserUsb, statusError, type UsbApi } from './transport.js';
+async function configureCompression(
+  transport: H417Transport,
+  caps: Capabilities,
+  config: DeviceConfiguration,
+): Promise<void> {
+  const digital = String(config.options.digitalEncoding ?? 'raw');
+  const analog = String(config.options.analogEncoding ?? 'packed');
+  if (!['raw', 'runs'].includes(digital) || !['packed', 'split'].includes(analog))
+    throw new Error('Invalid H417 compression selection');
+  if (caps.appProtocol < 22 || !caps.compressionMask) {
+    if (digital !== 'raw' || analog !== 'packed') throw new Error('Firmware does not support independent encoding');
+    if (caps.compressionMask) await transport.setCompression(0, 0);
+    return;
+  }
+  await transport.setCompression(digital === 'runs' ? 4 : 0, analog === 'split' ? 1 : 0);
+}
+function analogSettings(caps: Capabilities, configuration: DeviceConfiguration) {
+  const analog = deviceChannelIndices(configuration, 'analog');
+  const mask = analog.reduce((m, i) => m | (1 << i), 0),
+    hsadc = mask & caps.hsadcMask,
+    adc1 = mask & caps.adc1Mask;
+  const periods = [0, 1].map((pin) =>
+    Number(configuration.options[caps.hsadcMask & (1 << pin) ? 'hsadcPeriod' : 'adc1Period'] ?? 0),
+  );
+  const bits = [0, 1].map((pin) => Number(configuration.options[`pc${pin + 1}Bits`] ?? (hsadc & (1 << pin) ? 10 : 12)));
+  const conversions = [adc1, hsadc].map((streamMask) => {
+    if (!streamMask || caps.appProtocol < 21) return 0;
+    let period = 0;
+    for (const pin of analog)
+      if (streamMask & (1 << pin)) {
+        if (
+          !caps.channelRates.some(
+            (r) =>
+              r.pin === pin &&
+              r.decimation === 1 &&
+              r.outputTicks === r.conversionTicks &&
+              r.conversionTicks === periods[pin],
+          ) ||
+          !Number.isInteger(bits[pin]) ||
+          bits[pin]! < 8 ||
+          bits[pin]! > (hsadc & (1 << pin) ? 10 : 12)
+        )
+          throw new Error('Unsupported hardware analog setting');
+        if (period && period !== periods[pin]) throw new Error('ADC1 pins must share one hardware sample rate');
+        period = periods[pin]!;
+      }
+    return period;
+  });
+  return { periods, bits, conversions };
+}
 export type { Capabilities } from './protocol.js';
 export interface H417Identity {
   serialNumber: string;
@@ -34,13 +85,7 @@ export interface H417Identity {
   productId: number;
   capabilities: Capabilities;
 }
-export interface H417TransportMetrics {
-  reads: number;
-  receivedBytes: number;
-  parserMs: number;
-  queuePeak: number;
-  dataFrames: number;
-}
+export type H417TransportMetrics = H417Transport['metrics'];
 export interface H417StreamStats {
   samples: bigint;
   frames: number;
@@ -56,6 +101,7 @@ export interface H417WorkerMetrics {
 }
 export interface H417StreamOptions {
   readonly onBlock?: (samples: bigint, packed: Uint8Array, transport: H417TransportMetrics) => void | Promise<void>;
+  readonly onTransferProgress?: (progress: TransferProgress) => void;
 }
 export class CH32H417Device implements MultiRateDevice {
   readonly layout = 'multi-rate';
@@ -130,11 +176,31 @@ export class CH32H417Device implements MultiRateDevice {
     const caps = this.descriptor.capabilities;
     const result: DeviceCapabilities = configuration.logicChannels
       ? caps
-      : { ...caps, timebaseOnly: true, sampleRate: { kind: 'list', values: [400000000], default: 400000000 } };
+      : {
+          ...caps,
+          timebaseOnly: true,
+          sampleRate: { kind: 'list', values: [400000000], default: 400000000 },
+        };
     if (!configuration.analogChannels) return result;
-    const rate = configuration.logicChannels ? configuration.sampleRate : 400000000;
-    const samples = BigInt(Math.max(1, Math.round((Number(configuration.options.durationMs ?? 200) * rate) / 1000)));
-    return { ...result, sampleCount: { kind: 'list', values: [samples], default: samples } };
+    const deviceCaps = this.identity?.capabilities;
+    const analogTiming =
+      deviceCaps && deviceCaps.appProtocol >= 21
+        ? (() => {
+            const { bits, conversions } = analogSettings(deviceCaps, configuration);
+            return deviceChannelIndices(configuration, 'analog').map((channel) => {
+              const conversion = conversions[deviceCaps.hsadcMask & (1 << channel) ? 1 : 0]!;
+              return {
+                channel,
+                sampleRate: 400000000 / conversion,
+                outputBits: bits[channel]!,
+              };
+            });
+          })()
+        : undefined;
+    return {
+      ...result,
+      analogTiming,
+    };
   }
   createSource(configuration: DeviceConfiguration, context?: SampleSourceContext): SampleSource {
     validateDeviceConfiguration(this, configuration);
@@ -153,6 +219,7 @@ export class CH32H417Device implements MultiRateDevice {
     );
     if (matches.length !== 1) throw new Error('Authorized H417 device disconnected or ambiguous');
     const transport = new H417Transport(matches[0]!);
+    transport.onTransferProgress = context.reportTransferProgress;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     const stop = () => {
       void transport.stop().catch((error) => transport.abort(error));
@@ -174,20 +241,17 @@ export class CH32H417Device implements MultiRateDevice {
         hsadc = mask & caps.hsadcMask;
       if (mask !== (adc1 | hsadc))
         throw new Error('Initialize the selected PC1/PC2 ADC modes in the management page first');
-      const adc1Hz = Number(configuration.options.adc1Hz),
-        hsadcHz = Number(configuration.options.hsadcHz);
+      const { periods, bits, conversions } = analogSettings(caps, configuration);
+      const adc1Hz =
+          caps.appProtocol >= 21 && adc1 ? 400000000 / conversions[0]! : Number(configuration.options.adc1Hz ?? 0),
+        hsadcHz =
+          caps.appProtocol >= 21 && hsadc ? 400000000 / conversions[1]! : Number(configuration.options.hsadcHz ?? 0);
       const adcCount = Number(!!(adc1 & 1)) + Number(!!(adc1 & 2));
-      if (adc1 && Number(configuration.options.durationMs) * adc1Hz <= 1000)
+      if (adc1 && Number(configuration.sampleCount) * adc1Hz <= configuration.sampleRate)
         throw new Error('Capture duration must exceed one ADC1 sample period');
-      const scans = Math.max(1, Math.min(Math.floor(1024 / Math.max(1, adcCount)), Math.floor(adc1Hz / 1000)));
-      const bandwidth =
-        (configuration.logicChannels ? configuration.sampleRate * (1 + caps.packetBytes / caps.blockBytes) : 0) +
-        (adc1 ? adc1Hz * adcCount * 2 + Math.ceil((adc1Hz * caps.packetBytes) / scans) : 0) +
-        (hsadc ? hsadcHz * 2 + Math.ceil((hsadcHz * caps.packetBytes) / 1024) : 0);
-      if (adc1Hz * adcCount > caps.adc1Budget || bandwidth > caps.mixedBytesPerSecond)
-        throw new Error('ADC conversion or USB bandwidth exceeded');
+      if (adc1Hz * adcCount > caps.adc1Budget) throw new ComponentError('driver.ch32h417.error.adcRate');
       const selected = deviceChannelIndices(configuration, 'logic');
-      const payload = new Uint8Array(24),
+      const payload = new Uint8Array(caps.appProtocol >= 21 ? 36 : 24),
         view = new DataView(payload.buffer);
       view.setUint32(0, configuration.sampleRate, true);
       view.setBigUint64(4, BigInt(configuration.sampleCount), true);
@@ -200,6 +264,13 @@ export class CH32H417Device implements MultiRateDevice {
       view.setUint8(15, hsadc);
       view.setUint32(16, hsadc ? hsadcHz : 0, true);
       view.setUint32(20, adc1 ? adc1Hz : 0, true);
+      if (caps.appProtocol >= 21) {
+        view.setUint32(24, periods[0]!, true);
+        view.setUint32(28, periods[1]!, true);
+        view.setUint8(32, bits[0]!);
+        view.setUint8(33, bits[1]!);
+      }
+      await configureCompression(transport, caps, configuration);
       await transport.start(payload);
       let beating = false;
       heartbeat = setInterval(() => {
@@ -226,6 +297,16 @@ export class CH32H417Device implements MultiRateDevice {
         }
         context.reportDiagnostics?.({
           'transport.receivedBytes': transport.metrics.receivedBytes,
+          'compression.rawBytes': transport.metrics.codecRawBytes,
+          'compression.wireBytes': transport.metrics.codecWireBytes,
+          'compression.cycles': transport.metrics.codecCycles,
+          'compression.decodeMs': transport.metrics.codecDecodeMs,
+          'compression.maxCycles': transport.metrics.codecMaxCycles,
+          'compression.cyclesPerByte': transport.metrics.codecRawBytes
+            ? transport.metrics.codecCycles / transport.metrics.codecRawBytes
+            : 0,
+          'compression.maxHoldMs': transport.metrics.codecMaxHoldMs,
+          'compression.queuePeak': transport.metrics.codecQueuePeak,
           'timing.verified': 0,
         });
         if (frame.type === END) {
@@ -269,7 +350,11 @@ export class CH32H417Device implements MultiRateDevice {
         if (
           info.adc1Mask !== adc1 ||
           info.hsadcMask !== hsadc ||
-          info.mask !== (info.timing.bits === 10 ? hsadc : adc1)
+          (info.pin === undefined
+            ? info.mask !== (info.timing.bits === 10 ? hsadc : adc1)
+            : !(mask & (1 << info.pin)) ||
+              info.timing.bits !== bits[info.pin] ||
+              info.timing.periodTicks !== BigInt(periods[info.pin]!))
         )
           throw new Error('Analog configuration changed');
         const pins = [0, 1].filter((i) => info.mask & (1 << i)),
@@ -277,9 +362,13 @@ export class CH32H417Device implements MultiRateDevice {
         const raw = new DataView(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
         for (let rank = 0; rank < pins.length; ++rank) {
           const pin = pins[rank]!;
-          const firstTick = info.timing.firstTick + BigInt(info.timing.bits === 12 ? rank * 640 : 0);
+          const firstTick =
+            info.pin === undefined
+              ? info.timing.firstTick + BigInt(info.timing.bits === 12 ? rank * 640 : 0)
+              : info.timing.firstTick - frame.firstSample * info.timing.periodTicks;
           const target =
-            endTick > firstTick ? (endTick - firstTick + info.timing.periodTicks - 1n) / info.timing.periodTicks : 0n;
+            info.targetSamples ??
+            (endTick > firstTick ? (endTick - firstTick + info.timing.periodTicks - 1n) / info.timing.periodTicks : 0n);
           if (!expected.has(pin)) expected.set(pin, target);
           if (frame.firstSample !== (received.get(pin) ?? 0n) || target !== expected.get(pin))
             throw new Error('Analog stream discontinuity');
@@ -293,6 +382,12 @@ export class CH32H417Device implements MultiRateDevice {
             if (value >= 1 << info.timing.bits) throw new Error('ADC result out of range');
             values[i] = value;
           }
+          context.reportDiagnostics?.({
+            [`PC${pin + 1}.outputHz`]: info.timing.clockHz / Number(info.timing.periodTicks),
+            [`PC${pin + 1}.conversionHz`]:
+              info.timing.clockHz / Number(info.timing.conversionTicks ?? info.timing.periodTicks),
+            [`PC${pin + 1}.bits`]: info.timing.bits,
+          });
           if (!referenceMv.has(pin)) referenceMv.set(pin, info.timing.referenceMv);
           yield {
             format: 'analog',
@@ -345,7 +440,11 @@ export class CH32H417Device implements MultiRateDevice {
       raw: Uint8Array | null = null,
       used = 0,
       start = 0n;
-    const workerMetrics: H417WorkerMetrics = { packedCopyMs: 0, bufferWaitMs: 0, consumerWaitMs: 0 };
+    const workerMetrics: H417WorkerMetrics = {
+      packedCopyMs: 0,
+      bufferWaitMs: 0,
+      consumerWaitMs: 0,
+    };
     const encode = (): PackedLogicChunk => {
       context.reportDiagnostics?.({
         'transport.reads': lastTransport?.reads ?? 0,
@@ -353,6 +452,13 @@ export class CH32H417Device implements MultiRateDevice {
         'transport.parserMs': lastTransport?.parserMs ?? 0,
         'transport.queuePeak': lastTransport?.queuePeak ?? 0,
         'transport.dataFrames': lastTransport?.dataFrames ?? 0,
+        'compression.rawBytes': lastTransport?.codecRawBytes ?? 0,
+        'compression.wireBytes': lastTransport?.codecWireBytes ?? 0,
+        'compression.cycles': lastTransport?.codecCycles ?? 0,
+        'compression.maxCycles': lastTransport?.codecMaxCycles ?? 0,
+        'compression.maxHoldMs': lastTransport?.codecMaxHoldMs ?? 0,
+        'compression.queuePeak': lastTransport?.codecQueuePeak ?? 0,
+        'compression.decodeMs': lastTransport?.codecDecodeMs ?? 0,
         'worker.packedCopyMs': workerMetrics.packedCopyMs,
         'worker.bufferWaitMs': workerMetrics.bufferWaitMs,
         'worker.consumerWaitMs': workerMetrics.consumerWaitMs,
@@ -378,6 +484,7 @@ export class CH32H417Device implements MultiRateDevice {
     const running = this.stream(
       configuration,
       {
+        onTransferProgress: context.reportTransferProgress,
         onBlock: async (_position, payload, transport) => {
           lastTransport = transport;
           for (let offset = 0; offset < payload.length;) {
@@ -473,6 +580,7 @@ export class CH32H417Device implements MultiRateDevice {
     );
     if (matches.length !== 1) throw new Error('Authorized H417 device disconnected or ambiguous');
     const transport = new H417Transport(matches[0]!);
+    transport.onTransferProgress = options.onTransferProgress;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let stopError: unknown,
       samples = 0n,
@@ -500,6 +608,7 @@ export class CH32H417Device implements MultiRateDevice {
         13,
         deviceChannelIndices(configuration, 'logic').reduce((mask, channel) => mask | (1 << channel), 0),
       );
+      await configureCompression(transport, caps, configuration);
       await transport.start(payload);
       let beating = false;
       heartbeat = setInterval(() => {
@@ -546,7 +655,14 @@ export class CH32H417Device implements MultiRateDevice {
         samples += BigInt(frame.payload.length);
         frames++;
       }
-      return { samples, frames, firstByte, lastByte, session: transport.session, transport: { ...transport.metrics } };
+      return {
+        samples,
+        frames,
+        firstByte,
+        lastByte,
+        session: transport.session,
+        transport: { ...transport.metrics },
+      };
     } finally {
       clearInterval(heartbeat);
       signal?.removeEventListener('abort', stop);
@@ -571,6 +687,7 @@ export class CH32H417Device implements MultiRateDevice {
     );
     if (matches.length !== 1) throw new Error('Authorized H417 device disconnected or ambiguous');
     const transport = new H417Transport(matches[0]!);
+    transport.onTransferProgress = context?.reportTransferProgress;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let stopError: unknown;
     const stop = () => {
@@ -604,6 +721,7 @@ export class CH32H417Device implements MultiRateDevice {
         13,
         deviceChannelIndices(config, 'logic').reduce((mask, channel) => mask | (1 << channel), 0),
       );
+      await configureCompression(transport, caps, config);
       await transport.start(payload);
       context?.signal?.throwIfAborted();
       let beating = false;

@@ -6,6 +6,11 @@ export type NumericCapability<T extends number | bigint = number> =
   | { readonly kind: 'range'; readonly min: T; readonly max: T; readonly step: T; readonly default: T };
 export interface DeviceCapabilities {
   readonly timebaseOnly?: boolean;
+  readonly analogTiming?: readonly {
+    readonly channel: number;
+    readonly sampleRate: number;
+    readonly outputBits: number;
+  }[];
   readonly sampleRate: NumericCapability;
   readonly sampleCount: NumericCapability<number | bigint>;
   readonly logicChannels: NumericCapability;
@@ -14,8 +19,14 @@ export interface DeviceCapabilities {
 export type DeviceOption = {
   readonly id: string;
   readonly name: string;
+  readonly description?: string;
 } & (
-  | { readonly kind: 'choice'; readonly values: readonly string[]; readonly default: string }
+  | {
+      readonly kind: 'choice';
+      readonly values: readonly string[];
+      readonly labels?: Readonly<Record<string, string>>;
+      readonly default: string;
+    }
   | {
       readonly kind: 'number';
       readonly min?: number;
@@ -72,6 +83,13 @@ export type AcquisitionDescription =
   | PackedLogicAcquisitionDescription
   | MultiRateAcquisitionDescription;
 export type DriverDiagnostics = Readonly<Record<string, number>>;
+export interface TransferProgress {
+  readonly receivedBytes: number;
+  readonly elapsedMs: number;
+  readonly bytesPerSecond: number;
+  readonly averageBytesPerSecond: number;
+  readonly complete: boolean;
+}
 
 export interface PackedLogicChunk {
   readonly format: 'packed-logic';
@@ -87,7 +105,10 @@ export interface AnalogTiming {
   readonly periodTicks: bigint;
   readonly firstTick: bigint;
   readonly uncertaintyTicks: number;
-  readonly bits: 10 | 12;
+  readonly bits: 8 | 9 | 10 | 11 | 12;
+  readonly nativeBits?: 10 | 12;
+  readonly conversionTicks?: bigint;
+  readonly decimation?: number;
   readonly referenceMv: number;
 }
 export interface AnalogStreamChunk {
@@ -112,6 +133,7 @@ export interface SampleSourceContext {
 
   readonly acquireBuffer?: () => Promise<ArrayBuffer>;
   readonly reportDiagnostics?: (diagnostics: DriverDiagnostics) => void;
+  readonly reportTransferProgress?: (progress: TransferProgress) => void;
 }
 export interface ManagedSampleSourceContext extends SampleSourceContext {
   readonly acquireBuffer: () => Promise<ArrayBuffer>;

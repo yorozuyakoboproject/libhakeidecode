@@ -1,4 +1,6 @@
 import { minSample, maxSample } from '../libhakei/sample-index.js';
+import { formatRate } from '../libhakei/units.js';
+import type { TransferProgress } from '../libhakei/device.js';
 import { scaleSamples } from '../libhakei/sample-index.js';
 import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import { deviceCapture, importCapture, captureMemory, type Capture, type StageTiming } from './capture.js';
@@ -101,6 +103,7 @@ export class AnalyzerApp {
   private captureAbort: AbortController | null = null;
   private captureStop: AbortController | null = null;
   private acquisitionMemory: BudgetSnapshot | null = null;
+  private transferProgress: TransferProgress | null = null;
   private importAbort: AbortController | null = null;
   private saveAbort: AbortController | null = null;
   private decodeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -605,6 +608,11 @@ export class AnalyzerApp {
     try {
       const capture = await deviceCapture(device, configuration, abort.signal, {
         stopSignal: stop.signal,
+        onTransferProgress: (progress) => {
+          if (token !== this.version) return;
+          this.transferProgress = progress;
+          this.renderTransferProgress();
+        },
         onProgress: (samples, memory) => {
           if (token !== this.version) return;
           this.acquisitionMemory = memory;
@@ -677,13 +685,17 @@ export class AnalyzerApp {
           ? { key: 'capture.reason.budget' }
           : error instanceof UIError
             ? error
-            : errorLabel(error),
+            : errorLabel(error, 'error.capture'),
         true,
       );
     }
   }
   setCapture(capture: Capture, cancel = true, live = false, viewport?: readonly [bigint, bigint]): void {
-    if (cancel) this.cancelTask(false);
+    if (cancel) {
+      this.cancelTask(false);
+      this.transferProgress = null;
+      this.renderTransferProgress();
+    }
     if (this.capture && this.capture !== capture) this.releaseCapture(this.capture);
     this.capture = capture;
     this.selectingDeviceChannels = !!capture.deviceChannels;
@@ -865,6 +877,8 @@ export class AnalyzerApp {
     if ('dispose' in capture.store && typeof capture.store.dispose === 'function') capture.store.dispose();
   }
   private clearCaptureView(): void {
+    this.transferProgress = null;
+    this.renderTransferProgress();
     this.capture = null;
     this.refreshProtocolMappings();
     this.renderer.clearCapture();
@@ -1368,8 +1382,7 @@ export class AnalyzerApp {
     delete element('capture-name').dataset.i18n;
     element('capture-name').textContent = capture.nameKey ? t(capture.nameKey) : capture.name;
     element('sample-count').textContent = numberLabel(capture.store.length);
-    element('rate-label').textContent =
-      numberLabel(capture.store.samplerate / 1e6, { maximumFractionDigits: 6 }) + ' MHz';
+    element('rate-label').textContent = formatRate(capture.store.samplerate);
     element('duration-label').textContent = timeLabel(Number(capture.store.length) / capture.store.samplerate);
     element('memory-status').textContent = t('status.memory', {
       memory: (captureMemory(capture).totalBytes / 1048576).toFixed(2),
@@ -1435,6 +1448,7 @@ export class AnalyzerApp {
     if (failed && this.state !== 'loading' && this.state !== 'decoding') this.setStatus('error', 'device.captureError');
   }
   private refreshLocale(): void {
+    this.renderTransferProgress();
     this.updateMemoryUsage();
     this.refreshDecoderUI();
     this.renderProtocolList();
@@ -1444,6 +1458,24 @@ export class AnalyzerApp {
     this.renderMessage();
     this.updateViewport();
     this.renderer.schedule();
+  }
+  private renderTransferProgress(): void {
+    const progress = this.transferProgress;
+    element('usb-transfer').hidden = !progress;
+    if (!progress) return;
+    const short = progress.complete && progress.elapsedMs < 200;
+    const key = progress.complete
+      ? short
+        ? 'capture.usbShortAverageRate'
+        : 'capture.usbAverageRate'
+      : 'capture.usbRate';
+    const hint = short ? 'capture.usbShortTransfer' : 'capture.usbRateHint';
+    const rate = progress.complete ? progress.averageBytesPerSecond : progress.bytesPerSecond;
+    element('usb-transfer').dataset.i18nAttrs = `title:${hint}`;
+    element('usb-transfer').title = t(hint);
+    element('usb-rate').textContent = `${(rate / 1_000_000).toFixed(2)} MB/s`;
+    element('usb-rate-label').dataset.i18n = key;
+    element('usb-rate-label').textContent = t(key);
   }
   private updateViewport(): void {
     element('waveform').parentElement!.classList.toggle('cursor-mode', this.renderer.cursorMode);

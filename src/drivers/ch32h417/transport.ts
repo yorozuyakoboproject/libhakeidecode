@@ -1,3 +1,5 @@
+import { ComponentError } from '../../components.js';
+import type { TransferProgress } from '../../libhakei/device.js';
 import {
   BLOCK_BYTES,
   Command,
@@ -23,7 +25,12 @@ export interface UsbDevice {
     interfaces: readonly {
       interfaceNumber: number;
       alternates: readonly {
-        endpoints: readonly { endpointNumber: number; direction: string; type: string; packetSize: number }[];
+        endpoints: readonly {
+          endpointNumber: number;
+          direction: string;
+          type: string;
+          packetSize: number;
+        }[];
       }[];
     }[];
   } | null;
@@ -32,6 +39,7 @@ export interface UsbDevice {
   close(): Promise<void>;
   claimInterface(value: number): Promise<void>;
   releaseInterface(value: number): Promise<void>;
+  clearHalt?(direction: 'in' | 'out', endpoint: number): Promise<void>;
   transferOut(endpoint: number, data: Uint8Array): Promise<{ status: string; bytesWritten?: number }>;
   transferIn(endpoint: number, length: number): Promise<{ status: string; data?: DataView }>;
 }
@@ -69,19 +77,44 @@ const errors = [
   'USB failure',
   'capture stopped',
   'input pins are occupied; change the channel selection or release the pins in the management page',
+  'compression processing deadline exceeded',
+  'input sequence error',
+  'invalid DMA block length',
 ];
 export function statusError(error: number, samples?: bigint): Error {
+  const category =
+    error === 3
+      ? 'captureOverflow'
+      : error === 6
+        ? 'usbTransfer'
+        : error === 9
+          ? 'encoding'
+          : error === 10
+            ? 'inputSequence'
+            : error === 11
+              ? 'dmaTransfer'
+              : undefined;
+  if (category) return new ComponentError(`driver.ch32h417.error.${category}`, { samples: samples?.toString() ?? '0' });
   const detail = samples === undefined ? '' : ` after ${samples.toString()} samples`;
   return new Error(`H417: ${errors[error] ?? `device error ${error}`}${detail}`);
 }
 export const USB_READ_DEPTH = 32;
 export const USB_READ_BYTES = 256 * 1024;
-const FRAMES_PER_READ = Math.ceil(USB_READ_BYTES / BLOCK_BYTES) + 1;
+const FRAMES_PER_READ = Math.ceil(USB_READ_BYTES / 512) + 1;
 export const USB_QUEUE_BLOCKS = 2048;
 export const TRANSPORT_WORKING_BYTES =
   USB_READ_BYTES * (USB_READ_DEPTH + 1) + MAX_FRAME_BYTES * (USB_QUEUE_BLOCKS + FRAMES_PER_READ + 6) + 1024;
 
 export class H417Transport {
+  onTransferProgress?: (progress: TransferProgress) => void;
+  private transfer?: {
+    started: number;
+    reportedAt: number;
+    reportedBytes: number;
+    bytes: number;
+    receivedAt: number;
+    timer?: ReturnType<typeof setInterval>;
+  };
   packet: 512 | 1024 = 1024;
   session = 0;
   active = false;
@@ -100,14 +133,66 @@ export class H417Transport {
   private ended = false;
   private discarding = false;
   private starting = false;
+  private strictRuns = false;
+  private lastReadCompleted = 0;
   private first = 0n;
   private analogFirst = [0n, 0n];
   private sequence = 0;
   private shutdown: Promise<void> | null = null;
-  private readonly counters = { reads: 0, receivedBytes: 0, parserMs: 0, queuePeak: 0, dataFrames: 0 };
+  private readonly counters = {
+    reads: 0,
+    receivedBytes: 0,
+    parserMs: 0,
+    queuePeak: 0,
+    dataFrames: 0,
+    codecRawBytes: 0,
+    codecWireBytes: 0,
+    codecCycles: 0,
+    codecMaxCycles: 0,
+    codecDecodeMs: 0,
+    codecMaxHoldMs: 0,
+    codecQueuePeak: 0,
+    codecFallbacks: 0,
+    usbReadMaxMs: 0,
+    usbReadMaxGapMs: 0,
+    parserStartDelayMaxMs: 0,
+  };
+  private parser?: FrameParser;
   constructor(readonly device: UsbDevice) {}
   get metrics(): Readonly<typeof this.counters> {
     return this.counters;
+  }
+  private reportTransfer(complete = false): void {
+    const transfer = this.transfer;
+    if (!transfer) return;
+    const now = complete && transfer.receivedAt ? transfer.receivedAt : performance.now();
+    const elapsedMs = now - transfer.started;
+    const interval = now - transfer.reportedAt;
+    const averageBytesPerSecond = elapsedMs > 0 ? (transfer.bytes * 1000) / elapsedMs : 0;
+    if (complete) {
+      clearInterval(transfer.timer);
+      this.transfer = undefined;
+    }
+    this.onTransferProgress?.({
+      receivedBytes: transfer.bytes,
+      elapsedMs,
+      bytesPerSecond: complete
+        ? averageBytesPerSecond
+        : interval > 0
+          ? ((transfer.bytes - transfer.reportedBytes) * 1000) / interval
+          : 0,
+      averageBytesPerSecond,
+      complete,
+    });
+    transfer.reportedAt = now;
+    transfer.reportedBytes = transfer.bytes;
+  }
+  private beginTransfer(): void {
+    if (!this.onTransferProgress) return;
+    const now = performance.now();
+    this.transfer = { started: now, reportedAt: now, reportedBytes: 0, bytes: 0, receivedAt: 0 };
+    this.transfer.timer = setInterval(() => this.reportTransfer(), 200);
+    this.reportTransfer();
   }
   async open(): Promise<void> {
     await this.device.open();
@@ -123,10 +208,16 @@ export class H417Transport {
       );
     this.packet = input.packetSize as 512 | 1024;
     await this.device.claimInterface(INTERFACE);
+    if (this.device.clearHalt) {
+      await this.device.clearHalt('out', EP_OUT);
+      await this.device.clearHalt('in', EP_IN);
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
     void this.readLoop().catch((error) => this.fail(error));
   }
   private fail(value: unknown): void {
     if (this.closed || this.error) return;
+    this.reportTransfer(true);
     this.error = value instanceof Error ? value : new Error(String(value));
     for (const pending of this.pending.values()) pending.reject(this.error);
     this.pending.clear();
@@ -138,6 +229,19 @@ export class H417Transport {
     this.fail(error);
   }
   private receive(frame: Frame): void {
+    if (frame.type === DATA && this.strictRuns && frame.codec?.encoding !== 2)
+      throw new ComponentError('driver.ch32h417.error.encoding');
+    if (frame.codec) {
+      const c = frame.codec;
+      this.counters.codecRawBytes += c.rawBytes;
+      this.counters.codecWireBytes += c.wireBytes;
+      this.counters.codecCycles += c.cycles;
+      this.counters.codecMaxCycles = Math.max(this.counters.codecMaxCycles, c.cycles);
+      this.counters.codecDecodeMs += c.decodeMs;
+      this.counters.codecMaxHoldMs = Math.max(this.counters.codecMaxHoldMs, c.holdMs);
+      this.counters.codecQueuePeak = Math.max(this.counters.codecQueuePeak, c.queuePeak);
+      this.counters.codecFallbacks += Number(c.encoding === 0);
+    }
     if (frame.type & RESPONSE) {
       const pending = this.pending.get(frame.requestId);
       if (!pending && !this.active && !this.starting) return;
@@ -163,7 +267,7 @@ export class H417Transport {
       this.counters.dataFrames++;
     } else if (frame.type === ANALOG) {
       const a = frame.analog!;
-      const stream = a.timing.bits === 10 ? 1 : 0;
+      const stream = a.pin ?? (a.timing.bits === 10 ? 1 : 0);
       const channels = (a.mask & 1 ? 1 : 0) + (a.mask & 2 ? 1 : 0);
       if (frame.firstSample !== this.analogFirst[stream] || frame.payload.length % (2 * channels))
         throw new Error('H417 analog stream discontinuity');
@@ -181,12 +285,14 @@ export class H417Transport {
       )
         throw new Error('Invalid H417 final sample count');
       this.ended = true;
+      this.reportTransfer(true);
       this.endWake?.();
       this.wake?.();
       this.wake = null;
     }
     if (!this.discarding) {
-      if (this.queue.length >= USB_QUEUE_BLOCKS + FRAMES_PER_READ) throw new Error('H417 host receive queue overflow');
+      if (this.queue.length >= USB_QUEUE_BLOCKS + FRAMES_PER_READ)
+        throw new ComponentError('driver.ch32h417.error.hostOverflow');
       this.queue.push(frame);
       this.counters.queuePeak = Math.max(this.counters.queuePeak, this.queue.length);
       this.wake?.();
@@ -195,12 +301,21 @@ export class H417Transport {
   }
   private async readLoop(): Promise<void> {
     const parser = new FrameParser(this.packet, (frame) => this.receive(frame));
+    this.parser = parser;
     const frameBytes = this.packet + BLOCK_BYTES,
       readBytes = USB_READ_BYTES - (USB_READ_BYTES % frameBytes);
     const read = () => {
       this.counters.reads++;
+      const started = performance.now();
       return this.device.transferIn(EP_IN, readBytes).then(
-        (value) => ({ value }),
+        (value) => {
+          const completed = performance.now();
+          if (this.transfer && value.status === 'ok' && value.data) {
+            this.transfer.bytes += value.data.byteLength;
+            this.transfer.receivedAt = completed;
+          }
+          return { value, started, completed };
+        },
         (error) => ({ error }),
       );
     };
@@ -212,6 +327,19 @@ export class H417Transport {
       if (result.value.status !== 'ok' || !result.value.data?.byteLength)
         throw new Error('H417 bulk IN failed or stalled');
       const data = result.value.data;
+      if (this.active || this.starting) {
+        this.counters.usbReadMaxMs = Math.max(this.counters.usbReadMaxMs, result.completed - result.started);
+        if (this.lastReadCompleted)
+          this.counters.usbReadMaxGapMs = Math.max(
+            this.counters.usbReadMaxGapMs,
+            result.completed - this.lastReadCompleted,
+          );
+        this.counters.parserStartDelayMaxMs = Math.max(
+          this.counters.parserStartDelayMaxMs,
+          performance.now() - result.completed,
+        );
+        this.lastReadCompleted = result.completed;
+      } else this.lastReadCompleted = 0;
       this.counters.receivedBytes += data.byteLength;
       inflight.push(read());
       const parseStarted = performance.now();
@@ -237,16 +365,10 @@ export class H417Transport {
       });
       void reply.catch(() => {});
       try {
-        const frame = await deadline(
-          (async () => {
-            const sent = await this.device.transferOut(EP_OUT, bytes);
-            if (sent.status !== 'ok' || sent.bytesWritten !== bytes.length)
-              throw new Error('H417 bulk OUT failed or stalled');
-            return await reply;
-          })(),
-          2000,
-          'H417 command timeout',
-        );
+        const sent = await deadline(this.device.transferOut(EP_OUT, bytes), 2000, `H417 command ${type} OUT timeout`);
+        if (sent.status !== 'ok' || sent.bytesWritten !== bytes.length)
+          throw new Error('H417 bulk OUT failed or stalled');
+        const frame = await deadline(reply, 2000, `H417 command ${type} reply timeout`);
         const status = readStatus(frame.payload);
         if (status.error) throw statusError(status.error);
         return frame;
@@ -263,6 +385,7 @@ export class H417Transport {
   async start(payload: Uint8Array): Promise<void> {
     await this.command(Command.config, payload);
     this.starting = true;
+    this.beginTransfer();
     try {
       const frame = await this.command(Command.start);
       if (!frame.session || (this.session && this.session !== frame.session))
@@ -272,6 +395,19 @@ export class H417Transport {
     } finally {
       this.starting = false;
     }
+  }
+  async setCompression(mode: number, transform = 0): Promise<void> {
+    if (this.active || !this.parser) throw new Error('Set compression before capture');
+    const until = performance.now() + 1000;
+    while (true) {
+      const status = readStatus((await this.command(Command.status)).payload);
+      if (!status.state) break;
+      if (status.state !== 2 || performance.now() >= until) throw new Error('H417 capture resources are busy');
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    await this.command(Command.codec, new Uint8Array([mode, transform, 0, 0]));
+    this.strictRuns = this.parser.appProtocol >= 22 && mode === 4;
+    this.parser.codecEnabled = mode !== 0;
   }
   async next(): Promise<Frame | null> {
     while (!this.queue.length && !this.error && !this.closed && !this.ended)
@@ -313,6 +449,7 @@ export class H417Transport {
   }
   async close(): Promise<void> {
     if (this.closed) return;
+    this.reportTransfer(true);
     await this.serial;
     if (this.closed) return;
     this.closed = true;

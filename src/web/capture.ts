@@ -6,7 +6,7 @@ import { UIError, type MessageKey } from './i18n.js';
 import type { WorkspaceSettings } from './workspace.js';
 import type { Pipeline32Backend } from './transpose32-pipeline.js';
 import type { AnalogStore } from './data/analogStore.js';
-import type { DeviceConfiguration, DriverDiagnostics } from '../libhakei/device.js';
+import type { DeviceConfiguration, DriverDiagnostics, TransferProgress } from '../libhakei/device.js';
 import { deviceChannelIndices } from '../libhakei/device.js';
 
 import { MemoryBudget, DEFAULT_CAPTURE_BUDGET_BYTES, type BudgetSnapshot } from './memory.js';
@@ -96,6 +96,7 @@ export interface CaptureOptions {
   buffers?: 2 | 3;
   chunkSamples?: number;
   onProgress?: (samples: bigint, memory: BudgetSnapshot) => void;
+  onTransferProgress?: (progress: TransferProgress) => void;
 
   onCapture?: (capture: Capture) => void;
   onSharedSource?: (source: SharedCaptureConsumerSource) => void;
@@ -185,6 +186,7 @@ export async function deviceCapture(
       sourceSignal,
       plan.description.layout !== 'packed-logic',
     );
+    source.onTransferProgress = options.onTransferProgress;
     if (source.sharedCapture) {
       sharedSource = source;
       options.onSharedSource?.(source);

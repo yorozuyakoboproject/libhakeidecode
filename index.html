@@ -23,6 +23,9 @@
           <span><b id="sample-count">—</b><span data-i18n="capture.samples">采样点</span></span
           ><span><b id="rate-label">—</b><span data-i18n="capture.rate">采样率</span></span
           ><span><b id="duration-label">—</b><span data-i18n="capture.duration">总时长</span></span>
+          <span id="usb-transfer" hidden data-i18n-attrs="title:capture.usbRateHint"
+            ><b id="usb-rate">—</b><span id="usb-rate-label" data-i18n="capture.usbRate">USB 实时速率</span></span
+          >
         </div>
       </div>
       <div class="top-nav"><span class="nav-active" data-i18n="nav.workbench">工作台</span></div>
@@ -66,10 +69,7 @@
               <p id="device-connection-status" class="hint" role="status"></p>
             </div>
             <div id="device-sampling"></div>
-            <details id="device-settings" class="advanced">
-              <summary data-i18n="device.settings">设备设置</summary>
-              <div id="device-options"></div>
-            </details>
+            <div id="device-options"></div>
             <button id="run-capture" type="submit" class="button primary full" data-i18n="device.run">
               ▶ 开始采集
             </button>

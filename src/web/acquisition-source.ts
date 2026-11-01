@@ -1,6 +1,7 @@
+import { errorLabel } from './i18n.js';
 import { restoreComponentError } from '../components.js';
 import { deviceChannelIndices } from '../libhakei/device.js';
-import type { AcquisitionChunk, DeviceConfiguration, DriverDiagnostics } from '../libhakei/device.js';
+import type { AcquisitionChunk, DeviceConfiguration, DriverDiagnostics, TransferProgress } from '../libhakei/device.js';
 import type { WorkerAcquisitionDescription } from './device-protocol.js';
 import type { AcquisitionResponse, AcquisitionRequest } from './acquisition-worker.js';
 import { DEFAULT_SHARED_CHUNK_BYTES } from './shared-chunks.js';
@@ -46,6 +47,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   private localDone: LocalCaptureResult | null = null;
   readonly captureStore?: WorkerCaptureStore;
   onLocalProgress: (() => void) | null = null;
+  onTransferProgress?: (progress: TransferProgress) => void;
   readonly capacity: number;
   readonly channelSelection: { driverId: string; logic: readonly number[]; analog: readonly number[] };
   maxQueued = 0;
@@ -87,7 +89,9 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
     }
     this.worker.onmessage = ({ data }: MessageEvent<AcquisitionResponse>) => {
       if ('driverDiagnostics' in data && data.driverDiagnostics) this.driverSnapshot = data.driverDiagnostics;
-      if (data.type === 'chunk') {
+      if (data.type === 'transfer-progress') {
+        this.onTransferProgress?.(data.progress);
+      } else if (data.type === 'chunk') {
         this.queue.push(data);
         this.maxQueued = Math.max(this.maxQueued, this.queue.length);
         if (this.queue.length > this.capacity) {
@@ -183,7 +187,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
     return this.error ?? undefined;
   }
   get errorMessage(): string | undefined {
-    return this.error?.message;
+    return this.error ? errorLabel(this.error, 'error.capture') : undefined;
   }
   get localLengthValue(): bigint {
     return this.localLength;

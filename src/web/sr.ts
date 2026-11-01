@@ -282,12 +282,24 @@ export async function importSR(
             ...rawTiming,
             periodTicks: sampleIndex(rawTiming.periodTicks),
             firstTick: sampleIndex(rawTiming.firstTick),
+            ...(rawTiming.conversionTicks === undefined
+              ? {}
+              : { conversionTicks: sampleIndex(rawTiming.conversionTicks) }),
           };
           if (
             !Number.isSafeInteger(timing.clockHz) ||
             timing.clockHz < 1 ||
             timing.periodTicks < 1n ||
-            ![10, 12].includes(timing.bits) ||
+            (timing.nativeBits !== undefined &&
+              ((timing.nativeBits !== 10 && timing.nativeBits !== 12) || timing.bits > timing.nativeBits)) ||
+            (timing.conversionTicks !== undefined &&
+              (timing.conversionTicks < 1n ||
+                !Number.isInteger(timing.decimation) ||
+                timing.decimation! < 1 ||
+                timing.decimation! > 32 ||
+                timing.decimation! & (timing.decimation! - 1) ||
+                timing.periodTicks !== timing.conversionTicks * BigInt(timing.decimation!))) ||
+            ![8, 9, 10, 11, 12].includes(timing.bits) ||
             !Number.isInteger(timing.referenceMv) ||
             timing.referenceMv < 1 ||
             timing.referenceMv > 5000 ||
