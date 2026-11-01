@@ -47,6 +47,24 @@ export function scaleSamples(span: bigint, factor: number): bigint {
   const [n, d] = numberFraction(factor);
   return (span * n) / d;
 }
+export function rescaleSample(
+  value: SampleInput,
+  fromRate: number,
+  toRate: number,
+  rounding: 'floor' | 'ceil' = 'floor',
+): bigint {
+  if (!Number.isSafeInteger(fromRate) || fromRate <= 0 || !Number.isSafeInteger(toRate) || toRate <= 0)
+    throw new RangeError('sample rates must be positive integers');
+  const sample = samplePosition(value),
+    numerator = sample * BigInt(toRate),
+    denominator = BigInt(fromRate),
+    quotient = numerator / denominator,
+    remainder = numerator % denominator;
+  if (!remainder) return quotient;
+  if (rounding === 'ceil' && numerator > 0n) return quotient + 1n;
+  if (rounding === 'floor' && numerator < 0n) return quotient - 1n;
+  return quotient;
+}
 export function sampleRatio(numerator: bigint, denominator: bigint): number {
   if (!denominator) return Number(numerator) / 0;
   const sign = numerator < 0n !== denominator < 0n ? -1 : 1;

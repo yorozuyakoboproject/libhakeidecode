@@ -1,4 +1,4 @@
-import { minSample, maxSample, localNumber } from '../libhakei/sample-index.js';
+import { minSample, maxSample, localNumber, rescaleSample } from '../libhakei/sample-index.js';
 import type { AnalogStore, AnalogColumnView } from './data/analogStore.js';
 import { channelStoreRange, packStoreRange } from './data/channel-range.js';
 import type { PlanarSampleStore } from './data/planarStore.js';
@@ -137,11 +137,12 @@ export class WorkerStoreServer {
     if (request.type === 'probe-analog') {
       const sample = request.sample,
         inGap = capture.store.gaps().some((gap) => sample >= gap.startSample && sample < gap.endSample),
-        values = (capture.analogChannels ?? []).map(({ store }) =>
-          sample >= 0n && sample < store.length && !inGap && Number.isFinite(store.sampleAt(sample))
-            ? store.sampleAt(sample)
-            : null,
-        );
+        values = (capture.analogChannels ?? []).map(({ store }) => {
+          const analogSample = rescaleSample(sample, capture.store.samplerate, store.samplerate);
+          if (analogSample < 0n || analogSample >= store.length || inGap) return null;
+          const value = store.sampleAt(analogSample);
+          return Number.isFinite(value) ? value : null;
+        });
       this.port!.postMessage({ type: 'analog-probe', id: request.id, sample, values } satisfies StoreResponse);
       return;
     }

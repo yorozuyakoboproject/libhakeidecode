@@ -8,6 +8,7 @@ import {
   compareSamples,
   scaleSamples,
   sampleRatio,
+  rescaleSample,
   type SampleInput,
 } from '../libhakei/sample-index.js';
 import type { DecoderId } from './protocol.js';
@@ -776,17 +777,19 @@ export class WaveformRenderer {
           })
         | undefined;
       if (!analog?.prepareView) continue;
-      const samples = this.sampleRange(analog.length, bins, ANALOG_LINE_MIN_PIXELS);
+      const samples = this.analogSampleRange(analog, bins, ANALOG_LINE_MIN_PIXELS);
       if (samples)
         tasks.push(analog.prepareView(samples.start, samples.end, samples.count, this.analogSettings[channel]));
       else {
-        const availableEnd = minSample(analog.length, end);
-        if (availableEnd > start)
+        const analogStart = this.timelineToAnalogSample(analog, start),
+          analogEnd = this.timelineToAnalogSample(analog, end, 'ceil'),
+          availableEnd = minSample(analog.length, analogEnd);
+        if (availableEnd > analogStart)
           tasks.push(
             analog.prepareView(
-              start,
+              analogStart,
               availableEnd,
-              this.availableBins(availableEnd, bins),
+              this.availableBins(availableEnd, bins, analogStart, analogEnd),
               this.analogSettings[channel],
             ),
           );
@@ -1132,7 +1135,7 @@ export class WaveformRenderer {
         ? store.query(channel, this.start, this.end, plotWidth)
         : store.query(channel, this.start, availableEnd, this.availableBins(availableEnd, plotWidth));
     const exactEdges = this.end - this.start < plotWidth ? store.edges(channel, this.start, this.end) : undefined;
-    const samples = this.sampleRange(store.length, plotWidth);
+    const samples = this.digitalSampleRange(store.length, plotWidth);
     this.recordQuery?.(performance.now() - queryStarted);
     this.drawDigital(ctx, view, highY, lowY, color, exactEdges);
     if (samples) this.drawDigitalPoints(ctx, view, highY, lowY, color);
@@ -1193,7 +1196,7 @@ export class WaveformRenderer {
     if (settings.conversion !== 'none' && settings.traces === 'converted') ctx.globalAlpha = 0;
     ctx.fillStyle = color;
     ctx.strokeStyle = color;
-    const samples = this.sampleRange(item.store.length, plotWidth, ANALOG_LINE_MIN_PIXELS);
+    const samples = this.analogSampleRange(item.store, plotWidth, ANALOG_LINE_MIN_PIXELS);
     if (samples) {
       const points: AnalogColumnView = item.store.query(samples.start, samples.end, samples.count);
       prepared = points;
@@ -1202,7 +1205,7 @@ export class WaveformRenderer {
       ctx.beginPath();
       let lastY = 0;
       for (let i = 0; i < points.bins; i++) {
-        const x = this.xAtSample(points.startSample + BigInt(i)),
+        const x = this.xAtAnalogSample(item.store, points.startSample + BigInt(i)),
           sampleY = pointY(points.low[i]!);
         if (i) ctx.lineTo(x, sampleY);
         else {
@@ -1211,30 +1214,37 @@ export class WaveformRenderer {
         }
         lastY = sampleY;
       }
-      if (samples.end === this.end) ctx.lineTo(this.width - 16, lastY);
+      if (points.endSample >= this.timelineToAnalogSample(item.store, this.end, 'ceil'))
+        ctx.lineTo(this.width - 16, lastY);
       ctx.stroke();
-      if (plotWidth / Number(this.end - this.start) >= SAMPLE_POINT_GAP) {
+      if (this.analogPointsVisible(samples, plotWidth)) {
         ctx.beginPath();
         for (let i = 0; i < points.bins; i++) {
-          const x = this.xAtSample(points.startSample + BigInt(i)),
+          const x = this.xAtAnalogSample(item.store, points.startSample + BigInt(i)),
             sampleY = pointY(points.low[i]!);
           ctx.moveTo(x + SAMPLE_POINT_RADIUS, sampleY);
           ctx.arc(x, sampleY, SAMPLE_POINT_RADIUS, 0, Math.PI * 2);
         }
         ctx.fill();
       }
-    } else if (this.start < minSample(item.store.length, this.end)) {
-      const availableEnd = minSample(item.store.length, this.end);
+    } else {
+      const analogStart = this.timelineToAnalogSample(item.store, this.start),
+        analogEnd = this.timelineToAnalogSample(item.store, this.end, 'ceil'),
+        availableEnd = minSample(item.store.length, analogEnd);
+      if (availableEnd <= analogStart) {
+        ctx.restore();
+        return;
+      }
       const view: AnalogColumnView = item.store.query(
-        this.start,
+        analogStart,
         availableEnd,
-        this.availableBins(availableEnd, plotWidth),
+        this.availableBins(availableEnd, plotWidth, analogStart, analogEnd),
       );
       prepared = view;
       this.recordQuery?.(performance.now() - queryStarted);
       const viewSpan = view.endSample - view.startSample;
       const xAt = (index: number): number =>
-        this.xAtSample(view.startSample + (viewSpan * BigInt(index)) / BigInt(view.bins));
+        this.xAtAnalogSample(item.store, view.startSample + (viewSpan * BigInt(index)) / BigInt(view.bins));
       let first = 0,
         previousLow = 0,
         previousHigh = 0;
@@ -1260,9 +1270,10 @@ export class WaveformRenderer {
         both = settings.traces === 'both',
         highY = both ? y - 2 + height + 4 : y + 3,
         lowY = both ? highY + 16 : y - 2 + height - 4;
-      this.drawDigital(ctx, logic, highY, lowY, color, logic.edges);
-      if (samples && plotWidth / Number(this.end - this.start) >= SAMPLE_POINT_GAP)
-        this.drawDigitalPoints(ctx, logic, highY, lowY, color);
+      const toX = (sample: bigint): number => this.xAtAnalogSample(item.store, sample);
+      this.drawDigital(ctx, logic, highY, lowY, color, logic.edges, toX);
+      if (samples && this.analogPointsVisible(samples, plotWidth))
+        this.drawDigitalPoints(ctx, logic, highY, lowY, color, toX);
     }
   }
   private drawDigital(
@@ -1272,14 +1283,14 @@ export class WaveformRenderer {
     lowY: number,
     color: string,
     exactEdges?: bigint[],
+    toX: (sample: bigint) => number = (sample) => this.xAtSample(sample),
   ): void {
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
     ctx.lineWidth = 1;
     ctx.beginPath();
     const viewSpan = view.endSample - view.startSample;
-    const xAt = (index: number): number =>
-      this.xAtSample(view.startSample + (viewSpan * BigInt(index)) / BigInt(view.bins));
+    const xAt = (index: number): number => toX(view.startSample + (viewSpan * BigInt(index)) / BigInt(view.bins));
     for (const high of [true, false]) {
       const y = high ? highY : lowY;
       let first = -1;
@@ -1295,7 +1306,7 @@ export class WaveformRenderer {
     }
     if (exactEdges) {
       for (const sample of exactEdges) {
-        const x = Math.round(this.xAtSample(sample)) + 0.5;
+        const x = Math.round(toX(sample)) + 0.5;
         if (x >= this.gutter && x <= this.width - 16) {
           ctx.moveTo(x, highY);
           ctx.lineTo(x, lowY);
@@ -1321,21 +1332,22 @@ export class WaveformRenderer {
     highY: number,
     lowY: number,
     color: string,
+    toX: (sample: bigint) => number = (sample) => this.xAtSample(sample),
   ): void {
     if (!view.points?.length) return;
     ctx.fillStyle = color;
     ctx.beginPath();
     for (let i = 0; i < view.points.length; i++) {
       const sample = view.startSample + BigInt(i);
-      if (sample < this.start || sample >= this.end) continue;
-      const x = this.xAtSample(sample),
+      const x = toX(sample),
         y = view.points[i] ? highY : lowY;
+      if (x < this.gutter || x > this.width - 16) continue;
       ctx.moveTo(x + SAMPLE_POINT_RADIUS, y);
       ctx.arc(x, y, SAMPLE_POINT_RADIUS, 0, Math.PI * 2);
     }
     ctx.fill();
   }
-  private sampleRange(
+  private digitalSampleRange(
     length: bigint,
     plotWidth: number,
     gap = SAMPLE_POINT_GAP,
@@ -1346,10 +1358,36 @@ export class WaveformRenderer {
     if (end <= start || this.end - this.start > limit) return null;
     return { start, end, count: Number(end - start) };
   }
-  private availableBins(availableEnd: bigint, plotWidth: number): number {
-    const span = this.end - this.start;
-    if (span <= 0n || availableEnd <= this.start) return 1;
-    return Math.max(1, Number((BigInt(plotWidth) * (availableEnd - this.start)) / span));
+  private analogSampleRange(
+    store: AnalogStore,
+    plotWidth: number,
+    gap = SAMPLE_POINT_GAP,
+  ): { start: bigint; end: bigint; count: number } | null {
+    const start = this.timelineToAnalogSample(store, this.start),
+      end = minSample(store.length, this.timelineToAnalogSample(store, this.end, 'ceil')),
+      limit = BigInt(Math.floor(plotWidth / gap));
+    if (end <= start || end - start > limit) return null;
+    return { start, end, count: Number(end - start) };
+  }
+  private analogPointsVisible(samples: { start: bigint; end: bigint }, plotWidth: number): boolean {
+    return plotWidth / Number(maxSample(1n, samples.end - samples.start)) >= SAMPLE_POINT_GAP;
+  }
+  private timelineToAnalogSample(store: AnalogStore, sample: bigint, rounding: 'floor' | 'ceil' = 'floor') {
+    return rescaleSample(sample, this.capture!.store.samplerate, store.samplerate, rounding);
+  }
+  private xAtAnalogSample(store: AnalogStore, sample: bigint): number {
+    const timelineRate = BigInt(this.capture!.store.samplerate),
+      analogRate = BigInt(store.samplerate);
+    return (
+      this.gutter +
+      sampleRatio(sample * timelineRate - this.start * analogRate, (this.end - this.start) * analogRate) *
+        Math.max(1, this.width - this.gutter - 16)
+    );
+  }
+  private availableBins(availableEnd: bigint, plotWidth: number, start = this.start, end = this.end): number {
+    const span = end - start;
+    if (span <= 0n || availableEnd <= start) return 1;
+    return Math.max(1, Number((BigInt(plotWidth) * (availableEnd - start)) / span));
   }
   private drawCursor(ctx: CanvasRenderingContext2D, height: number, label: boolean): void {
     if (!this.capture) return;

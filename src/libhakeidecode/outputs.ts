@@ -62,13 +62,14 @@ export class OutputStreams {
     if (stream.type === OUTPUT_ANN) {
       if (
         !Array.isArray(data) ||
-        data.length !== 2 ||
+        (data.length !== 2 && data.length !== 3) ||
         !Number.isInteger(data[0]) ||
         !descriptor.annotations?.[data[0]] ||
         !Array.isArray(data[1]) ||
-        data[1].some((v) => typeof v !== 'string')
+        data[1].some((v) => typeof v !== 'string') ||
+        (data.length === 3 && (typeof data[2] !== 'number' || !Number.isFinite(data[2])))
       ) {
-        throw new DecodeError('Annotation must be [declaredClassIndex, [text, ...]].');
+        throw new DecodeError('Annotation must be [declaredClassIndex, [text, ...], optionalValue].');
       }
     }
     if (stream.type === OUTPUT_BINARY) {

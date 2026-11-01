@@ -1,5 +1,6 @@
 import type { AcquisitionChunk, DeviceConfiguration, AnalogTiming } from '../libhakei/device.js';
 import { deviceChannelIndices } from '../libhakei/device.js';
+import { createSampleChunk } from '../libhakei/index.js';
 import { formatRate } from '../libhakei/units.js';
 import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore } from './data/rleStore.js';
@@ -14,6 +15,7 @@ export class MultiRateCapture {
   readonly logicChannelCount: number;
   readonly analogChannels: { name: string; store: AnalogStore }[];
   private readonly selected: readonly number[];
+  private padding: Uint8Array | null = null;
   constructor(
     private readonly config: DeviceConfiguration,
     private readonly budget: MemoryBudget,
@@ -34,7 +36,7 @@ export class MultiRateCapture {
     this.selected = deviceChannelIndices(config, 'analog');
     this.analogChannels = this.selected.map((i) => ({
       name: `PC${i + 1}`,
-      store: new PendingAnalogStore(config.sampleRate, budget),
+      store: new PendingAnalogStore(config.analogSampleRate ?? config.sampleRate, budget),
     }));
   }
   private timeline(length: bigint): RleSampleStore {
@@ -46,7 +48,27 @@ export class MultiRateCapture {
     });
   }
   append(chunk: AcquisitionChunk): void {
-    if (!('format' in chunk)) throw new Error('Expected independently timed data');
+    if (!('format' in chunk)) {
+      const sample = createSampleChunk(chunk);
+      if (!(this.store instanceof PlanarSampleStore))
+        throw new Error('Digital samples cannot follow a timeline-only stream');
+      if (
+        sample.sampleRate !== this.config.sampleRate ||
+        sample.startSample !== this.store.length ||
+        Object.keys(sample.channels).join('\0') !== this.labels.join('\0') ||
+        Object.keys(sample.analogChannels).length ||
+        sample.endSample > BigInt(this.config.sampleCount)
+      )
+        throw new Error('Invalid digital stream');
+      if (!this.padding || this.padding.length < sample.length) this.padding = new Uint8Array(sample.length);
+      const empty = this.padding.subarray(0, sample.length);
+      this.store.appendChannels(
+        Array.from({ length: this.store.channelCount }, (_, index) =>
+          index < this.labels.length ? sample.channels[this.labels[index]!]! : empty,
+        ),
+      );
+      return;
+    }
     if (chunk.format === 'timeline') {
       if (chunk.length < this.store.length || chunk.length > BigInt(this.config.sampleCount))
         throw new Error('Invalid acquisition duration');
@@ -69,6 +91,18 @@ export class MultiRateCapture {
     const index = this.selected.indexOf(chunk.channel),
       channel = this.analogChannels[index];
     if (!channel) throw new Error('Unexpected analog channel');
+    if (chunk.timing.direct) {
+      const store =
+        channel.store instanceof AnalogSampleStore && !(channel.store instanceof PendingAnalogStore)
+          ? channel.store
+          : new AnalogSampleStore(Number(chunk.timing.clockHz), this.budget);
+      channel.store = store;
+      channel.name = `A${chunk.channel}`;
+      if (store.samplerate !== Number(chunk.timing.clockHz) || chunk.startSample !== store.length)
+        throw new Error('Direct analog sample rate or continuity changed');
+      store.appendValidated(chunk.data);
+      return;
+    }
     if (!(channel.store instanceof TimedAnalogStore)) {
       channel.store = new TimedAnalogStore(
         new AnalogSampleStore(chunk.timing.clockHz / Number(chunk.timing.periodTicks), this.budget),

@@ -12,29 +12,37 @@ export interface DeviceCapabilities {
     readonly outputBits: number;
   }[];
   readonly sampleRate: NumericCapability;
+  readonly analogSampleRate?: NumericCapability;
   readonly sampleCount: NumericCapability<number | bigint>;
   readonly logicChannels: NumericCapability;
   readonly analogChannels: NumericCapability;
 }
-export type DeviceOption = {
+type DeviceOptionBase = {
   readonly id: string;
   readonly name: string;
   readonly description?: string;
-} & (
-  | {
-      readonly kind: 'choice';
-      readonly values: readonly string[];
-      readonly labels?: Readonly<Record<string, string>>;
-      readonly default: string;
-    }
-  | {
-      readonly kind: 'number';
-      readonly min?: number;
-      readonly max?: number;
-      readonly step?: number;
-      readonly default: number;
-    }
-);
+  readonly hidden?: boolean;
+};
+export type DeviceOption = DeviceOptionBase &
+  (
+    | {
+        readonly kind: 'choice';
+        readonly values: readonly string[];
+        readonly labels?: Readonly<Record<string, string>>;
+        readonly default: string;
+      }
+    | {
+        readonly kind: 'number';
+        readonly min?: number;
+        readonly max?: number;
+        readonly step?: number;
+        readonly default: number;
+      }
+    | {
+        readonly kind: 'text';
+        readonly default: string;
+      }
+  );
 export interface DeviceDescriptor {
   readonly analogInputs?: readonly { readonly index: number; readonly name: string }[];
   readonly id: string;
@@ -44,6 +52,7 @@ export interface DeviceDescriptor {
 }
 export interface DeviceConfiguration {
   readonly sampleRate: number;
+  readonly analogSampleRate?: number;
   readonly sampleCount: number | bigint;
   readonly logicChannels: number;
   readonly analogChannels: number;
@@ -101,6 +110,7 @@ export interface PackedLogicChunk {
   readonly data: Uint8Array;
 }
 export interface AnalogTiming {
+  readonly direct?: true;
   readonly clockHz: number;
   readonly periodTicks: bigint;
   readonly firstTick: bigint;
@@ -220,6 +230,7 @@ export function defaultDeviceConfiguration(descriptor: DeviceDescriptor): Device
   const caps = descriptor.capabilities;
   return {
     sampleRate: caps.sampleRate.default,
+    ...(caps.analogSampleRate ? { analogSampleRate: Number(caps.analogSampleRate.default) } : {}),
     sampleCount: caps.sampleCount.default,
     logicChannels: caps.logicChannels.default,
     analogChannels: caps.analogChannels.default,
@@ -227,15 +238,17 @@ export function defaultDeviceConfiguration(descriptor: DeviceDescriptor): Device
   };
 }
 function validDeviceOption(option: DeviceOption, value: unknown): boolean {
-  return option.kind === 'choice'
-    ? typeof value === 'string' && option.values.includes(value)
-    : typeof value === 'number' &&
-        Number.isFinite(value) &&
-        (option.min === undefined || value >= option.min) &&
-        (option.max === undefined || value <= option.max) &&
-        (option.step === undefined ||
-          Math.abs((value - (option.min ?? 0)) / option.step - Math.round((value - (option.min ?? 0)) / option.step)) <
-            1e-8);
+  if (option.kind === 'text') return typeof value === 'string';
+  if (option.kind === 'choice') return typeof value === 'string' && option.values.includes(value);
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    (option.min === undefined || value >= option.min) &&
+    (option.max === undefined || value <= option.max) &&
+    (option.step === undefined ||
+      Math.abs((value - (option.min ?? 0)) / option.step - Math.round((value - (option.min ?? 0)) / option.step)) <
+        1e-8)
+  );
 }
 export function resolveDeviceConfiguration(
   device: SampleDevice,
@@ -256,6 +269,14 @@ export function resolveDeviceConfiguration(
     adjusted.sampleRate = supportsNumericValue(capabilities.sampleRate, configuration.sampleRate)
       ? configuration.sampleRate
       : capabilities.sampleRate.default;
+    adjusted.analogSampleRate = capabilities.analogSampleRate
+      ? supportsNumericValue(
+          capabilities.analogSampleRate,
+          configuration.analogSampleRate ?? capabilities.analogSampleRate.default,
+        )
+        ? Number(configuration.analogSampleRate ?? capabilities.analogSampleRate.default)
+        : Number(capabilities.analogSampleRate.default)
+      : undefined;
     adjusted.sampleCount = supportsNumericValue(capabilities.sampleCount, configuration.sampleCount)
       ? configuration.sampleCount
       : capabilities.sampleCount.default;
@@ -271,6 +292,7 @@ export function resolveDeviceConfiguration(
         : capabilities.analogChannels.default;
     if (
       adjusted.sampleRate === configuration.sampleRate &&
+      adjusted.analogSampleRate === configuration.analogSampleRate &&
       adjusted.sampleCount === configuration.sampleCount &&
       adjusted.logicChannels === configuration.logicChannels &&
       adjusted.analogChannels === configuration.analogChannels
@@ -309,6 +331,8 @@ export function validateDeviceConfiguration(device: SampleDevice, configuration:
   for (const key of ['sampleRate', 'sampleCount', 'logicChannels', 'analogChannels'] as const) {
     validateNumericValue(caps[key], configuration[key], key);
   }
+  if (caps.analogSampleRate && configuration.analogSampleRate !== undefined)
+    validateNumericValue(caps.analogSampleRate, configuration.analogSampleRate, 'analogSampleRate');
   for (const key of Object.keys(configuration.options)) {
     if (!device.descriptor.options.some((option) => option.id === key))
       throw new RangeError(`Unknown device option: ${key}`);

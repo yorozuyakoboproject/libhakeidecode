@@ -272,6 +272,34 @@ export async function importSR(
             continue;
           }
           if (
+            description &&
+            description.direct === true &&
+            typeof description.name === 'string' &&
+            Number.isSafeInteger(description.samplerate) &&
+            description.samplerate > 0 &&
+            Array.isArray(description.chunks) &&
+            description.chunks.length
+          ) {
+            const analog = new AnalogSampleStore(description.samplerate);
+            for (let index = 0; index < description.chunks.length; ++index) {
+              const name = `hakei-analog-${channel}-${index + 1}.f32`,
+                member = members.get(name);
+              if (
+                description.chunks[index] !== name ||
+                !member ||
+                member.size < 4 ||
+                member.size > 65536 * 4 ||
+                member.size % 4
+              )
+                throw new Error('Invalid direct analog stream');
+              analog.append(floatValues(await member.read(signal)));
+            }
+            if (analog.length !== sampleIndex(description.nativeLength))
+              throw new Error('Incomplete direct analog stream');
+            capture.analogChannels.push({ name: description.name.slice(0, 160), store: analog });
+            continue;
+          }
+          if (
             !rawTiming ||
             typeof description.name !== 'string' ||
             !Array.isArray(description.chunks) ||
@@ -396,13 +424,20 @@ export async function serializeSR(
     throw new Error('Invalid channel count');
   if (store.length < 1) throw new Error('Invalid sample length');
   const multiRate = analogChannels.some(
-    (channel) => channel.store instanceof TimedAnalogStore || channel.store instanceof PendingAnalogStore,
+    (channel) =>
+      channel.store instanceof TimedAnalogStore ||
+      channel.store instanceof PendingAnalogStore ||
+      channel.store.samplerate !== store.samplerate,
   );
   for (const channel of analogChannels)
     if (
-      (!multiRate && channel.store.length !== store.length) ||
-      channel.store.samplerate !== store.samplerate ||
-      (multiRate && !(channel.store instanceof TimedAnalogStore) && !(channel.store instanceof PendingAnalogStore))
+      multiRate
+        ? !(
+            channel.store instanceof TimedAnalogStore ||
+            channel.store instanceof PendingAnalogStore ||
+            (Number.isSafeInteger(channel.store.samplerate) && channel.store.samplerate > 0)
+          )
+        : channel.store.length !== store.length || channel.store.samplerate !== store.samplerate
     )
       throw new Error('Inconsistent analog timeline');
   if (workspace) parseWorkspace(workspace, count, store.length, analogChannels.length);
@@ -453,20 +488,36 @@ export async function serializeSR(
           ...(multiRate
             ? {
                 referenceLength: store.length,
-                analogChannels: analogChannels.map((channel) => {
+                analogChannels: analogChannels.map((channel, channelIndex) => {
                   const timed = channel.store;
                   if (timed instanceof PendingAnalogStore)
-                    return { name: channel.name, timing: null, nativeLength: 0n, chunks: [] };
-                  if (!(timed instanceof TimedAnalogStore)) throw new Error('Invalid analog stream');
-                  return {
-                    name: channel.name,
-                    timing: timed.timing,
-                    nativeLength: timed.native.length,
-                    chunks: Array.from(
-                      { length: Number((timed.native.length + 65535n) / 65536n) },
-                      (_, i) => `hakei-analog-${analogChannels.indexOf(channel)}-${i + 1}.f32`,
-                    ),
-                  };
+                    return {
+                      name: names?.analog[channelIndex] ?? channel.name,
+                      timing: null,
+                      nativeLength: 0n,
+                      chunks: [],
+                    };
+                  const native = timed instanceof TimedAnalogStore ? timed.native : timed;
+                  return timed instanceof TimedAnalogStore
+                    ? {
+                        name: names?.analog[channelIndex] ?? channel.name,
+                        timing: timed.timing,
+                        nativeLength: native.length,
+                        chunks: Array.from(
+                          { length: Number((native.length + 65535n) / 65536n) },
+                          (_, i) => `hakei-analog-${analogChannels.indexOf(channel)}-${i + 1}.f32`,
+                        ),
+                      }
+                    : {
+                        name: names?.analog[channelIndex] ?? channel.name,
+                        direct: true,
+                        samplerate: timed.samplerate,
+                        nativeLength: native.length,
+                        chunks: Array.from(
+                          { length: Number((native.length + 65535n) / 65536n) },
+                          (_, i) => `hakei-analog-${analogChannels.indexOf(channel)}-${i + 1}.f32`,
+                        ),
+                      };
                 }),
               }
             : {}),

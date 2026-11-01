@@ -494,7 +494,7 @@ export class WorkerAnalogStore implements AnalogStore {
     return this.owner.analogMetadata[this.channel]?.nativeLength;
   }
   get samplerate(): number {
-    return this.owner.samplerate;
+    return this.owner.analogMetadata[this.channel]?.samplerate ?? this.owner.samplerate;
   }
   get length(): bigint {
     return this.owner.analogMetadata[this.channel]?.length ?? 0n;

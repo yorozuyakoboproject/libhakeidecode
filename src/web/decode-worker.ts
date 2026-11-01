@@ -373,12 +373,16 @@ async function consumeWorkerReader(s: Session, edgeInput: string | undefined, ed
         channels: response.channels,
       });
     } else {
-      await pushEdgeChunk(s, {
-        type: 'decode-edge-chunk',
-        startSample: response.startSample,
-        endSample: response.endSample,
-        parts: response.parts,
-      });
+      await pushEdgeChunk(
+        s,
+        {
+          type: 'decode-edge-chunk',
+          startSample: response.startSample,
+          endSample: response.endSample,
+          parts: response.parts,
+        },
+        edgeInput,
+      );
     }
     cursor = response.endSample;
     maybePostProgress(s);
@@ -485,7 +489,7 @@ function pushGap(s: Session, request: DecodeGapRequest): void {
   resetAtGap(s);
   s.processed = request.endSample;
 }
-async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest): Promise<void> {
+async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest, edgeInput = 'data'): Promise<void> {
   if (request.startSample !== s.processed || request.endSample < request.startSample || request.endSample > s.length)
     throw new Error('Decode edge stream is not contiguous');
   let cursor = request.startSample;
@@ -496,7 +500,7 @@ async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest): Promi
     if (part.startSample > cursor) resetAtGap(s);
     const value = Number((part.endSample * 1000n) / (s.length || 1n)) / 1000;
     await s.runtime.push(
-      createEdgeWindow(part.startSample, part.endSample, s.sampleRate, part.initial, part.edges),
+      createEdgeWindow(part.startSample, part.endSample, s.sampleRate, part.initial, part.edges, edgeInput),
       value,
     );
     await s.runtime.flush(value);

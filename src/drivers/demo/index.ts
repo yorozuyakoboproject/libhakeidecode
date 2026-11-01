@@ -1,405 +1,321 @@
-import { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
-export { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
-import { sampleIndex, minSample, samplePhase, numberFraction, type SampleInput } from '../../libhakei/sample-index.js';
-import { createSampleChunk, type SampleChunk, type SampleChunkInput, type SampleSource } from '../../libhakei/index.js';
+import { encoderIds, loadSignalEncoder } from '../../generated/encoders.js';
+import { createSampleChunk, type SampleChunk } from '../../libhakei/index.js';
 import {
-  validateDeviceConfiguration,
   deviceChannelIndices,
+  validateDeviceConfiguration,
   validateNumericValue,
+  type AnalogStreamChunk,
   type DeviceConfiguration,
-  type ChannelArrayDevice,
   type ManagedSampleSourceContext,
-  type SampleSourceContext,
+  type MultiRateDevice,
+  type PackedLogicChunk,
+  type TimelineChunk,
 } from '../../libhakei/device.js';
+import { minSample, sampleIndex } from '../../libhakei/sample-index.js';
+import { materializeLogicWindow } from '../../libhakeidecode/signal.js';
+import type { RoundtripCase } from '../../build/roundtrip.js';
+import type { SignalWindow } from '../../libhakeidecode/types.js';
+import { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
+import {
+  analogValue,
+  parseDemoSignals,
+  type DemoAnalogSignal,
+  type DemoEncoderSignal,
+  type DemoSignal,
+} from './signal.js';
 
-export type DemoPattern =
-  | 'sine'
-  | 'square'
-  | 'triangle'
-  | 'sawtooth'
-  | 'random'
-  | 'constant'
-  | 'clock'
-  | 'incremental'
-  | 'walking-one'
-  | 'walking-zero';
-
-export interface DemoChannelConfig {
-  readonly id: string;
-  readonly kind: 'logic' | 'analog';
-  readonly pattern: DemoPattern;
-  readonly frequencyHz?: number;
-  readonly amplitude?: number;
-  readonly offset?: number;
-  readonly phase?: number;
-  readonly seed?: number;
-  readonly value?: number;
-}
+export { DEMO_DEVICE_DESCRIPTOR } from './descriptor.js';
+export {
+  DEMO_ANALOG_PATTERNS,
+  DEFAULT_DEMO_SIGNALS,
+  defaultDemoSignals,
+  parseDemoSignals,
+  type DemoAnalogPattern,
+  type DemoAnalogSignal,
+  type DemoEncoderSignal,
+  type DemoSignal,
+} from './signal.js';
 
 export interface DemoDriverOptions {
   readonly sampleRate: number;
-  readonly length: SampleInput;
+  readonly analogSampleRate: number;
+  readonly length: bigint;
   readonly chunkSamples?: number;
-  readonly channels: readonly DemoChannelConfig[];
+  readonly logicChannels: readonly number[];
+  readonly analogChannels: readonly number[];
+  readonly signals: readonly DemoSignal[];
 }
 
-const PATTERNS = new Set<DemoPattern>([
-  'sine',
-  'square',
-  'triangle',
-  'sawtooth',
-  'random',
-  'constant',
-  'clock',
-  'incremental',
-  'walking-one',
-  'walking-zero',
-]);
+type DemoAcquisitionChunk = SampleChunk | AnalogStreamChunk | TimelineChunk;
 
-export class DemoDevice implements ChannelArrayDevice {
-  readonly layout = 'channel-arrays';
-  readonly descriptor = DEMO_DEVICE_DESCRIPTOR;
-  getCapabilities(_configuration: DeviceConfiguration) {
-    return this.descriptor.capabilities;
-  }
-  getAcquisitionDescription(configuration: DeviceConfiguration) {
-    return {
-      layout: 'channel-arrays' as const,
-      logicSampleBytes: 1 as const,
-      analogSampleBytes: 4 as const,
-      chunkSamples: 65_536,
-      workingBytes: configuration.analogChannels
-        ? analogTemplateLength(
-            configuration.options.analogPattern as DemoPattern,
-            configuration.options.frequencyHz as number,
-            configuration.sampleRate,
-            sampleIndex(configuration.sampleCount),
-          ) * 4
-        : 0,
-    };
-  }
-  createSource(configuration: DeviceConfiguration, context: ManagedSampleSourceContext): SampleSource {
-    validateDeviceConfiguration(this, configuration);
-    const { sampleRate, sampleCount, options } = configuration;
-    return new DemoDriver(
-      {
-        sampleRate,
-        length: sampleCount,
-        channels: [
-          ...deviceChannelIndices(configuration, 'logic').map((i): DemoChannelConfig => ({
-            id: `D${i}`,
-            kind: 'logic',
-            pattern: options.logicPattern as DemoPattern,
-            frequencyHz: options.frequencyHz as number,
-            seed: (options.seed as number) + i,
-            offset: 0,
-          })),
-          ...deviceChannelIndices(configuration, 'analog').map((i): DemoChannelConfig => ({
-            id: `A${i}`,
-            kind: 'analog',
-            pattern: options.analogPattern as DemoPattern,
-            frequencyHz: options.frequencyHz as number,
-            amplitude: options.amplitude as number,
-            offset: options.offset as number,
-            seed: (options.seed as number) + i,
-          })),
-        ],
-        chunkSamples: context?.chunkSamples,
-      },
-      context,
-    );
-  }
-}
+const ANALOG_TIMING = {
+  direct: true as const,
+  clockHz: 1,
+  periodTicks: 1n,
+  firstTick: 0n,
+  uncertaintyTicks: 0,
+  bits: 12 as const,
+  referenceMv: 4_095,
+};
 
 function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive safe integer`);
   return value;
 }
 
-function finite(value: number, name: string): number {
-  if (!Number.isFinite(value)) throw new RangeError(`${name} must be finite`);
-  return value;
+function uniqueChannels(values: readonly number[], maximum: number, name: string): readonly number[] {
+  if (
+    values.some(
+      (value, index) =>
+        !Number.isInteger(value) || value < 0 || value >= maximum || (index && value <= values[index - 1]!),
+    ) ||
+    new Set(values).size !== values.length
+  )
+    throw new RangeError(`Invalid ${name} channel selection`);
+  return values;
 }
 
-function hashSeed(seed: number): number {
-  let value = seed >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x7feb352d);
-  value ^= value >>> 15;
-  value = Math.imul(value, 0x846ca68b);
-  value ^= value >>> 16;
-  return value >>> 0;
-}
-
-function randomAt(seed: number, sample: number): number {
-  let value = hashSeed(seed ^ sample);
-  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
-  return ((value ^ (value >>> 16)) >>> 0) / 0x1_0000_0000;
-}
-
-function waveValue(channel: DemoChannelConfig, sample: number, sampleRate: number): number {
-  const frequency = channel.frequencyHz ?? 1_000;
-  const amplitude = channel.amplitude ?? 1;
-  const offset = channel.offset ?? 0;
-  const phase = channel.phase ?? 0;
-  const cycles = (sample * frequency) / sampleRate + phase / (2 * Math.PI);
-  const fraction = cycles - Math.floor(cycles);
-  switch (channel.pattern) {
-    case 'sine':
-      return offset + amplitude * 0.5 * (Math.sin(cycles * 2 * Math.PI) + 1);
-    case 'square':
-    case 'clock':
-      return fraction < 0.5 ? offset + amplitude : offset;
-    case 'triangle':
-      return offset + amplitude * (1 - Math.abs(2 * fraction - 1));
-    case 'sawtooth':
-      return offset + amplitude * fraction;
-    case 'random':
-      return offset + amplitude * randomAt(channel.seed ?? 1, sample);
-    case 'constant':
-      return channel.value ?? offset;
-    case 'incremental':
-      return ((sample + (channel.seed ?? 0)) % 32) / 31;
-    case 'walking-one':
-      return (sample + (channel.seed ?? 0)) % 32 === 0 ? 1 : 0;
-    case 'walking-zero':
-      return (sample + (channel.seed ?? 0)) % 32 === 0 ? 0 : 1;
-  }
-}
-
-function logicValue(
-  channel: DemoChannelConfig,
-  value: number,
-  sample: number,
-  channelIndex: number,
-  channelCount: number,
-): number {
-  if (channel.pattern === 'walking-one') return sample % channelCount === channelIndex ? 1 : 0;
-  if (channel.pattern === 'walking-zero') return sample % channelCount === channelIndex ? 0 : 1;
-  if (channel.pattern === 'incremental') return Math.floor(sample / 2 ** channelIndex) % 2;
-  return value >= (channel.offset ?? 0.5) + (channel.amplitude ?? 1) * 0.5 ? 1 : 0;
-}
-
-function validate(
-  options: DemoDriverOptions,
-): { sampleRate: number; length: bigint; chunkSamples: number } & { channels: readonly DemoChannelConfig[] } {
+function checkedOptions(options: DemoDriverOptions): Required<DemoDriverOptions> {
   const sampleRate = validateNumericValue(
     DEMO_DEVICE_DESCRIPTOR.capabilities.sampleRate,
     options.sampleRate,
     'sampleRate',
   );
+  const analogSampleRate = validateNumericValue(
+    DEMO_DEVICE_DESCRIPTOR.capabilities.analogSampleRate,
+    options.analogSampleRate,
+    'analogSampleRate',
+  );
   const length = sampleIndex(options.length, 'length');
   validateNumericValue(DEMO_DEVICE_DESCRIPTOR.capabilities.sampleCount, length, 'length');
-  const chunkSamples = positiveInteger(options.chunkSamples ?? 65_536, 'chunkSamples');
-  if (!options.channels.length) throw new RangeError('at least one demo channel is required');
-  const ids = new Set<string>();
-  const channels = options.channels.map((channel, index) => {
-    if (!channel.id || ids.has(channel.id)) throw new RangeError(`channel id must be unique: ${channel.id}`);
-    ids.add(channel.id);
-    if (!PATTERNS.has(channel.pattern)) throw new RangeError(`unsupported demo pattern: ${channel.pattern}`);
-    if (channel.frequencyHz !== undefined && (!(channel.frequencyHz > 0) || !Number.isFinite(channel.frequencyHz)))
-      throw new RangeError(`frequencyHz must be positive: ${index}`);
-    for (const [name, value] of [
-      ['amplitude', channel.amplitude],
-      ['offset', channel.offset],
-      ['phase', channel.phase],
-      ['value', channel.value],
-    ] as const) {
-      if (value !== undefined) finite(value, name);
-    }
-    if (channel.seed !== undefined && !Number.isSafeInteger(channel.seed))
-      throw new RangeError(`seed must be a safe integer: ${index}`);
-    return { ...channel };
-  });
-  return { sampleRate, length, chunkSamples, channels };
+  return {
+    sampleRate,
+    analogSampleRate,
+    length,
+    chunkSamples: positiveInteger(options.chunkSamples ?? 65_536, 'chunkSamples'),
+    logicChannels: uniqueChannels(options.logicChannels, 32, 'logic'),
+    analogChannels: uniqueChannels(options.analogChannels, 4, 'analog'),
+    signals: options.signals,
+  };
 }
 
-function fillLogic(
-  values: Uint8Array,
-  channel: DemoChannelConfig,
-  startSample: bigint,
+function encoderConfig(
+  source: RoundtripCase<unknown>,
+  signal: DemoEncoderSignal,
   sampleRate: number,
-  index: number,
-  channels: number,
-): void {
-  const start =
-    channel.pattern === 'incremental'
-      ? Number(startSample % (1n << BigInt(index + 1)))
-      : channel.pattern.startsWith('walking-')
-        ? Number(startSample % BigInt(channels))
-        : channel.pattern === 'random'
-          ? Number(startSample & 0xffffffffn)
-          : (samplePhase(startSample, channel.frequencyHz ?? 1000, sampleRate) * sampleRate) /
-            (channel.frequencyHz ?? 1000);
-  const offset = channel.offset ?? 0,
-    amplitude = channel.amplitude ?? 1;
-  const threshold = (channel.offset ?? 0.5) + amplitude * 0.5;
-  switch (channel.pattern) {
-    case 'walking-one':
-      for (let i = 0; i < values.length; i++) values[i] = (start + i) % channels === index ? 1 : 0;
-      return;
-    case 'walking-zero':
-      for (let i = 0; i < values.length; i++) values[i] = (start + i) % channels === index ? 0 : 1;
-      return;
-    case 'incremental':
-      for (let i = 0; i < values.length; i++) values[i] = Math.floor((start + i) / 2 ** index) % 2;
-      return;
-    case 'random': {
-      const seed = channel.seed ?? 1;
-      for (let i = 0; i < values.length; i++)
-        values[i] = offset + amplitude * randomAt(seed, start + i) >= threshold ? 1 : 0;
-      return;
-    }
-    default:
-      for (let i = 0; i < values.length; i++)
-        values[i] = logicValue(channel, waveValue(channel, start + i, sampleRate), start + i, index, channels);
-  }
-}
-function repeatKey(channel: DemoChannelConfig): string | null {
-  if (!['square', 'clock', 'sine', 'triangle', 'sawtooth', 'constant'].includes(channel.pattern)) return null;
-  return [
-    channel.kind,
-    channel.pattern,
-    channel.frequencyHz,
-    channel.amplitude,
-    channel.offset,
-    channel.phase,
-    channel.value,
-  ].join('/');
+): RoundtripCase<unknown> {
+  const channels = Object.fromEntries(Object.keys(source.channels).map((key, index) => [key, index]));
+  return {
+    ...source,
+    sampleRate,
+    startSample: 0n,
+    channels,
+    options: { ...source.options, ...signal.options },
+    chunkSamples: [65_536],
+    minimumPayloadBits: 0,
+  };
 }
 
-function analogTemplateLength(pattern: DemoPattern, frequency: number, sampleRate: number, length: bigint): number {
-  if (pattern !== 'sine') return 0;
-  const [numerator, denominator] = numberFraction(frequency);
-  const samples = BigInt(sampleRate) * denominator;
-  if (samples % numerator) return 0;
-  const period = samples / numerator;
-  return period <= 1_048_576n && period < length ? Number(period) : 0;
+function collectWindows(windows: readonly SignalWindow[], sampleRate: number): number {
+  let end = 0;
+  for (const window of windows) {
+    if (window.sampleRate !== sampleRate) throw new Error('Signal encoder changed the requested sample rate');
+    if (window.startSample < 0n || window.endSample < window.startSample)
+      throw new Error('Signal encoder returned an invalid sample range');
+    end = Math.max(end, Number(window.endSample));
+  }
+  return end;
 }
 
-function fillAnalog(
-  values: Float32Array,
-  channel: DemoChannelConfig,
-  start: bigint,
-  sampleRate: number,
-  template: { data: Float32Array; filled: number } | undefined,
-): void {
-  if (channel.pattern === 'constant') {
-    values.fill(channel.value ?? channel.offset ?? 0);
-    return;
+function copyPattern(target: Uint8Array, pattern: Uint8Array, start: bigint): void {
+  const offset = Number(start % BigInt(pattern.length));
+  const first = Math.min(target.length, pattern.length - offset);
+  target.set(pattern.subarray(offset, offset + first), 0);
+  let copied = first;
+  while (copied < target.length) {
+    const count = Math.min(pattern.length, target.length - copied);
+    target.set(pattern.subarray(0, count), copied);
+    copied += count;
   }
-  if (template) {
-    const period = template.data.length,
-      first = Math.min(period, values.length);
-    let offset = Number(start % BigInt(period)),
-      copied = 0;
-    while (copied < first) {
-      const count = Math.min(first - copied, period - offset),
-        end = offset + count;
-      for (let i = template.filled; i < end; i++) template.data[i] = waveValue(channel, i, sampleRate);
-      template.filled = Math.max(template.filled, end);
-      values.set(template.data.subarray(offset, end), copied);
-      copied += count;
-      offset = 0;
-    }
-    while (copied < values.length) {
-      const count = Math.min(copied, values.length - copied);
-      values.copyWithin(copied, 0, count);
-      copied += count;
-    }
-    return;
-  }
-  const localStart =
-    channel.pattern === 'random'
-      ? Number(start & 0xffffffffn)
-      : (samplePhase(start, channel.frequencyHz ?? 1000, sampleRate) * sampleRate) / (channel.frequencyHz ?? 1000);
-  for (let i = 0; i < values.length; i++) values[i] = waveValue(channel, localStart + i, sampleRate);
 }
 
-export class DemoDriver implements SampleSource {
+async function encoderPatterns(signal: DemoEncoderSignal, sampleRate: number): Promise<Map<number, Uint8Array>> {
+  const module = await loadSignalEncoder(signal.decoder);
+  const source = [...module.cases({ minimumPayloadBits: 0 })].find(
+    (item) => item.kind === 'boundary' && item.name === signal.caseName,
+  );
+  if (!source) throw new Error(`Unknown encoder case: ${signal.decoder}/${signal.caseName}`);
+  const config = encoderConfig(source, signal, sampleRate);
+  const windows: SignalWindow[] = [];
+  const encoder = module.createEncoder(config);
+  for (const block of source.generate()) windows.push(...encoder.push(block.data));
+  windows.push(...encoder.finish());
+  const length = collectWindows(windows, sampleRate);
+  if (!length) throw new Error(`Encoder case produced no samples: ${signal.decoder}/${signal.caseName}`);
+  const patterns = new Map<number, Uint8Array>();
+  for (const local of Object.keys(source.channels)) {
+    const physical = signal.mapping[local];
+    if (physical === undefined) continue;
+    const output = new Uint8Array(length);
+    for (const window of windows) {
+      const channel = window.channel(local);
+      if (!channel) continue;
+      output.set(materializeLogicWindow(channel), Number(window.startSample));
+    }
+    patterns.set(physical, output);
+  }
+  if (!patterns.size) throw new Error(`Encoder case does not drive its mapped channels: ${signal.decoder}`);
+  return patterns;
+}
+
+function analogSampleCount(length: bigint, analogSampleRate: number, sampleRate: number): bigint {
+  return (length * BigInt(analogSampleRate)) / BigInt(sampleRate);
+}
+
+export class DemoDevice implements MultiRateDevice {
+  readonly layout = 'multi-rate';
+  readonly descriptor = DEMO_DEVICE_DESCRIPTOR;
+  getCapabilities(_configuration: DeviceConfiguration) {
+    return this.descriptor.capabilities;
+  }
+  getAcquisitionDescription(_configuration: DeviceConfiguration) {
+    return {
+      layout: 'multi-rate' as const,
+      logicSampleBytes: 1 as const,
+      analogSampleBytes: 4 as const,
+      chunkSamples: 65_536,
+    };
+  }
+  createMultiRateSource(
+    configuration: DeviceConfiguration,
+    context: ManagedSampleSourceContext,
+  ): AsyncIterable<DemoAcquisitionChunk> {
+    validateDeviceConfiguration(this, configuration);
+    return new DemoDriver(
+      {
+        sampleRate: configuration.sampleRate,
+        analogSampleRate: configuration.analogSampleRate ?? configuration.sampleRate,
+        length: sampleIndex(configuration.sampleCount),
+        chunkSamples: context.chunkSamples,
+        logicChannels: deviceChannelIndices(configuration, 'logic'),
+        analogChannels: deviceChannelIndices(configuration, 'analog'),
+        signals: parseDemoSignals(
+          String(configuration.options.signals ?? '[]'),
+          deviceChannelIndices(configuration, 'logic'),
+          deviceChannelIndices(configuration, 'analog'),
+          encoderIds,
+        ),
+      },
+      context,
+    );
+  }
+  async *createPackedSource(
+    configuration: DeviceConfiguration,
+    context: ManagedSampleSourceContext,
+  ): AsyncGenerator<PackedLogicChunk> {
+    const channels = deviceChannelIndices(configuration, 'logic');
+    for await (const chunk of this.createMultiRateSource(configuration, context)) {
+      if ('format' in chunk) continue;
+      const data = new Uint8Array(chunk.length);
+      channels.forEach((physical, index) => {
+        const values = chunk.channels[`D${physical}`];
+        if (!values) return;
+        for (let sample = 0; sample < data.length; sample++) data[sample] |= (values[sample] ? 1 : 0) << index;
+      });
+      yield {
+        format: 'packed-logic',
+        startSample: chunk.startSample,
+        sampleRate: chunk.sampleRate,
+        channelCount: channels.length,
+        length: chunk.length,
+        encoding: 'raw8',
+        data,
+      };
+    }
+  }
+}
+
+export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
   static readonly descriptor = DEMO_DEVICE_DESCRIPTOR;
-  readonly options: ReturnType<typeof validate>;
+  readonly options: Required<DemoDriverOptions>;
   constructor(
     options: DemoDriverOptions,
-    private readonly context?: SampleSourceContext,
+    private readonly context: ManagedSampleSourceContext,
   ) {
-    this.options = validate(options);
+    this.options = checkedOptions(options);
   }
-
-  async *[Symbol.asyncIterator](): AsyncGenerator<SampleChunk> {
-    const { sampleRate, length, chunkSamples, channels } = this.options;
-    const logicCount = channels.filter((channel) => channel.kind === 'logic').length;
-    const templates = new Map<string, { data: Float32Array; filled: number }>();
-    for (const channel of channels) {
-      if (channel.kind !== 'analog') continue;
-      const key = repeatKey(channel),
-        period = analogTemplateLength(channel.pattern, channel.frequencyHz ?? 1000, sampleRate, length);
-      if (key && period && !templates.has(key)) templates.set(key, { data: new Float32Array(period), filled: 0 });
+  private async digitalPatterns(): Promise<Map<number, Uint8Array>> {
+    const patterns = new Map<number, Uint8Array>();
+    for (const signal of this.options.signals) {
+      if (signal.kind !== 'encoder') continue;
+      for (const [channel, values] of await encoderPatterns(signal, this.options.sampleRate))
+        patterns.set(channel, values);
     }
-    for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
-      this.context?.signal?.throwIfAborted();
-      const count = Number(minSample(BigInt(chunkSamples), length - start));
-      const managed = await this.context?.acquireBuffer?.();
-      let byteOffset = 0;
-      const logic: Record<string, Uint8Array> = {};
-      const analog: Record<string, Float32Array> = {};
-      let logicIndex = 0;
-      const repeated = new Map<string, Uint8Array | Float32Array>();
-      channels.forEach((channel) => {
-        if (channel.kind === 'logic') {
-          const index = logicIndex++;
-          const key = repeatKey(channel),
-            previous = key ? repeated.get(key) : undefined;
-          const values =
-            previous instanceof Uint8Array
-              ? previous
-              : managed
-                ? new Uint8Array(managed, byteOffset, count)
-                : new Uint8Array(count);
-          byteOffset += count;
-          if (!previous) fillLogic(values, channel, start, sampleRate, index, logicCount);
-          if (key) repeated.set(key, values);
-          logic[channel.id] = values;
-        } else {
-          byteOffset = Math.ceil(byteOffset / 4) * 4;
-          const key = repeatKey(channel),
-            previous = key ? repeated.get(key) : undefined;
-          const values =
-            previous instanceof Float32Array
-              ? previous
-              : managed
-                ? new Float32Array(managed, byteOffset, count)
-                : new Float32Array(count);
-          byteOffset += count * 4;
-          if (!previous) fillAnalog(values, channel, start, sampleRate, key ? templates.get(key) : undefined);
-          if (key) repeated.set(key, values);
-          analog[channel.id] = values;
+    return patterns;
+  }
+  private analogSignals(): Map<number, DemoAnalogSignal> {
+    return new Map(
+      this.options.signals.flatMap((signal) => (signal.kind === 'analog' ? [[signal.channel, signal]] : [])),
+    );
+  }
+  async *[Symbol.asyncIterator](): AsyncGenerator<DemoAcquisitionChunk> {
+    const { sampleRate, analogSampleRate, length, chunkSamples, logicChannels, analogChannels } = this.options;
+    const patterns = await this.digitalPatterns();
+    const analogSignals = this.analogSignals();
+    if (logicChannels.length) {
+      for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
+        this.context.signal?.throwIfAborted();
+        const count = Number(minSample(BigInt(chunkSamples), length - start));
+        const buffer = await this.context.acquireBuffer();
+        const channels: Record<string, Uint8Array> = {};
+        let offset = 0;
+        for (const physical of logicChannels) {
+          const values = new Uint8Array(buffer, offset, count);
+          offset += count;
+          values.fill(0);
+          const pattern = patterns.get(physical);
+          if (pattern) copyPattern(values, pattern, start);
+          channels[`D${physical}`] = values;
         }
-      });
-      const input: SampleChunkInput = {
-        startSample: start,
-        sampleRate,
-        channels: logic,
-        analogChannels: analog,
-        isFinal: start + BigInt(count) === length,
-        metadata: { source: 'demo', patternCount: channels.length },
-      };
-      yield managed
-        ? Object.freeze({
-            ...input,
-            startSample: start,
-            length: count,
-            endSample: start + BigInt(count),
-            isFinal: start + BigInt(count) === length,
-            channels: Object.freeze(logic),
-            analogChannels: Object.freeze(analog),
-            metadata: Object.freeze(input.metadata!),
-          })
-        : createSampleChunk(input);
+        yield createSampleChunk({
+          startSample: start,
+          sampleRate,
+          channels,
+          isFinal: start + BigInt(count) === length,
+          metadata: { source: 'demo', signals: this.options.signals.length },
+        });
+      }
     }
+    const analogLength = analogSampleCount(length, analogSampleRate, sampleRate);
+    if (analogChannels.length && analogLength > 0n) {
+      for (let start = 0n; start < analogLength; start += BigInt(chunkSamples)) {
+        this.context.signal?.throwIfAborted();
+        const count = Number(minSample(BigInt(chunkSamples), analogLength - start));
+        for (const physical of analogChannels) {
+          const buffer = await this.context.acquireBuffer();
+          const data = new Float32Array(buffer, 0, count);
+          const signal = analogSignals.get(physical);
+          if (signal) {
+            for (let sample = 0; sample < data.length; sample++)
+              data[sample] = analogValue(signal, Number(start) + sample, analogSampleRate);
+          } else data.fill(0);
+          yield {
+            format: 'analog',
+            channel: physical,
+            startSample: start,
+            timing: { ...ANALOG_TIMING, clockHz: analogSampleRate },
+            data,
+          };
+        }
+      }
+    }
+    if (!logicChannels.length) yield { format: 'timeline', length };
   }
 }
 
-export function createDemoSource(options: DemoDriverOptions): SampleSource {
-  return new DemoDriver(options);
+export function createDemoSource(
+  options: DemoDriverOptions,
+  context: ManagedSampleSourceContext,
+): AsyncIterable<DemoAcquisitionChunk> {
+  return new DemoDriver(options, context);
 }

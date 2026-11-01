@@ -94,8 +94,8 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   private consume(events: readonly OutputEvent[]): void {
     for (const event of events) {
       if (event.type === OUTPUT_ANN) {
-        const data = event.data as readonly [number, readonly string[]];
-        this.annotations.push({ ss: event.ss, es: event.es, classIndex: data[0], texts: data[1] });
+        const data = event.data as readonly [number, readonly string[], number?];
+        this.annotations.push({ ss: event.ss, es: event.es, classIndex: data[0], texts: data[1], value: data[2] });
         this.annotationsCount++;
       } else this.handler.event(event, this);
     }

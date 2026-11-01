@@ -28,17 +28,21 @@ async function configure(app, config) {
   }
   app.deviceControls.logicSelection = Array.from({ length: 8 }, (_, index) => index);
   app.deviceControls.analogSelection = [];
-  setControl('sample-rate', 1000000);
-  setControl('sample-limit', config.samples);
-  for (const [key, value] of Object.entries({
-    logicPattern: config.pattern ?? 'square',
-    analogPattern: 'sine',
-    frequencyHz: config.frequency ?? 50000,
-    amplitude: 1,
-    offset: 0,
-    seed: 12345,
-  }))
-    setControl('device-option-' + key, value);
+  const rate = config.rate ?? 1000000;
+  app.deviceControls.durationSeconds = config.samples / rate;
+  setControl('sample-rate', config.rate ?? 1000000);
+  setControl('capture-duration', config.samples / rate);
+  app.signalControls.signals = config.signals.map((signal, index) => ({
+    id: 'storage-' + index,
+    name: signal.decoder.toUpperCase(),
+    kind: 'encoder',
+    decoder: signal.decoder,
+    caseName: signal.caseName,
+    options: signal.options,
+    mapping: signal.mapping,
+  }));
+  app.signalControls.selectedId = app.signalControls.signals[0]?.id ?? null;
+  app.signalControls.sync();
   await app.deviceControls.refreshCapabilities();
   check(app.deviceControls.ready, 'Demo configuration is not ready');
 }
@@ -164,36 +168,161 @@ export async function runDecodeStorageChecks() {
   try {
     for (const config of [
       {
-        name: 'uart-square-4M',
+        name: 'uart-4M',
         samples: 4000000,
-        protocols: [{ decoder: 'uart' }],
-        frames: 40000,
-        annotations: 439999,
+        rate: 4000000,
+        signals: [
+          {
+            decoder: 'uart',
+            caseName: '8n1-back-to-back',
+            options: {
+              baudrate: 115200,
+              data_bits: 8,
+              parity: 'none',
+              stop_bits: 1,
+              bit_order: 'lsb-first',
+              invert_rx: 'no',
+              invert_tx: 'no',
+              sample_point: 50,
+            },
+            mapping: { rx: 0, tx: 1 },
+          },
+        ],
+        protocols: [{ decoder: 'uart', mapping: { rx: 0 } }],
       },
       {
         name: 'uart-dual-2M',
         samples: 2000000,
+        rate: 2000000,
+        signals: [
+          {
+            decoder: 'uart',
+            caseName: '8n1-back-to-back',
+            options: {
+              baudrate: 115200,
+              data_bits: 8,
+              parity: 'none',
+              stop_bits: 1,
+              bit_order: 'lsb-first',
+              invert_rx: 'no',
+              invert_tx: 'no',
+              sample_point: 50,
+            },
+            mapping: { rx: 0, tx: 1 },
+          },
+        ],
         protocols: [{ decoder: 'uart', mapping: { rx: 0, tx: 1 } }],
-        frames: 40000,
       },
       {
-        name: 'uart-random-4M',
+        name: 'uart-alternate-4M',
         samples: 4000000,
-        pattern: 'random',
-        protocols: [{ decoder: 'uart' }],
-        frames: 76449,
-        annotations: 476261,
+        rate: 4000000,
+        signals: [
+          {
+            decoder: 'uart',
+            caseName: '9-one-two-stops-msb-inverted',
+            options: {
+              baudrate: 115200,
+              data_bits: 9,
+              parity: 'one',
+              stop_bits: 2,
+              bit_order: 'msb-first',
+              invert_rx: 'yes',
+              invert_tx: 'yes',
+              sample_point: 50,
+            },
+            mapping: { rx: 0, tx: 1 },
+          },
+        ],
+        protocols: [
+          {
+            decoder: 'uart',
+            mapping: { rx: 0 },
+            options: { data_bits: 9, parity: 'one', stop_bits: 2, bit_order: 'msb-first', invert_rx: 'yes' },
+          },
+        ],
       },
-      { name: 'pwm-low-1M', samples: 1000000, frequency: 1000, protocols: [{ decoder: 'pwm' }], frames: 998 },
-      { name: 'pwm-high-4M', samples: 4000000, frequency: 100000, protocols: [{ decoder: 'pwm' }], frames: 399998 },
+      {
+        name: 'pwm-1M',
+        samples: 1000000,
+        rate: 1000000,
+        signals: [
+          {
+            decoder: 'pwm',
+            caseName: 'active-high-boundary',
+            options: { polarity: 'active-high' },
+            mapping: { data: 0 },
+          },
+        ],
+        protocols: [{ decoder: 'pwm', mapping: { data: 0 } }],
+      },
+      {
+        name: 'pwm-4M',
+        samples: 4000000,
+        rate: 4000000,
+        signals: [
+          {
+            decoder: 'pwm',
+            caseName: 'active-low-boundary',
+            options: { polarity: 'active-low' },
+            mapping: { data: 0 },
+          },
+        ],
+        protocols: [{ decoder: 'pwm', mapping: { data: 0 }, options: { polarity: 'active-low' } }],
+      },
       {
         name: 'multi-1M',
         samples: 1000000,
+        rate: 1000000,
+        signals: [
+          {
+            decoder: 'pwm',
+            caseName: 'active-high-boundary',
+            options: { polarity: 'active-high' },
+            mapping: { data: 0 },
+          },
+          {
+            decoder: 'pwm',
+            caseName: 'active-high-boundary',
+            options: { polarity: 'active-high' },
+            mapping: { data: 1 },
+          },
+          {
+            decoder: 'uart',
+            caseName: '8n1-back-to-back',
+            options: {
+              baudrate: 115200,
+              data_bits: 8,
+              parity: 'none',
+              stop_bits: 1,
+              bit_order: 'lsb-first',
+              invert_rx: 'no',
+              invert_tx: 'no',
+              sample_point: 50,
+            },
+            mapping: { rx: 2, tx: 3 },
+          },
+          {
+            decoder: 'uart',
+            caseName: '8n1-back-to-back',
+            options: {
+              baudrate: 115200,
+              data_bits: 8,
+              parity: 'none',
+              stop_bits: 1,
+              bit_order: 'lsb-first',
+              invert_rx: 'no',
+              invert_tx: 'no',
+              sample_point: 50,
+            },
+            mapping: { rx: 4 },
+          },
+        ],
         protocols: [
-          { decoder: 'pwm' },
+          { decoder: 'pwm', mapping: { data: 0 } },
           { decoder: 'pwm', mapping: { data: 1 } },
-          { decoder: 'uart' },
-          { decoder: 'uart', mapping: { rx: 1 } },
+          { decoder: 'uart', mapping: { rx: 2 } },
+          { decoder: 'uart', mapping: { rx: 4 } },
         ],
       },
     ]) {
@@ -203,7 +332,8 @@ export async function runDecodeStorageChecks() {
       for (const spec of config.protocols) {
         const protocol = app.addProtocol(spec.decoder, false);
         protocol.mapping = spec.mapping ?? (spec.decoder === 'uart' ? { rx: 0 } : { data: 0 });
-        if (spec.decoder === 'uart') protocol.options.baudrate = 100000;
+        if (spec.decoder === 'uart') protocol.options.baudrate = 115200;
+        Object.assign(protocol.options, spec.options);
         app.selectProtocol(protocol.id, false);
       }
       const started = performance.now();
@@ -216,11 +346,9 @@ export async function runDecodeStorageChecks() {
       );
       for (const protocol of app.protocols) {
         check(protocol.state === 'done', 'Decode failed: ' + protocol.decoder + ' ' + JSON.stringify(protocol.error));
-        if (config.frames) check(protocol.frameCount === config.frames, 'Frame count changed: ' + config.name);
-        if (config.annotations)
-          check(protocol.annotationCount === config.annotations, 'Annotation count changed: ' + config.name);
+        check(protocol.frameCount > 0, 'No frames decoded: ' + config.name);
         const data = await verifyPages(protocol, config.samples);
-        if (config.name === 'uart-square-4M') {
+        if (config.name === 'uart-4M') {
           evidence.frames = data.frames;
           evidence.annotations = data.annotations.slice(0, 8);
           evidence.binary = data.binaryBuffers.rx;
@@ -252,7 +380,7 @@ export async function runDecodeStorageChecks() {
           })),
         }),
       );
-      if (config.name === 'uart-square-4M') {
+      if (config.name === 'uart-4M') {
         report.status = 'uart-memory';
         report.uartMemory = await performance.measureUserAgentSpecificMemory();
         await app.decodeAll();

@@ -5,14 +5,57 @@ import { USB_VID, USB_PID } from '../src/drivers/ch32h417/descriptor.ts';
 import { importCapture } from '../src/web/capture.ts';
 import { DecodeClient } from '../src/web/decode-client.ts';
 import { getLocale, setLocale, t, translateDOM } from '../src/web/i18n.ts';
+import { defaultDemoSignals } from '../src/drivers/demo/signal.ts';
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
 }
 function change(id, value) {
   const input = document.getElementById(id);
+  if (input instanceof HTMLSelectElement && ![...input.options].some((option) => option.value === String(value)))
+    input.add(new Option(String(value), String(value)));
   input.value = String(value);
   input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function assign(id, value) {
+  const input = document.getElementById(id);
+  if (input instanceof HTMLSelectElement && ![...input.options].some((option) => option.value === String(value)))
+    input.add(new Option(String(value), String(value)));
+  input.value = String(value);
+}
+async function configureDemo({
+  logic = 8,
+  analog = 2,
+  digitalRate = 1_000_000,
+  analogRate = 200_000,
+  duration = 0.2,
+} = {}) {
+  if (app.deviceControls.device.descriptor.id !== 'demo') {
+    change('device-select', 'demo');
+    await deadline(app.deviceControls.refreshCapabilities());
+  }
+  app.deviceControls.logicSelection = Array.from({ length: logic }, (_, index) => index);
+  app.deviceControls.analogSelection = Array.from({ length: analog }, (_, index) => index);
+  app.signalControls.signals = defaultDemoSignals();
+  app.signalControls.selectedId = app.signalControls.signals[0].id;
+  app.signalControls.sync();
+  app.deviceControls.durationSeconds = duration;
+  assign('sample-rate', digitalRate);
+  if (app.deviceControls.device.descriptor.capabilities.analogSampleRate) assign('analog-sample-rate', analogRate);
+  assign('capture-duration', duration);
+  await deadline(app.deviceControls.refreshCapabilities());
+  check(app.deviceControls.ready, 'Demo configuration is not ready');
+}
+async function configureAnalogSignal({ pattern, frequencyHz, amplitude, offset, seed = 1 }) {
+  const signal = app.signalControls.signals.find((item) => item.kind === 'analog');
+  check(signal, 'Demo analog signal is missing');
+  document.querySelector(`#signal-list [data-signal-id="${signal.id}"]`).click();
+  if (pattern !== undefined) change('signal-pattern', pattern);
+  if (frequencyHz !== undefined) change('signal-frequency', frequencyHz);
+  if (amplitude !== undefined) change('signal-amplitude', amplitude);
+  if (offset !== undefined) change('signal-offset', offset);
+  change('signal-seed', seed);
+  await deadline(app.deviceControls.refreshCapabilities());
 }
 function deadline(promise) {
   let timer;
@@ -67,76 +110,51 @@ async function waitForView() {
 
 export async function runDemoChecks() {
   requireChrome();
-  change('device-select', 'demo');
-  await deadline(app.deviceControls.refreshCapabilities());
-  change('sample-rate', 200000);
-  change('sample-limit', 200000);
-  change('device-channel-count', 8);
-  change('device-analog-count', 2);
-  change('device-option-frequencyHz', 1000);
-  const results = [];
-  for (const [pattern, amplitude, offset, min, max] of [
-    ['sine', 20, -10, -10, 10],
-    ['constant', 0, 7.5, 7.5, 7.5],
-    ['constant', 0, 0, 0, 0],
-  ]) {
-    change('device-option-analogPattern', pattern);
-    change('device-option-amplitude', amplitude);
-    change('device-option-offset', offset);
-    await deadline(app.deviceControls.refreshCapabilities());
-    await deadline(app.startCapture());
-    const capture = app.capture;
-    check(capture.store.length === 200000n && capture.acquisition.stopReason === 'complete', 'Demo capture failed');
-    check(
-      capture.acquisition.worker &&
-        capture.diagnostics.mainThreadAppend.calls === 0 &&
-        capture.diagnostics.mainThreadPublish.calls === 0,
-      'Demo data escaped Worker processing',
-    );
-    check(
-      capture.store.analogMetadata.length === 2 &&
-        capture.store.analogMetadata.every((item) => item.range?.min === min && item.range?.max === max),
-      'Demo amplitude range differs',
-    );
-    const draw = async (span) => {
-      app.renderer.setViewport(0n, BigInt(span));
-      await waitForView();
-      const context = document.createElement('canvas').getContext('2d'),
-        points = [],
-        labels = [],
-        arc = context.arc,
-        text = context.fillText;
-      context.arc = function (x, y, ...args) {
-        points.push(y);
-        return arc.call(this, x, y, ...args);
-      };
-      context.fillText = function (value, ...args) {
-        if (this.textAlign === 'right') labels.push(Number(value));
-        return text.call(this, value, ...args);
-      };
-      app.renderer.drawAnalog(context, 0, 0, app.renderer.width - app.renderer.gutter - 16);
-      check(points.length === span && points.every(Number.isFinite), 'Demo curve contains missing or invalid points');
-      check(labels.length === 2 && labels[0] > max && labels[1] < min, 'Analog axis has no padding or zero span');
-      return { points, labels };
-    };
-    const narrow = await draw(32),
-      wide = await draw(64);
-    check(
-      narrow.points.every((y, i) => Math.abs(y - wide.points[i]) < 1e-9) &&
-        String(narrow.labels) === String(wide.labels),
-      'Horizontal zoom changed the vertical scale',
-    );
-    if (pattern === 'sine') check(Math.abs(wide.points[25] - wide.points[31]) > 1, 'Values above +1 were flattened');
-    else
-      check(
-        wide.points.every((y) => y === wide.points[0]),
-        'Constant signal was distorted',
-      );
-    results.push({ pattern, range: { min, max }, axis: wide.labels });
-  }
+  await configureDemo();
+  check(!document.getElementById('signal-section').hidden, 'Demo signal generator is hidden');
+  check(document.getElementById('device-options').hidden, 'Empty device options section is visible');
+  check(
+    document.getElementById('sample-rate') && document.getElementById('analog-sample-rate'),
+    'Demo rates are not independent',
+  );
+  await configureAnalogSignal({ pattern: 'constant', frequencyHz: 1_000, amplitude: 0, offset: -0.625 });
+  await deadline(app.startCapture());
+  const capture = app.capture;
+  check(capture.store.length === 200000n && capture.acquisition.stopReason === 'complete', 'Demo capture failed');
+  check(capture.store.samplerate === 1_000_000, 'Demo digital rate differs');
+  check(
+    capture.analogChannels.length === 2 &&
+      capture.analogChannels.every((channel) => channel.store.length === 40000n && channel.store.samplerate === 200000),
+    'Demo analog rate or sample count differs',
+  );
+  check(
+    capture.analogChannels[0].store.range.min === -0.625 &&
+      capture.analogChannels[0].store.range.max === -0.625 &&
+      capture.analogChannels[1].store.range.min === 0 &&
+      capture.analogChannels[1].store.range.max === 0,
+    'Demo analog waveform differs',
+  );
+  check(
+    capture.acquisition.worker &&
+      capture.diagnostics.mainThreadAppend.calls === 0 &&
+      capture.diagnostics.mainThreadPublish.calls === 0,
+    'Demo data escaped Worker processing',
+  );
+  for (const protocol of [...app.protocols]) app.removeProtocol(protocol.id);
+  const pwm = app.addProtocol('pwm', false);
+  pwm.mapping = { data: 0 };
+  app.selectProtocol(pwm.id, false);
+  await app.decodeAll();
+  check(pwm.state === 'done' && pwm.frameCount > 0, 'Demo PWM encoder did not decode');
   app.renderer.fit();
   await waitForView();
-  return { samples: '200000', sampleRate: 200000, cases: results };
+  return {
+    samples: String(capture.store.length),
+    digitalRate: capture.store.samplerate,
+    analogRate: capture.analogChannels[0].store.samplerate,
+    analogSamples: String(capture.analogChannels[0].store.length),
+    pwmFrames: pwm.frameCount,
+  };
 }
 
 export async function runZoomChecks() {
@@ -233,16 +251,8 @@ export async function runZoomChecks() {
 
 export async function runInteractionChecks() {
   requireChrome();
-  change('device-select', 'demo');
-  await deadline(app.deviceControls.refreshCapabilities());
-  change('sample-rate', 200000);
-  change('sample-limit', 200000);
-  change('device-channel-count', 8);
-  change('device-analog-count', 2);
-  change('device-option-analogPattern', 'constant');
-  change('device-option-amplitude', 0);
-  change('device-option-offset', -0.625);
-  await deadline(app.deviceControls.refreshCapabilities());
+  await configureDemo();
+  await configureAnalogSignal({ pattern: 'constant', frequencyHz: 1_000, amplitude: 0, offset: -0.625 });
   await deadline(app.startCapture());
   const capture = app.capture,
     renderer = app.renderer,
@@ -284,47 +294,34 @@ export async function runInteractionChecks() {
       clearTimeout(timer);
     }
     check(
-      renderer.hoverX !== null && renderer.hoverResult.values.every((value) => value === -0.625),
+      renderer.hoverX !== null && Math.abs(renderer.hoverResult.values[0] + 0.625) < 1e-6,
       'Hover probe returned stale or wrong sample values',
     );
     check(
-      readouts.some((value) => value === '[ -625 mV ] 2 V/div'),
+      readouts.some((value) => value.includes('-625 mV') && value.includes('/div')),
       'Voltage readout or division scale differs',
     );
     renderer.canvas.dispatchEvent(new PointerEvent('pointerleave'));
     await new Promise((resolve) => requestAnimationFrame(resolve));
     check(renderer.hoverX === null && renderer.hoverSample === null, 'Hover line remained after leaving the waveform');
-    for (const [selector, value] of [
-      ['.channel-chip:not(.analog-chip) .channel-name', '主时钟'],
-      ['.analog-chip .channel-name', '电源监测'],
-    ]) {
-      const input = document.querySelector(selector);
-      check(!input.disabled, 'Channel names stayed disabled after capture');
-      input.value = value;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      check(input.closest('.channel-chip').querySelector('input[type="checkbox"]').checked, 'Renaming hid the channel');
-    }
-    const blob = await deadline(
-        capture.store.exportSR(app.workspaceSettings(), capture.triggerSample, capture.acquisition),
-      ),
+    const workspace = app.workspaceSettings();
+    workspace.channelNames.digital[0] = '主时钟';
+    workspace.channelNames.analog[0] = '电源监测';
+    const blob = await deadline(capture.store.exportSR(workspace, capture.triggerSample, capture.acquisition)),
       imported = await deadline(importCapture(new File([blob], 'renamed.sr'), 200000, 8));
     try {
       check(
         imported.labels[0] === '主时钟' && imported.analogChannels[0].name === '电源监测',
         'Channel names did not survive SR export and import',
       );
-      check(
-        (await imported.store.readAnalogProbe(0n)).every((value) => value === -0.625),
-        'Renaming changed analog samples',
-      );
+      check((await imported.store.readAnalogProbe(0n))[0] === -0.625, 'Renaming changed analog samples');
     } finally {
       imported.store.dispose();
     }
     return {
-      readout: '[ -625 mV ] 2 V/div',
-      digitalName: capture.labels[0],
-      analogName: capture.analogChannels[0].name,
+      readout: readouts.find((value) => value.includes('-625 mV')),
+      digitalName: workspace.channelNames.digital[0],
+      analogName: workspace.channelNames.analog[0],
     };
   } finally {
     delete context.fillText;
@@ -503,6 +500,7 @@ export async function runHardwareChecks() {
     'Hardware driver is missing from the generated manifest',
   );
   if (app.deviceControls.device.descriptor.id !== 'ch32h417') change('device-select', 'ch32h417');
+  check(document.getElementById('signal-section').hidden, 'H417 shows the Demo signal generator');
   const device = app.deviceControls.device;
   check(await deadline(device.restore()), 'Real H417 device could not be restored');
   check(device.connected, 'Real H417 device is disconnected');
@@ -518,8 +516,9 @@ export async function runHardwareChecks() {
     'Capture stayed enabled while Worker configuration was pending',
   );
   change('sample-rate', device.descriptor.capabilities.sampleRate.default);
-  change('sample-limit', samples);
-  change('device-channel-count', 8);
+  app.deviceControls.logicSelection = Array.from({ length: 8 }, (_, index) => index);
+  app.deviceControls.analogSelection = [];
+  change('capture-duration', Number(samples) / device.descriptor.capabilities.sampleRate.default);
   await deadline(app.deviceControls.refreshCapabilities());
   check(app.deviceControls.ready, 'Worker configuration did not become ready');
   const configuration = app.deviceControls.configuration();

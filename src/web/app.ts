@@ -6,6 +6,7 @@ import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
 import { deviceCapture, importCapture, captureMemory, type Capture, type StageTiming } from './capture.js';
 import { MemoryBudgetError, type BudgetSnapshot } from './memory.js';
 import { DeviceControls } from './device-controls.js';
+import { SignalControls } from './signal-controls.js';
 import { driverDefinitions } from '../drivers/index.js';
 import { DeviceClient } from './device-client.js';
 import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
@@ -27,6 +28,7 @@ import {
   type MessageKey,
   type MessageParams,
 } from './i18n.js';
+const FIRST_RUN_CAPTURE_KEY = 'hakei.firstRunCapture';
 export function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`Missing UI element: ${id}`);
@@ -100,6 +102,7 @@ export class AnalyzerApp {
     element<HTMLFormElement>('device-form'),
     driverDefinitions.map((definition) => new DeviceClient(definition)),
   );
+  readonly signalControls = new SignalControls(this.deviceControls);
   private captureAbort: AbortController | null = null;
   private captureStop: AbortController | null = null;
   private acquisitionMemory: BudgetSnapshot | null = null;
@@ -107,10 +110,12 @@ export class AnalyzerApp {
   private importAbort: AbortController | null = null;
   private saveAbort: AbortController | null = null;
   private decodeTimer: ReturnType<typeof setTimeout> | null = null;
+  private firstRunCapturePending = false;
   private statusMessage: { key: MessageKey; params: MessageParams } = { key: 'status.ready', params: {} };
   private displayedMessage: string | UIError | { key: MessageKey; params?: MessageParams } = '';
   private messageIsError = false;
   constructor() {
+    this.firstRunCapturePending = this.claimFirstRunCapture();
     this.populateDecoderSelects();
     this.renderer.onChange = () => this.updateViewport();
     this.renderer.onProtocolOrderChange = () => {
@@ -186,14 +191,19 @@ export class AnalyzerApp {
       event.preventDefault();
       void this.startCapture();
     });
-    this.deviceControls.onConnectionChange = () => this.renderStatus();
+    this.deviceControls.onConnectionChange = () => {
+      this.renderStatus();
+      this.runFirstCapture();
+    };
     this.deviceControls.onChange = () => {
       this.cancelTask(false);
       this.selectingDeviceChannels = true;
+      this.signalControls.refresh();
       this.refreshProtocolMappings();
       this.renderChannelControls();
       this.setStatus('ready', 'status.updated');
       this.updateMemoryUsage();
+      this.runFirstCapture();
     };
     this.updateMemoryUsage();
     element('cancel').addEventListener('click', () => this.cancelTask());
@@ -236,6 +246,26 @@ export class AnalyzerApp {
     this.selectProtocol(null, false);
     this.refreshProtocolMappings();
     this.renderChannelControls();
+    this.runFirstCapture();
+  }
+  private claimFirstRunCapture(): boolean {
+    try {
+      if (localStorage.getItem(FIRST_RUN_CAPTURE_KEY)) return false;
+      localStorage.setItem(FIRST_RUN_CAPTURE_KEY, '1');
+      return this.deviceControls.device.descriptor.id === 'demo';
+    } catch {
+      return false;
+    }
+  }
+  private runFirstCapture(): void {
+    if (!this.firstRunCapturePending) return;
+    if (this.captureAbort || this.deviceControls.device.descriptor.id !== 'demo') {
+      this.firstRunCapturePending = false;
+      return;
+    }
+    if (!this.deviceControls.ready) return;
+    this.firstRunCapturePending = false;
+    void this.startCapture();
   }
   private populateDecoderSelects(): void {
     for (const id of ['add-decoder-type', 'decoder-type']) {
@@ -571,6 +601,15 @@ export class AnalyzerApp {
     }
     if (!this.deviceControls.ready) return;
     if (!element<HTMLFormElement>('device-form').reportValidity()) return;
+    if (this.deviceControls.device.descriptor.id === 'demo') {
+      this.signalControls.sync();
+      const error = this.signalControls.validate();
+      if (error) {
+        this.setStatus('error', 'device.captureError');
+        this.showMessage(error, true);
+        return;
+      }
+    }
     this.commitForm();
     this.cancelTask(false);
     const previous = this.capture;
@@ -1341,6 +1380,7 @@ export class AnalyzerApp {
       ? !!this.captureStop?.signal.aborted
       : this.state === 'loading' || !this.deviceControls.ready;
     this.deviceControls.setBusy(!!this.captureAbort);
+    this.signalControls.setBusy(!!this.captureAbort);
     for (const check of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
       check.disabled = !!this.captureAbort;
     element<HTMLButtonElement>('save-capture').disabled = !this.capture || !!this.saveAbort;

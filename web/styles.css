@@ -746,10 +746,12 @@ h2 {
     width: 50%;
     padding: 12px;
   }
-  .decoder-section {
+  .decoder-section,
+  .signal-section {
     width: 100%;
   }
-  .decoder-section #decoder-options {
+  .decoder-section #decoder-options,
+  .signal-section #signal-options {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0 12px;
@@ -983,6 +985,27 @@ h2 {
   grid-template-columns: minmax(0, 1fr) 42px 27px;
   gap: 8px;
   align-items: end;
+}
+.signal-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 27px;
+  gap: 8px;
+  align-items: end;
+}
+.signal-identity .field {
+  margin: 8px 0;
+}
+.signal-identity button {
+  margin-bottom: 10px;
+}
+.signal-section #signal-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 8px;
+}
+.signal-error {
+  color: var(--danger, #ec8291);
+  min-height: 1.8em;
 }
 .protocol-identity .field {
   margin: 8px 0;

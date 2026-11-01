@@ -11,6 +11,7 @@ import { numberFraction } from '../libhakei/sample-index.js';
 import { errorLabel, hasMessage, numberLabel, t, translateDOM } from './i18n.js';
 
 const SELECTED_DEVICE_KEY = 'hakei.device';
+const DEFAULT_DEVICE_ID = 'demo';
 export class DeviceControls {
   onChange: (() => void) | null = null;
   onConnectionChange: (() => void) | null = null;
@@ -42,7 +43,9 @@ export class DeviceControls {
       select.append(option);
     }
     const remembered = this.rememberedDevice();
+    const defaultDevice = this.devices.find((device) => device.descriptor.id === DEFAULT_DEVICE_ID);
     if (remembered) select.value = remembered;
+    else if (defaultDevice) select.value = defaultDevice.descriptor.id;
     for (const device of devices)
       device.onConnectionChange = () => {
         if (device === this.device) {
@@ -137,6 +140,9 @@ export class DeviceControls {
   configuration(): DeviceConfiguration {
     const sampleRate =
       this.logicSelection.length && this.timebaseOnly ? this.digitalRate : Number(this.control('sample-rate').value);
+    const analogSampleRate = this.samplingCapabilities?.analogSampleRate
+      ? Number(this.control('analog-sample-rate').value)
+      : undefined;
     const options = Object.fromEntries(
       this.device.descriptor.options.map((option) => {
         const value = this.control(`device-option-${option.id}`).value;
@@ -145,6 +151,7 @@ export class DeviceControls {
     );
     return {
       sampleRate,
+      ...(analogSampleRate === undefined ? {} : { analogSampleRate }),
       sampleCount:
         this.durationSeconds === undefined
           ? this.legacySampleCount
@@ -199,6 +206,11 @@ export class DeviceControls {
     const configuration = {
       ...defaults,
       sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
+      ...(defaults.analogSampleRate === undefined
+        ? {}
+        : {
+            analogSampleRate: Number(this.savedSampling('analogSampleRate') ?? defaults.analogSampleRate),
+          }),
       sampleCount: this.savedSampling('sampleCount') ?? defaults.sampleCount,
     };
     this.legacySampleCount = configuration.sampleCount;
@@ -228,6 +240,14 @@ export class DeviceControls {
     const container = this.form.querySelector<HTMLElement>('#device-options')!;
     container.replaceChildren();
     for (const option of this.device.descriptor.options) {
+      if (option.hidden) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.id = `device-option-${option.id}`;
+        input.value = String(previous.get(input.id) ?? option.default);
+        container.append(input);
+        continue;
+      }
       const label = document.createElement('label');
       label.className = 'field';
       const caption = document.createElement('span');
@@ -242,13 +262,16 @@ export class DeviceControls {
           this.caption(item, `driver.${this.device.descriptor.id}.value.${value}`, option.labels?.[value] ?? value);
           input.append(item);
         }
-      } else {
+      } else if (option.kind === 'number') {
         input = document.createElement('input');
         input.type = 'number';
         input.required = true;
         input.step = String(option.step ?? 'any');
         if (option.min !== undefined) input.min = String(option.min);
         if (option.max !== undefined) input.max = String(option.max);
+      } else {
+        input = document.createElement('input');
+        input.type = 'text';
       }
       input.id = `device-option-${option.id}`;
       const saved = previous.get(input.id);
@@ -256,9 +279,11 @@ export class DeviceControls {
         saved !== undefined &&
         (option.kind === 'choice'
           ? option.values.includes(saved)
-          : Number.isFinite(Number(saved)) &&
-            (option.min === undefined || Number(saved) >= option.min) &&
-            (option.max === undefined || Number(saved) <= option.max));
+          : option.kind === 'text'
+            ? true
+            : Number.isFinite(Number(saved)) &&
+              (option.min === undefined || Number(saved) >= option.min) &&
+              (option.max === undefined || Number(saved) <= option.max));
       input.value = valid ? saved! : String(option.default);
       label.append(input);
       if (option.description) {
@@ -269,7 +294,7 @@ export class DeviceControls {
       }
       container.append(label);
     }
-    container.hidden = !this.device.descriptor.options.length;
+    container.hidden = !this.device.descriptor.options.some((option) => !option.hidden);
   }
   setBusy(busy: boolean): void {
     this.busy = busy;
@@ -281,7 +306,8 @@ export class DeviceControls {
     if (!row) return;
     const disconnected = device.connected === false;
     this.form.querySelector<HTMLElement>('#device-sampling')!.hidden = disconnected;
-    this.form.querySelector<HTMLElement>('#device-options')!.hidden = disconnected || !device.descriptor.options.length;
+    this.form.querySelector<HTMLElement>('#device-options')!.hidden =
+      disconnected || !device.descriptor.options.some((option) => !option.hidden);
     row.hidden = device.connected === undefined && !this.configuring && !this.configurationError;
     this.control<HTMLSelectElement>('device-select').disabled = this.busy || this.connecting;
     const connect = row.querySelector<HTMLButtonElement>('#connect-device')!,
@@ -365,12 +391,14 @@ export class DeviceControls {
       if (device !== this.device || sequence !== this.configurationSequence) return;
       this.renderSampling(settings.configuration, settings.capabilities);
       for (const option of device.descriptor.options)
-        this.control(`device-option-${option.id}`).value = String(settings.configuration.options[option.id]);
+        if (!option.hidden)
+          this.control(`device-option-${option.id}`).value = String(settings.configuration.options[option.id]);
       this.rememberSampling();
       translateDOM();
       const key = JSON.stringify([
         device.descriptor.id,
         String(settings.configuration.sampleRate),
+        String(settings.configuration.analogSampleRate ?? ''),
         String(settings.configuration.sampleCount),
         settings.configuration.logicChannelIndices,
         settings.configuration.analogChannelIndices,
@@ -401,10 +429,25 @@ export class DeviceControls {
     label.className = 'field';
     label.hidden = this.timebaseOnly;
     const caption = document.createElement('span');
-    this.caption(caption, `driver.${this.device.descriptor.id}.digitalRate`, t('capture.rate'));
+    this.caption(caption, 'capture.digitalSampleRate', t('capture.digitalSampleRate'));
     label.append(caption);
-    this.numericControl(label, capabilities.sampleRate, configuration.sampleRate);
+    this.numericControl(label, capabilities.sampleRate, configuration.sampleRate, 'sample-rate');
     container.append(label);
+
+    if (capabilities.analogSampleRate) {
+      const analogLabel = document.createElement('label');
+      analogLabel.className = 'field';
+      const analogCaption = document.createElement('span');
+      this.caption(analogCaption, 'capture.analogSampleRate', t('capture.analogSampleRate'));
+      analogLabel.append(analogCaption);
+      this.numericControl(
+        analogLabel,
+        capabilities.analogSampleRate,
+        configuration.analogSampleRate ?? capabilities.analogSampleRate.default,
+        'analog-sample-rate',
+      );
+      container.append(analogLabel);
+    }
 
     const seconds = Number(configuration.sampleCount) / configuration.sampleRate;
     const duration = document.createElement('label');
@@ -454,13 +497,13 @@ export class DeviceControls {
         : []),
       ...(
         capabilities.analogTiming ??
-        (capabilities.timebaseOnly
-          ? []
-          : this.analogSelection.map((channel) => ({
-              channel,
-              sampleRate: configuration.sampleRate,
-              outputBits: undefined,
-            })))
+        this.analogSelection.map((channel) => ({
+          channel,
+          sampleRate: capabilities.analogSampleRate
+            ? (configuration.analogSampleRate ?? Number(capabilities.analogSampleRate.default))
+            : configuration.sampleRate,
+          outputBits: undefined,
+        }))
       ).map((timing) => ({
         name: this.channelName('analog', timing.channel),
         sampleRate: timing.sampleRate,
@@ -492,10 +535,10 @@ export class DeviceControls {
     count = count < minimum ? minimum : count > maximum ? maximum : count;
     return minimum + ((count - minimum) / step) * step;
   }
-  private samplingKey(key: 'sampleRate' | 'sampleCount'): string {
+  private samplingKey(key: 'sampleRate' | 'analogSampleRate' | 'sampleCount'): string {
     return `hakei.${this.device.descriptor.id}.${key}`;
   }
-  private savedSampling(key: 'sampleRate' | 'sampleCount'): number | bigint | undefined {
+  private savedSampling(key: 'sampleRate' | 'analogSampleRate' | 'sampleCount'): number | bigint | undefined {
     try {
       const raw = localStorage.getItem(this.samplingKey(key));
       if (!raw) return undefined;
@@ -509,6 +552,8 @@ export class DeviceControls {
   private rememberSampling(): void {
     try {
       if (!this.timebaseOnly) localStorage.setItem(this.samplingKey('sampleRate'), this.control('sample-rate').value);
+      if (this.samplingCapabilities?.analogSampleRate)
+        localStorage.setItem(this.samplingKey('analogSampleRate'), this.control('analog-sample-rate').value);
       localStorage.setItem(`hakei.${this.device.descriptor.id}.durationSeconds`, String(this.durationSeconds));
       localStorage.removeItem(this.samplingKey('sampleCount'));
     } catch {}
@@ -517,6 +562,7 @@ export class DeviceControls {
     label: HTMLElement,
     capability: NumericCapability<number | bigint>,
     value: number | bigint,
+    id: 'sample-rate' | 'analog-sample-rate',
   ): void {
     const input = document.createElement('select');
     input.required = true;
@@ -533,7 +579,7 @@ export class DeviceControls {
       option.textContent = formatRate(Number(value));
       input.append(option);
     }
-    input.id = 'sample-rate';
+    input.id = id;
     input.value = String(value);
     input.dataset.i18nAttrs = 'aria-label:capture.rate';
     label.append(input);

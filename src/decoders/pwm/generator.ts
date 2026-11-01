@@ -15,9 +15,10 @@ export function* cases({
   seed = 0x50574d,
 }: GenerationOptions = {}): Iterable<PWMCase> {
   for (const polarity of ['active-high', 'active-low']) {
-    for (const mode of ['boundary', 'quantized', 'large-position', 'long']) {
+    for (const mode of ['fixed-1khz-50-duty', 'boundary', 'quantized', 'large-position', 'long']) {
       const long = mode === 'long';
-      const sampleRate = mode === 'boundary' ? 16_000_000 : 1_000_000;
+      const fixed = mode === 'fixed-1khz-50-duty';
+      const sampleRate = mode === 'boundary' || fixed ? 16_000_000 : 1_000_000;
       const startSample = mode === 'large-position' ? 9_007_199_254_740_990n : 0n;
       const minimum = long ? Math.max(MIN_PAYLOAD_BITS, minimumPayloadBits) : 0;
       const count = long ? Math.ceil(minimum / 32) : 16;
@@ -40,13 +41,17 @@ export function* cases({
             const data: PWMCycle[] = [],
               expected: ExpectedFrame[] = [];
             for (let index = offset; index < Math.min(count, offset + 256); index++) {
-              const periodTicks = long
-                ? 256 + (random() % 65280)
-                : [32, 33, 63, 1023, 65535, 160, 65534, 1600][index % 8]!;
+              const periodTicks = fixed
+                ? 16_000
+                : long
+                  ? 256 + (random() % 65280)
+                  : [32, 33, 63, 1023, 65535, 160, 65534, 1600][index % 8]!;
               const minimumDuty = Math.ceil((16 * 65535) / periodTicks);
-              const dutyUnits = long
-                ? minimumDuty + (random() % (65536 - 2 * minimumDuty))
-                : [32768, 33761, 48892, 32768, 65519, 6554, 32768, 64880][index % 8]!;
+              const dutyUnits = fixed
+                ? 32_768
+                : long
+                  ? minimumDuty + (random() % (65536 - 2 * minimumDuty))
+                  : [32768, 33761, 48892, 32768, 65519, 6554, 32768, 64880][index % 8]!;
               data.push({ periodTicks, dutyUnits });
               const numerator = BigInt(periodTicks) * BigInt(sampleRate);
               const period = (2n * numerator + BigInt(tickRate)) / (2n * BigInt(tickRate));

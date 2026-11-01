@@ -77,6 +77,7 @@ export async function generateComponents() {
   await mkdir(output, { recursive: true });
   const discovered = [];
   const exports = [];
+  const encoders = [];
   for (const group of groups) {
     const entries = await readdir(resolve(root, 'src', group.directory), { withFileTypes: true });
     const names = entries
@@ -92,6 +93,20 @@ export async function generateComponents() {
         const path = resolve(root, 'src', group.directory, name, entry);
         if (!(await stat(path).catch(() => null))?.isFile())
           throw new Error('Missing component entry: ' + relative(root, path));
+      }
+      if (group.directory === 'decoders') {
+        const companionEntries = await Promise.all(
+          ['generator.ts', 'encoder.ts'].map(async (entry) => {
+            const path = resolve(root, 'src', group.directory, name, entry);
+            return { entry, present: !!(await stat(path).catch(() => null))?.isFile() };
+          }),
+        );
+        if (companionEntries.some((entry) => entry.present) && !companionEntries.every((entry) => entry.present))
+          throw new Error(
+            'Decoder generator.ts and encoder.ts must be provided together: ' +
+              relative(root, resolve(root, 'src', group.directory, name)),
+          );
+        if (companionEntries.every((entry) => entry.present)) encoders.push(name);
       }
       await inspectUiGraph(resolve(root, 'src', group.directory, name, 'component.ts'), new Set());
       discovered.push({ ...group, name });
@@ -117,6 +132,42 @@ export async function generateComponents() {
       `import type { ${group.workerDefinition} } from '../${group.directory}/definition.js';\n${workerImports}\n\nexport const ${group.kind}Workers: readonly ${group.workerDefinition}[] = [${workers}];\n`,
     );
   }
+  const encoderNames = encoders.sort();
+  const encoderLoaders = encoderNames
+    .map(
+      (name) => `  ${JSON.stringify(name)}: async () => {
+    const [generator, encoder] = await Promise.all([
+      import('../decoders/${name}/generator.js'),
+      import('../decoders/${name}/encoder.js'),
+    ]);
+    return { cases: generator.cases, createEncoder: encoder.createEncoder } as SignalEncoderModule;
+  },`,
+    )
+    .join('\n');
+  await writeGenerated(
+    resolve(output, 'encoders.ts'),
+    `import type { SignalEncoderModule, SignalEncoderPreset } from '../decoders/signal.js';
+
+const loaders: Record<string, () => Promise<SignalEncoderModule>> = {
+${encoderLoaders}
+};
+
+export const encoderIds = Object.freeze(${JSON.stringify(encoderNames)}) as readonly string[];
+
+export async function loadSignalEncoder(decoder: string): Promise<SignalEncoderModule> {
+  const load = loaders[decoder];
+  if (!load) throw new Error('Unknown signal encoder: ' + decoder);
+  return load();
+}
+
+export async function loadSignalEncoderPresets(decoder: string): Promise<readonly SignalEncoderPreset[]> {
+  const encoder = await loadSignalEncoder(decoder);
+  return [...encoder.cases({ minimumPayloadBits: 0 })]
+    .filter((item) => item.kind === 'boundary')
+    .map((item) => ({ name: item.name, options: { ...item.options } }));
+}
+`,
+  );
   await writeGenerated(resolve(output, 'exports.ts'), exports.join('\n') + '\n');
   return discovered;
 }

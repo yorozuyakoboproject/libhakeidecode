@@ -81,6 +81,82 @@
             <progress id="save-fraction" max="1" value="0" data-i18n-attrs="aria-label:capture.saving"></progress>
           </div>
         </section>
+        <section id="signal-section" class="side-section signal-section" hidden>
+          <div class="section-title">
+            <span data-i18n="signal.section">信号发生器</span><span id="signal-badge" class="section-number">0</span>
+          </div>
+          <div class="protocol-add">
+            <select id="add-signal-type" data-i18n-attrs="aria-label:signal.type"></select
+            ><button id="add-signal" class="button" data-i18n="signal.add">＋ 添加信号</button>
+          </div>
+          <div id="signal-list" class="protocol-list" data-i18n-attrs="aria-label:signal.instances"></div>
+          <p id="signal-empty" class="hint" data-i18n="signal.empty">添加编码器或模拟信号</p>
+          <div id="signal-editor" hidden>
+            <div class="signal-identity">
+              <label class="field"
+                ><span data-i18n="signal.name">名称</span
+                ><input id="signal-name" maxlength="80" data-i18n-attrs="aria-label:signal.name"
+              /></label>
+              <button
+                id="remove-signal"
+                class="icon-button"
+                data-i18n-attrs="title:signal.remove;aria-label:signal.remove"
+              >
+                ×
+              </button>
+            </div>
+            <div id="signal-encoder-fields">
+              <label class="field"
+                ><span data-i18n="signal.encoder">协议编码器</span
+                ><select id="signal-decoder" data-i18n-attrs="aria-label:signal.encoder"></select
+              ></label>
+              <label class="field"
+                ><span data-i18n="signal.case">边界用例</span
+                ><select id="signal-case" data-i18n-attrs="aria-label:signal.case"></select
+              ></label>
+              <div id="signal-mapping" class="two-fields"></div>
+              <div id="signal-options"></div>
+            </div>
+            <div id="signal-analog-fields">
+              <label class="field"
+                ><span data-i18n="signal.pattern">波形</span
+                ><select id="signal-pattern" data-i18n-attrs="aria-label:signal.pattern"></select
+              ></label>
+              <label class="field"
+                ><span data-i18n="signal.channel">模拟通道</span
+                ><select id="signal-channel" data-i18n-attrs="aria-label:signal.channel"></select
+              ></label>
+              <div class="two-fields">
+                <label class="field"
+                  ><span data-i18n="signal.frequency">频率 (Hz)</span
+                  ><input
+                    id="signal-frequency"
+                    type="number"
+                    min="0.000001"
+                    step="any"
+                    data-i18n-attrs="aria-label:signal.frequency" /></label
+                ><label class="field"
+                  ><span data-i18n="signal.amplitude">幅度 (V)</span
+                  ><input id="signal-amplitude" type="number" step="any" data-i18n-attrs="aria-label:signal.amplitude"
+                /></label>
+              </div>
+              <div class="two-fields">
+                <label class="field"
+                  ><span data-i18n="signal.offset">偏置 (V)</span
+                  ><input
+                    id="signal-offset"
+                    type="number"
+                    step="any"
+                    data-i18n-attrs="aria-label:signal.offset" /></label
+                ><label class="field"
+                  ><span data-i18n="signal.seed">随机种子</span
+                  ><input id="signal-seed" type="number" step="1" data-i18n-attrs="aria-label:signal.seed"
+                /></label>
+              </div>
+            </div>
+            <p id="signal-error" class="hint signal-error" role="alert"></p>
+          </div>
+        </section>
         <section class="side-section">
           <div class="section-title">
             <span data-i18n="channels.section">数字通道</span><span id="channel-badge" class="section-number">0</span>

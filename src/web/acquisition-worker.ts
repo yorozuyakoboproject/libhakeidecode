@@ -340,7 +340,8 @@ scope.onmessage = ({ data }) => {
           controller.signal.throwIfAborted();
           break;
         }
-        if (!borrowed) throw new Error('Worker driver must use the managed buffer contract');
+        const timeline = 'format' in result.value && result.value.format === 'timeline';
+        if (!borrowed && !timeline) throw new Error('Worker driver must use the managed buffer contract');
         if (producer && 'format' in result.value && result.value.format === 'packed-logic') {
           await producer.append(result.value.data.subarray(0, result.value.length));
         } else if (data.store) {
@@ -349,12 +350,12 @@ scope.onmessage = ({ data }) => {
         }
         const buffer = borrowed;
         borrowed = null;
-        if (producer) {
-          available.push(buffer);
-        } else if (data.store) {
-          available.push(buffer);
-        } else {
-          scope.postMessage({ type: 'chunk', chunk: result.value, buffer }, [buffer]);
+        if (buffer) {
+          if (producer || data.store) {
+            available.push(buffer);
+          } else {
+            scope.postMessage({ type: 'chunk', chunk: result.value, buffer }, [buffer]);
+          }
         }
         if (performance.now() - lastYield >= 8) {
           await yieldWorkerTask();
