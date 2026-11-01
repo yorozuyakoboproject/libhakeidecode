@@ -6,21 +6,20 @@ import {
   type NumericCapability,
 } from '../libhakei/device.js';
 import type { DeviceControl } from './device-protocol.js';
-import { formatRate } from '../libhakei/units.js';
-import { errorLabel, hasMessage, numberLabel, t, translateDOM, type MessageKey } from './i18n.js';
+import { formatDuration, formatRate, formatSampleCount } from '../libhakei/units.js';
+import { numberFraction } from '../libhakei/sample-index.js';
+import { errorLabel, hasMessage, numberLabel, t, translateDOM } from './i18n.js';
 
 const SELECTED_DEVICE_KEY = 'hakei.device';
-const fields = [
-  ['sampleRate', 'sample-rate', 'capture.rate'],
-  ['sampleCount', 'sample-limit', 'capture.sampleLimit'],
-] as const;
-
 export class DeviceControls {
   onChange: (() => void) | null = null;
   onConnectionChange: (() => void) | null = null;
   private busy = false;
   private timebaseOnly = false;
   private digitalRate = 0;
+  private durationSeconds?: number;
+  private legacySampleCount: number | bigint = 1n;
+  private samplingCapabilities?: DeviceCapabilities;
   private logicSelection: number[] = [];
   private analogSelection: number[] = [];
   private connecting = false;
@@ -72,7 +71,13 @@ export class DeviceControls {
     });
     form.addEventListener('change', (event) => {
       if (event.target === select || this.busy) return;
+      if ((event.target as HTMLElement).id === 'capture-duration')
+        this.durationSeconds = Number(this.control('capture-duration').value);
       void this.refreshCapabilities();
+    });
+    window.addEventListener('hakei:localechange', () => {
+      if (this.samplingCapabilities) this.renderSampling(this.configuration(), this.samplingCapabilities);
+      this.refreshConnection();
     });
     void this.restoreAuthorizedDevices();
   }
@@ -130,12 +135,8 @@ export class DeviceControls {
     void this.refreshCapabilities();
   }
   configuration(): DeviceConfiguration {
-    const values = Object.fromEntries(
-      fields.map(([key, id]) => [
-        key,
-        key === 'sampleCount' ? BigInt(this.control(id).value) : Number(this.control(id).value),
-      ]),
-    );
+    const sampleRate =
+      this.logicSelection.length && this.timebaseOnly ? this.digitalRate : Number(this.control('sample-rate').value);
     const options = Object.fromEntries(
       this.device.descriptor.options.map((option) => {
         const value = this.control(`device-option-${option.id}`).value;
@@ -143,8 +144,11 @@ export class DeviceControls {
       }),
     );
     return {
-      sampleRate: this.logicSelection.length && this.timebaseOnly ? this.digitalRate : Number(values.sampleRate!),
-      sampleCount: values.sampleCount!,
+      sampleRate,
+      sampleCount:
+        this.durationSeconds === undefined
+          ? this.legacySampleCount
+          : this.durationSamples(this.durationSeconds, sampleRate, this.samplingCapabilities!.sampleCount),
       logicChannels: this.logicSelection.length,
       analogChannels: this.analogSelection.length,
       logicChannelIndices: [...this.logicSelection],
@@ -197,6 +201,13 @@ export class DeviceControls {
       sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
       sampleCount: this.savedSampling('sampleCount') ?? defaults.sampleCount,
     };
+    this.legacySampleCount = configuration.sampleCount;
+    try {
+      const saved = Number(localStorage.getItem(`hakei.${this.device.descriptor.id}.durationSeconds`));
+      this.durationSeconds = Number.isFinite(saved) && saved > 0 ? saved : undefined;
+    } catch {
+      this.durationSeconds = undefined;
+    }
     this.renderSampling(configuration, this.device.descriptor.capabilities);
     this.renderOptions(true);
     this.connectionError = null;
@@ -333,7 +344,20 @@ export class DeviceControls {
         this.onChange?.();
         return;
       }
-      const settings = await device.configure(this.configuration());
+      let settings = await device.configure(this.configuration());
+      if (device !== this.device || sequence !== this.configurationSequence) return;
+      const rate = settings.configuration.sampleRate;
+      const capability = settings.capabilities.sampleCount;
+      const counts = capability.kind === 'list' ? capability.values : [capability.min, capability.max];
+      const minimum = Math.min(...counts.map(Number)) / rate;
+      const maximum = Math.max(...counts.map(Number)) / rate;
+      this.durationSeconds = Math.min(
+        maximum,
+        Math.max(minimum, this.durationSeconds ?? Number(settings.configuration.sampleCount) / rate),
+      );
+      const count = this.durationSamples(this.durationSeconds, rate, capability);
+      if (count !== BigInt(settings.configuration.sampleCount))
+        settings = await device.configure({ ...settings.configuration, sampleCount: count });
       if (device !== this.device || sequence !== this.configurationSequence) return;
       this.renderSampling(settings.configuration, settings.capabilities);
       for (const option of device.descriptor.options)
@@ -342,7 +366,8 @@ export class DeviceControls {
       translateDOM();
       const key = JSON.stringify([
         device.descriptor.id,
-        ...fields.map(([field]) => String(settings.configuration[field])),
+        String(settings.configuration.sampleRate),
+        String(settings.configuration.sampleCount),
         settings.configuration.logicChannelIndices,
         settings.configuration.analogChannelIndices,
         settings.configuration.options,
@@ -362,42 +387,105 @@ export class DeviceControls {
     }
   }
   private renderSampling(configuration: DeviceConfiguration, capabilities: DeviceCapabilities): void {
+    this.samplingCapabilities = capabilities;
     this.timebaseOnly = !!capabilities.timebaseOnly;
     if (!this.timebaseOnly) this.digitalRate = configuration.sampleRate;
     const container = this.form.querySelector('#device-sampling')!;
     container.replaceChildren();
-    let previewRate: number | undefined;
-    let previewCount: bigint | undefined;
-    for (const [key, id, captionKey] of fields) {
-      const capability = capabilities[key],
-        value = configuration[key];
-      const selected = value;
-      if (key === 'sampleRate') previewRate = Number(selected);
-      if (key === 'sampleCount') previewCount = BigInt(selected);
-      const label = document.createElement('label');
-      label.className = 'field';
-      label.hidden = key === 'sampleRate' && !!capabilities.timebaseOnly;
-      const caption = document.createElement('span');
-      if (key === 'sampleRate' && capabilities.timebaseOnly)
-        this.caption(caption, `driver.${this.device.descriptor.id}.timebase`, 'Timebase (Hz)');
-      else if (key === 'sampleRate' && hasMessage(`driver.${this.device.descriptor.id}.digitalRate`))
-        this.caption(caption, `driver.${this.device.descriptor.id}.digitalRate`, 'Digital sample rate');
-      else this.caption(caption, captionKey, captionKey);
-      label.append(caption);
-      this.numericControl(label, id, capability, selected, captionKey, capabilities.timebaseOnly ? 'Hz' : 'S/s');
-      container.append(label);
+    const label = document.createElement('label');
+    label.className = 'field';
+    label.hidden = this.timebaseOnly;
+    const caption = document.createElement('span');
+    this.caption(caption, `driver.${this.device.descriptor.id}.digitalRate`, t('capture.rate'));
+    label.append(caption);
+    this.numericControl(label, capabilities.sampleRate, configuration.sampleRate);
+    container.append(label);
+
+    const seconds = Number(configuration.sampleCount) / configuration.sampleRate;
+    const duration = document.createElement('label');
+    duration.className = 'field';
+    const title = document.createElement('span');
+    this.caption(title, 'capture.captureDuration', 'Capture duration');
+    duration.append(title);
+    const input = document.createElement('select');
+    input.id = 'capture-duration';
+    input.required = true;
+    input.dataset.i18nAttrs = 'aria-label:capture.captureDuration';
+    const cap = capabilities.sampleCount;
+    const counts = cap.kind === 'list' ? cap.values : [cap.min, cap.max];
+    const minimum = Math.min(...counts.map(Number)) / configuration.sampleRate;
+    const maximum = Math.max(...counts.map(Number)) / configuration.sampleRate;
+    const selected = this.durationSeconds ?? seconds;
+    const choices = new Set([minimum, maximum, selected]);
+    for (let exponent = -9; exponent <= Math.ceil(Math.log10(maximum)); exponent++)
+      for (const multiplier of [1, 2, 5]) {
+        const value = Number((multiplier * 10 ** exponent).toPrecision(12));
+        if (value >= minimum && value <= maximum) choices.add(value);
+      }
+    for (const value of [...choices].sort((a, b) => a - b)) {
+      const item = document.createElement('option');
+      item.value = String(value);
+      item.textContent = formatDuration(value);
+      input.append(item);
     }
-    for (const timing of capabilities.analogTiming ?? []) {
-      const details = document.createElement('p');
-      details.className = 'hint';
-      details.textContent = `${this.channelName('analog', timing.channel)} · ${formatRate(timing.sampleRate)} · ${timing.outputBits} bit`;
-      container.append(details);
-    }
+    input.value = String(selected);
+    duration.append(input);
+    container.append(duration);
     const preview = document.createElement('p');
     preview.id = 'capture-duration-preview';
     preview.className = 'hint';
-    preview.textContent = this.durationPreview(previewCount!, previewRate!);
+    preview.textContent = t('capture.durationPreview', { duration: formatDuration(seconds) });
     container.append(preview);
+    const streams = [
+      ...(configuration.logicChannels
+        ? [
+            {
+              name: t('capture.digital'),
+              sampleRate: configuration.sampleRate,
+              count: BigInt(configuration.sampleCount),
+              bits: undefined,
+            },
+          ]
+        : []),
+      ...(
+        capabilities.analogTiming ??
+        (capabilities.timebaseOnly
+          ? []
+          : this.analogSelection.map((channel) => ({
+              channel,
+              sampleRate: configuration.sampleRate,
+              outputBits: undefined,
+            })))
+      ).map((timing) => ({
+        name: this.channelName('analog', timing.channel),
+        sampleRate: timing.sampleRate,
+        count: BigInt(Math.floor(seconds * timing.sampleRate)),
+        bits: timing.outputBits,
+      })),
+    ];
+    for (const stream of streams) {
+      const details = document.createElement('p');
+      details.className = 'hint';
+      details.dataset.streamPreview = stream.name;
+      details.textContent = `${stream.name} · ${formatRate(stream.sampleRate)}${stream.bits ? ` · ${stream.bits} bit` : ''} · ${t('capture.expectedSamples', { count: formatSampleCount(stream.count) })}`;
+      details.title = numberLabel(stream.count);
+      container.append(details);
+    }
+  }
+  private durationSamples(seconds: number, rate: number, capability: DeviceCapabilities['sampleCount']): bigint {
+    const [numerator, denominator] = numberFraction(seconds);
+    let count = (numerator * BigInt(rate) + denominator / 2n) / denominator;
+    if (capability.kind === 'list')
+      return capability.values
+        .map(BigInt)
+        .reduce((best, value) =>
+          (value > count ? value - count : count - value) < (best > count ? best - count : count - best) ? value : best,
+        );
+    const minimum = BigInt(capability.min),
+      maximum = BigInt(capability.max),
+      step = BigInt(capability.step);
+    count = count < minimum ? minimum : count > maximum ? maximum : count;
+    return minimum + ((count - minimum) / step) * step;
   }
   private samplingKey(key: 'sampleRate' | 'sampleCount'): string {
     return `hakei.${this.device.descriptor.id}.${key}`;
@@ -414,55 +502,16 @@ export class DeviceControls {
     }
   }
   private rememberSampling(): void {
-    for (const [key, id] of [
-      ['sampleRate', 'sample-rate'],
-      ['sampleCount', 'sample-limit'],
-    ] as const) {
-      if (key === 'sampleRate' && this.timebaseOnly) continue;
-      const input = this.form.querySelector<HTMLInputElement | HTMLSelectElement>('#' + id);
-      if (!input) continue;
-      try {
-        localStorage.setItem(this.samplingKey(key), input.value);
-      } catch {}
-    }
-  }
-  private durationPreview(sampleCount: bigint, sampleRate: number): string {
-    const seconds = Number(sampleCount) / sampleRate;
-    if (!Number.isFinite(seconds)) return '';
-    const value =
-      seconds < 1e-6
-        ? `${(seconds * 1e9).toFixed(2)} ns`
-        : seconds < 1e-3
-          ? `${(seconds * 1e6).toFixed(2)} us`
-          : seconds < 1
-            ? `${(seconds * 1e3).toFixed(2)} ms`
-            : seconds < 60
-              ? `${seconds.toFixed(3)} s`
-              : `${(seconds / 60).toFixed(2)} min`;
-    return t('capture.durationPreview', { duration: value });
-  }
-  private choiceLabel(value: number | bigint, id: string, rateUnit: 'S/s' | 'Hz'): string {
-    if (id === 'sample-rate') return formatRate(Number(value), rateUnit);
-    if (id !== 'sample-limit') return numberLabel(value);
-    const units = [
-      [1e15, 'P'],
-      [1e12, 'T'],
-      [1e9, 'G'],
-      [1e6, 'M'],
-      [1e3, 'k'],
-      [1, ''],
-    ] as const;
-    const [scale, prefix] = units.find(([scale]) => value >= scale) ?? [1, ''];
-    const unit = prefix;
-    return numberLabel(Number(value) / scale, { maximumSignificantDigits: 16 }) + (unit ? ` ${unit}` : '');
+    try {
+      if (!this.timebaseOnly) localStorage.setItem(this.samplingKey('sampleRate'), this.control('sample-rate').value);
+      localStorage.setItem(`hakei.${this.device.descriptor.id}.durationSeconds`, String(this.durationSeconds));
+      localStorage.removeItem(this.samplingKey('sampleCount'));
+    } catch {}
   }
   private numericControl(
     label: HTMLElement,
-    id: string,
     capability: NumericCapability<number | bigint>,
     value: number | bigint,
-    captionKey: MessageKey,
-    rateUnit: 'S/s' | 'Hz',
   ): void {
     const input = document.createElement('select');
     input.required = true;
@@ -470,19 +519,18 @@ export class DeviceControls {
     for (const choice of choices) {
       const option = document.createElement('option');
       option.value = String(choice);
-      option.textContent = this.choiceLabel(choice, id, rateUnit);
-      option.title = id === 'sample-rate' ? option.textContent : numberLabel(choice);
+      option.textContent = formatRate(Number(choice));
       input.append(option);
     }
     if (!choices.some((choice) => String(choice) === String(value))) {
       const option = document.createElement('option');
       option.value = String(value);
-      option.textContent = this.choiceLabel(value, id, rateUnit);
+      option.textContent = formatRate(Number(value));
       input.append(option);
     }
-    input.id = id;
+    input.id = 'sample-rate';
     input.value = String(value);
-    input.dataset.i18nAttrs = `aria-label:${captionKey}`;
+    input.dataset.i18nAttrs = 'aria-label:capture.rate';
     label.append(input);
   }
 }

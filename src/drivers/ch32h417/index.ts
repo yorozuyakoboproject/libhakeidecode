@@ -27,7 +27,8 @@ import {
   readStatus,
   type Capabilities,
 } from './protocol.js';
-import { H417Transport, TRANSPORT_WORKING_BYTES, browserUsb, statusError, type UsbApi } from './transport.js';
+import { H417Transport, TRANSPORT_WORKING_BYTES, browserUsb, type UsbApi } from './transport.js';
+import { captureError } from './overflow.js';
 async function configureCompression(
   transport: H417Transport,
   caps: Capabilities,
@@ -317,7 +318,7 @@ export class CH32H417Device implements MultiRateDevice {
             status.samples !== digital
           )
             throw new Error('H417 final configuration/count mismatch');
-          if (status.error) throw statusError(status.error, digital);
+          if (status.error) throw await captureError(transport, status.error, configuration, caps, digital);
           if (configuration.logicChannels && digital !== BigInt(configuration.sampleCount))
             throw new Error('Incomplete digital capture');
           if (analog.some((pin) => !expected.has(pin) || expected.get(pin) !== received.get(pin)))
@@ -636,7 +637,7 @@ export class CH32H417Device implements MultiRateDevice {
             samples !== status.samples
           )
             throw new Error('H417 final configuration/count mismatch');
-          if (status.error) throw statusError(status.error, samples);
+          if (status.error) throw await captureError(transport, status.error, configuration, caps, samples);
           if (samples !== sampleIndex(configuration.sampleCount))
             throw new Error('H417 capture ended before the requested sample count');
           break;
@@ -752,7 +753,7 @@ export class CH32H417Device implements MultiRateDevice {
             samples !== status.samples
           )
             throw new Error('H417 final configuration/count mismatch');
-          if (status.error) throw statusError(status.error);
+          if (status.error) throw await captureError(transport, status.error, config, caps, samples);
           if (samples !== sampleIndex(config.sampleCount))
             throw new Error('H417 capture ended before the requested sample count');
           break;

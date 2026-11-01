@@ -4,11 +4,17 @@ export const messages = {
   en: {
     'driver.ch32h417.error.adcRate': 'ADC1 scan rate exceeds the device-supported range.',
     'driver.ch32h417.error.captureOverflow':
-      'Capture buffer overflow: processing or transfer throughput cannot keep up. Capture stopped after {samples} samples.',
+      'Capture buffer overflow; capture stopped. Available diagnostics cannot determine the bottleneck.',
+    'driver.ch32h417.error.processingOverflow':
+      'MCU encoding cannot keep up: measured processing time is approximately {load} times the sampling time budget. Capture stopped.',
+    'driver.ch32h417.error.usbBackpressure':
+      'USB transfers did not complete in time: device buffers are waiting for transmission. Capture stopped.',
+    'driver.ch32h417.error.multipleOverflows':
+      'MCU encoding and USB transmission both show backlogs; a single bottleneck cannot be determined. Capture stopped.',
     'driver.ch32h417.error.hostOverflow':
-      'Host receive queue overflow: the browser cannot consume the stream fast enough. Capture stopped.',
+      'Browser receiving or processing cannot keep up: the receive queue filled. Capture stopped.',
     'driver.ch32h417.error.usbTransfer': 'USB transfer failed; capture stopped.',
-    'driver.ch32h417.error.encoding': 'Sample encoding failed or exceeded its processing deadline; capture stopped.',
+    'driver.ch32h417.error.encoding': 'MCU encoding failed or exceeded its processing deadline; capture stopped.',
     'driver.ch32h417.error.inputSequence': 'Input sequence error; capture stopped.',
     'driver.ch32h417.error.dmaTransfer': 'Invalid DMA sample block length; capture stopped.',
 
@@ -43,11 +49,14 @@ export const messages = {
   },
   'zh-CN': {
     'driver.ch32h417.error.adcRate': 'ADC1 扫描速率超出设备支持范围。',
-    'driver.ch32h417.error.captureOverflow':
-      '采样缓冲区溢出：当前处理或传输吞吐不足，已停止采集，接收了 {samples} 个采样点。',
-    'driver.ch32h417.error.hostOverflow': '网页接收队列溢出：浏览器处理速度跟不上数据流，已停止采集。',
+    'driver.ch32h417.error.captureOverflow': '采样缓冲区溢出，已停止采集；现有诊断信息不足以确定具体瓶颈。',
+    'driver.ch32h417.error.processingOverflow':
+      'MCU 编码处理跟不上：实测处理耗时约为采样时间预算的 {load} 倍，已停止采集。',
+    'driver.ch32h417.error.usbBackpressure': 'USB 发送未及时完成：设备缓冲区等待传输，已停止采集。',
+    'driver.ch32h417.error.multipleOverflows': 'MCU 编码处理和 USB 发送均有积压，无法确定唯一瓶颈，已停止采集。',
+    'driver.ch32h417.error.hostOverflow': '网页接收或处理跟不上：浏览器接收队列已满，已停止采集。',
     'driver.ch32h417.error.usbTransfer': 'USB 传输失败，已停止采集。',
-    'driver.ch32h417.error.encoding': '采样编码失败或处理超时，已停止采集。',
+    'driver.ch32h417.error.encoding': 'MCU 编码失败或处理超时，已停止采集。',
     'driver.ch32h417.error.inputSequence': '采样输入顺序异常，已停止采集。',
     'driver.ch32h417.error.dmaTransfer': 'DMA 采样块长度异常，已停止采集。',
 

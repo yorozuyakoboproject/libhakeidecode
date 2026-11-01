@@ -42,6 +42,16 @@ export interface UsbDevice {
   clearHalt?(direction: 'in' | 'out', endpoint: number): Promise<void>;
   transferOut(endpoint: number, data: Uint8Array): Promise<{ status: string; bytesWritten?: number }>;
   transferIn(endpoint: number, length: number): Promise<{ status: string; data?: DataView }>;
+  controlTransferIn?(
+    setup: {
+      requestType: 'vendor';
+      recipient: 'device';
+      request: number;
+      value: number;
+      index: number;
+    },
+    length: number,
+  ): Promise<{ status: string; data?: DataView }>;
 }
 export interface UsbApi {
   requestDevice(options: { filters: { vendorId: number; productId: number }[] }): Promise<UsbDevice>;
@@ -144,6 +154,8 @@ export class H417Transport {
     receivedBytes: 0,
     parserMs: 0,
     queuePeak: 0,
+    receiveQueuePauses: 0,
+    receiveQueueWaitMs: 0,
     dataFrames: 0,
     codecRawBytes: 0,
     codecWireBytes: 0,
@@ -345,10 +357,14 @@ export class H417Transport {
       const parseStarted = performance.now();
       parser.push(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
       this.counters.parserMs += performance.now() - parseStarted;
-      while (this.queue.length >= USB_QUEUE_BLOCKS && !this.discarding && !this.closed && !this.error)
+      while (this.queue.length >= USB_QUEUE_BLOCKS && !this.discarding && !this.closed && !this.error) {
+        const waitStarted = performance.now();
+        this.counters.receiveQueuePauses++;
         await new Promise<void>((resolve) => {
           this.room = resolve;
         });
+        this.counters.receiveQueueWaitMs += performance.now() - waitStarted;
+      }
       if (this.closed || this.error) return;
     }
   }

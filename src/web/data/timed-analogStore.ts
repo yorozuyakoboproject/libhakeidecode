@@ -14,6 +14,9 @@ export class TimedAnalogStore implements AnalogStore {
   private get scale(): number {
     return this.timing.referenceMv / 1000 / ((1 << this.timing.bits) - 1);
   }
+  get nativeLength(): bigint {
+    return this.native.length;
+  }
   get length(): bigint {
     if (!this.native.length) return 0n;
     const t = this.timing.firstTick + this.native.length * this.timing.periodTicks;

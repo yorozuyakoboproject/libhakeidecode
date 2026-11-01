@@ -1,5 +1,5 @@
 import { minSample, maxSample } from '../libhakei/sample-index.js';
-import { formatRate } from '../libhakei/units.js';
+import { formatDuration, formatRate, formatSampleCount } from '../libhakei/units.js';
 import type { TransferProgress } from '../libhakei/device.js';
 import { scaleSamples } from '../libhakei/sample-index.js';
 import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
@@ -619,8 +619,8 @@ export class AnalyzerApp {
           this.updateMemoryUsage();
           if (!stop.signal.aborted && this.state !== 'decoding')
             this.setStatus('loading', 'capture.progress', {
-              samples: numberLabel(samples),
-              target: numberLabel(configuration.sampleCount),
+              duration: formatDuration(Number(samples) / configuration.sampleRate),
+              target: formatDuration(Number(configuration.sampleCount) / configuration.sampleRate),
               memory: (memory.usedBytes / 1048576).toFixed(2),
             });
         },
@@ -884,8 +884,7 @@ export class AnalyzerApp {
     this.renderer.clearCapture();
     for (const protocol of this.protocols) this.clearProtocol(protocol);
     element('capture-name').textContent = t('capture.empty');
-    element('sample-count').textContent = '—';
-    element('rate-label').textContent = '—';
+    element('capture-streams').replaceChildren();
     element('duration-label').textContent = '—';
     this.renderChannelControls();
     this.updateDecodeSummary();
@@ -1376,14 +1375,70 @@ export class AnalyzerApp {
     node.hidden = !message;
     node.classList.toggle('error', this.messageIsError);
   }
+  private capturedDuration(): number {
+    const capture = this.capture;
+    if (!capture) return 0;
+    let seconds = Number(capture.store.length) / capture.store.samplerate;
+    for (const channel of capture.analogChannels ?? []) {
+      const timing = channel.store.timing;
+      const count = channel.store.nativeLength;
+      if (timing && count)
+        seconds = Math.max(seconds, Number(timing.firstTick + count * timing.periodTicks) / timing.clockHz);
+    }
+    return capture.acquisition
+      ? Math.min(seconds, Number(capture.acquisition.targetSamples) / capture.store.samplerate)
+      : seconds;
+  }
   private updateCaptureLabels(): void {
     const capture = this.capture;
     if (!capture) return;
     delete element('capture-name').dataset.i18n;
     element('capture-name').textContent = capture.nameKey ? t(capture.nameKey) : capture.name;
-    element('sample-count').textContent = numberLabel(capture.store.length);
-    element('rate-label').textContent = formatRate(capture.store.samplerate);
-    element('duration-label').textContent = timeLabel(Number(capture.store.length) / capture.store.samplerate);
+    element('duration-label').textContent = formatDuration(this.capturedDuration());
+    const streams = [
+      ...((capture.logicChannelCount ?? capture.store.channelCount)
+        ? [
+            {
+              name: t('capture.digital'),
+              count: capture.store.length,
+              rate: capture.store.samplerate,
+            },
+          ]
+        : []),
+      ...(capture.analogChannels ?? []).map((channel, index) => {
+        const timing = channel.store.timing;
+        const physical = capture.deviceChannels?.analog[index];
+        const matching = capture.deviceChannels?.driverId === this.deviceControls.device.descriptor.id;
+        return {
+          name: matching && physical !== undefined ? this.deviceControls.channelName('analog', physical) : channel.name,
+          count: channel.store.nativeLength ?? channel.store.length,
+          rate: timing
+            ? timing.clockHz / Number(timing.periodTicks)
+            : channel.store.length
+              ? channel.store.samplerate
+              : NaN,
+        };
+      }),
+    ];
+    const container = element('capture-streams');
+    container.replaceChildren();
+    for (const stream of streams) {
+      const metric = document.createElement('span');
+      metric.dataset.captureStream = stream.name;
+      const count = document.createElement('b');
+      count.textContent = t('capture.sampleCount', { count: formatSampleCount(stream.count) });
+      count.title = `${numberLabel(stream.count)} ${t('wave.samples')}`;
+      const label = document.createElement('span');
+      label.className = 'capture-stream-label';
+      label.textContent = t('capture.streamTiming', {
+        name: stream.name,
+        rate: formatRate(stream.rate),
+        duration: formatDuration(Number(stream.count) / stream.rate),
+      });
+      label.title = label.textContent;
+      metric.append(count, label);
+      container.append(metric);
+    }
     element('memory-status').textContent = t('status.memory', {
       memory: (captureMemory(capture).totalBytes / 1048576).toFixed(2),
       ms: capture.loadedMs.toFixed(1),
@@ -1426,7 +1481,9 @@ export class AnalyzerApp {
     const progress = target > 0n ? Number((samples * 10000n) / target) / 100 : 0;
     element('capture-memory-usage').textContent = t('capture.memoryUsage', {
       used: (bytes / 1048576).toFixed(2),
-      samples: numberLabel(samples),
+      duration: formatDuration(
+        Math.max(this.capturedDuration(), Number(samples) / (this.capture?.store.samplerate ?? 1)),
+      ),
       progress: progress.toFixed(1),
     });
   }
@@ -1441,7 +1498,11 @@ export class AnalyzerApp {
     this.showMessage(
       {
         key: 'capture.partial',
-        params: { actual: numberLabel(outcome.actualSamples), target: numberLabel(outcome.targetSamples), reason },
+        params: {
+          actual: formatDuration(this.capturedDuration()),
+          target: formatDuration(Number(outcome.targetSamples) / this.capture!.store.samplerate),
+          reason,
+        },
       },
       failed,
     );

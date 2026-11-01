@@ -1,4 +1,5 @@
 import type { MemoryBudget } from '../memory.js';
+import type { AnalogTiming } from '../../libhakei/device.js';
 import type { ColumnView } from './types.js';
 import { LocalAnalogSampleStore } from './local-analogStore.js';
 import {
@@ -24,6 +25,8 @@ export interface AnalogColumnView {
   readonly logic?: ColumnView & { readonly edges?: bigint[] };
 }
 export interface AnalogStore {
+  readonly timing?: AnalogTiming;
+  readonly nativeLength?: bigint;
   readonly samplerate: number;
   readonly length: bigint;
   readonly range: AnalogRange | null;

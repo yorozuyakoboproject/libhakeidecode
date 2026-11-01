@@ -487,6 +487,12 @@ export class WorkerAnalogStore implements AnalogStore {
     private readonly owner: WorkerCaptureStore,
     readonly channel: number,
   ) {}
+  get timing(): StoreAnalogMetadata['timing'] {
+    return this.owner.analogMetadata[this.channel]?.timing;
+  }
+  get nativeLength(): bigint | undefined {
+    return this.owner.analogMetadata[this.channel]?.nativeLength;
+  }
   get samplerate(): number {
     return this.owner.samplerate;
   }

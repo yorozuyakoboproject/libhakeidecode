@@ -1065,6 +1065,10 @@ h2 {
 .workbench > .topbar {
   flex-shrink: 0;
   gap: 16px;
+  height: auto;
+  min-height: 65px;
+  padding-top: 12px;
+  padding-bottom: 12px;
 }
 .workbench > .topbar > .brand {
   width: 180px;
@@ -1092,8 +1096,23 @@ h2 {
   white-space: nowrap;
 }
 .workbench .capture-metrics {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 18px;
+}
+#capture-streams {
+  display: contents;
+}
+.capture-metrics > span,
+#capture-streams > span {
+  flex-shrink: 0;
+}
+.capture-stream-label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .workbench .capture-metrics b {
   font-size: 13px;
