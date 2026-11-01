@@ -279,6 +279,9 @@ export class DeviceControls {
     const device = this.device,
       row = this.form.querySelector<HTMLElement>('#device-connection');
     if (!row) return;
+    const disconnected = device.connected === false;
+    this.form.querySelector<HTMLElement>('#device-sampling')!.hidden = disconnected;
+    this.form.querySelector<HTMLElement>('#device-options')!.hidden = disconnected || !device.descriptor.options.length;
     row.hidden = device.connected === undefined && !this.configuring && !this.configurationError;
     this.control<HTMLSelectElement>('device-select').disabled = this.busy || this.connecting;
     const connect = row.querySelector<HTMLButtonElement>('#connect-device')!,
@@ -340,6 +343,7 @@ export class DeviceControls {
     this.refreshConnection();
     this.onConnectionChange?.();
     try {
+      if (device.connected === false) return;
       if (!this.logicSelection.length && !this.analogSelection.length) {
         this.onChange?.();
         return;
@@ -377,7 +381,8 @@ export class DeviceControls {
         this.onChange?.();
       }
     } catch (error) {
-      if (device === this.device && sequence === this.configurationSequence) this.configurationError = error;
+      if (device === this.device && sequence === this.configurationSequence)
+        this.configurationError = device.connected === false ? null : error;
     } finally {
       if (device === this.device && sequence === this.configurationSequence) {
         this.configuring = false;

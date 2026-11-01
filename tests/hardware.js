@@ -506,6 +506,10 @@ export async function runHardwareChecks() {
   const device = app.deviceControls.device;
   check(await deadline(device.restore()), 'Real H417 device could not be restored');
   check(device.connected, 'Real H417 device is disconnected');
+  check(
+    !document.getElementById('device-sampling').hidden && !document.getElementById('device-options').hidden,
+    'Device sampling and options stayed hidden while the real device was connected',
+  );
   const samples = 200_000n;
   const rates = device.descriptor.capabilities.sampleRate.values;
   change('sample-rate', rates[0]);
@@ -661,6 +665,15 @@ export async function runHardwareChecks() {
       !app.deviceControls.ready && document.getElementById('run-capture').disabled,
       'Capture stayed enabled after the real device disconnected',
     );
+    check(
+      document.getElementById('device-sampling').hidden && document.getElementById('device-options').hidden,
+      'Device sampling and options remained visible after the real device disconnected',
+    );
+    await deadline(app.deviceControls.refreshCapabilities());
+    check(
+      document.getElementById('device-connection-status').textContent === t('device.disconnected'),
+      'Disconnecting the real device surfaced a configuration error',
+    );
     try {
       await device.prepare(app.deviceControls.configuration());
     } catch (error) {
@@ -673,6 +686,10 @@ export async function runHardwareChecks() {
   } finally {
     check(await deadline(device.restore()), 'Real H417 device could not be restored after disconnect');
     await deadline(app.deviceControls.refreshCapabilities());
+    check(
+      !document.getElementById('device-sampling').hidden && !document.getElementById('device-options').hidden,
+      'Device sampling and options stayed hidden after the real device reconnected',
+    );
   }
   for (const protocol of protocols) {
     const frames = await deadline(protocol.client.readFrames(0, 1));
