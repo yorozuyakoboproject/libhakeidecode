@@ -258,10 +258,38 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
       this.options.signals.flatMap((signal) => (signal.kind === 'analog' ? [[signal.channel, signal]] : [])),
     );
   }
+  private async *analogChunks(
+    startSample: bigint,
+    endSample: bigint,
+    signals: Map<number, DemoAnalogSignal>,
+  ): AsyncGenerator<AnalogStreamChunk> {
+    const { analogSampleRate, analogChannels, chunkSamples } = this.options;
+    for (let start = startSample; start < endSample; start += BigInt(chunkSamples)) {
+      this.context.signal?.throwIfAborted();
+      const count = Number(minSample(BigInt(chunkSamples), endSample - start));
+      for (const physical of analogChannels) {
+        const buffer = await this.context.acquireBuffer();
+        const data = new Float32Array(buffer, 0, count);
+        const signal = signals.get(physical);
+        if (signal) {
+          for (let sample = 0; sample < data.length; sample++)
+            data[sample] = analogValue(signal, Number(start) + sample, analogSampleRate);
+        } else data.fill(0);
+        yield {
+          format: 'analog',
+          channel: physical,
+          startSample: start,
+          timing: { ...ANALOG_TIMING, clockHz: analogSampleRate },
+          data,
+        };
+      }
+    }
+  }
   async *[Symbol.asyncIterator](): AsyncGenerator<DemoAcquisitionChunk> {
     const { sampleRate, analogSampleRate, length, chunkSamples, logicChannels, analogChannels } = this.options;
     const patterns = await this.digitalPatterns();
     const analogSignals = this.analogSignals();
+    const analogLength = analogSampleCount(length, analogSampleRate, sampleRate);
     if (logicChannels.length) {
       for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
         this.context.signal?.throwIfAborted();
@@ -284,31 +312,14 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
           isFinal: start + BigInt(count) === length,
           metadata: { source: 'demo', signals: this.options.signals.length },
         });
-      }
-    }
-    const analogLength = analogSampleCount(length, analogSampleRate, sampleRate);
-    if (analogChannels.length && analogLength > 0n) {
-      for (let start = 0n; start < analogLength; start += BigInt(chunkSamples)) {
-        this.context.signal?.throwIfAborted();
-        const count = Number(minSample(BigInt(chunkSamples), analogLength - start));
-        for (const physical of analogChannels) {
-          const buffer = await this.context.acquireBuffer();
-          const data = new Float32Array(buffer, 0, count);
-          const signal = analogSignals.get(physical);
-          if (signal) {
-            for (let sample = 0; sample < data.length; sample++)
-              data[sample] = analogValue(signal, Number(start) + sample, analogSampleRate);
-          } else data.fill(0);
-          yield {
-            format: 'analog',
-            channel: physical,
-            startSample: start,
-            timing: { ...ANALOG_TIMING, clockHz: analogSampleRate },
-            data,
-          };
+        if (analogChannels.length && analogLength > 0n) {
+          const end = start + BigInt(count),
+            analogStart = analogSampleCount(start, analogSampleRate, sampleRate),
+            analogEnd = analogSampleCount(end, analogSampleRate, sampleRate);
+          yield* this.analogChunks(analogStart, analogEnd, analogSignals);
         }
       }
-    }
+    } else if (analogChannels.length && analogLength > 0n) yield* this.analogChunks(0n, analogLength, analogSignals);
     if (!logicChannels.length) yield { format: 'timeline', length };
   }
 }

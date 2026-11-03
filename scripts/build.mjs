@@ -2,6 +2,7 @@ import { rm } from 'node:fs/promises';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { build } from 'vite';
 import { generateComponents, validateComponents } from './generate-components.mjs';
 import { runDecoderRoundtrips } from '../tests/decoder-roundtrip.mjs';
@@ -22,6 +23,11 @@ execFileSync(
   },
 );
 await validateComponents(components);
-await runDecoderRoundtrips(components);
+const roundtripStarted = performance.now();
+try {
+  await runDecoderRoundtrips(components);
+} finally {
+  console.log(`[decoder roundtrip] elapsed ${((performance.now() - roundtripStarted) / 1000).toFixed(3)} s`);
+}
 await build({ root });
 console.log('Built deployable static site in dist/ and ESM library, declarations and source maps in dist/src.');

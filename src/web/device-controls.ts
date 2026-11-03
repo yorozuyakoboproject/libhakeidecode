@@ -74,6 +74,7 @@ export class DeviceControls {
     });
     form.addEventListener('change', (event) => {
       if (event.target === select || this.busy) return;
+      if ((event.target as HTMLElement).id.startsWith('device-option-')) this.rememberOptions();
       if ((event.target as HTMLElement).id === 'capture-duration')
         this.durationSeconds = Number(this.control('capture-duration').value);
       void this.refreshCapabilities();
@@ -230,6 +231,7 @@ export class DeviceControls {
   private renderOptions(reset = false): void {
     const key = JSON.stringify([this.device.descriptor.id, this.device.descriptor.options]);
     if (!reset && key === this.optionsKey) return;
+    const remembered = this.savedOptions();
     const previous = new Map<string, string>();
     if (!reset)
       for (const input of this.form.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
@@ -244,7 +246,7 @@ export class DeviceControls {
         const input = document.createElement('input');
         input.type = 'hidden';
         input.id = `device-option-${option.id}`;
-        input.value = String(previous.get(input.id) ?? option.default);
+        input.value = String(previous.get(input.id) ?? remembered[option.id] ?? option.default);
         container.append(input);
         continue;
       }
@@ -274,7 +276,7 @@ export class DeviceControls {
         input.type = 'text';
       }
       input.id = `device-option-${option.id}`;
-      const saved = previous.get(input.id);
+      const saved = previous.get(input.id) ?? remembered[option.id];
       const valid =
         saved !== undefined &&
         (option.kind === 'choice'
@@ -393,6 +395,7 @@ export class DeviceControls {
       for (const option of device.descriptor.options)
         if (!option.hidden)
           this.control(`device-option-${option.id}`).value = String(settings.configuration.options[option.id]);
+      this.rememberOptions();
       this.rememberSampling();
       translateDOM();
       const key = JSON.stringify([
@@ -537,6 +540,32 @@ export class DeviceControls {
   }
   private samplingKey(key: 'sampleRate' | 'analogSampleRate' | 'sampleCount'): string {
     return `hakei.${this.device.descriptor.id}.${key}`;
+  }
+  private savedOptions(): Record<string, string> {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem(`hakei.${this.device.descriptor.id}.options`) ?? 'null');
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+      return Object.fromEntries(
+        Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+      );
+    } catch {
+      return {};
+    }
+  }
+  private rememberOptions(): void {
+    try {
+      localStorage.setItem(
+        `hakei.${this.device.descriptor.id}.options`,
+        JSON.stringify(
+          Object.fromEntries(
+            this.device.descriptor.options.map((option) => [
+              option.id,
+              this.control(`device-option-${option.id}`).value,
+            ]),
+          ),
+        ),
+      );
+    } catch {}
   }
   private savedSampling(key: 'sampleRate' | 'analogSampleRate' | 'sampleCount'): number | bigint | undefined {
     try {

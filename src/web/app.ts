@@ -12,6 +12,7 @@ import { DeviceClient } from './device-client.js';
 import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
 import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
 import { openAnalogSettings, openDigitalSettings } from './channel-controls.js';
+import { parseAnalogSettings, type AnalogSettings } from './analog-settings.js';
 import type { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
 import type { DecoderId } from './protocol.js';
@@ -29,6 +30,36 @@ import {
   type MessageParams,
 } from './i18n.js';
 const FIRST_RUN_CAPTURE_KEY = 'hakei.firstRunCapture';
+const WAVE_SETTINGS_VERSION = 1;
+interface DigitalWaveSettings {
+  name?: string;
+  height?: number;
+}
+interface AnalogWaveSettings {
+  name?: string;
+  settings?: AnalogSettings;
+}
+function waveSettingsKey(driverId: string, kind: 'logic' | 'analog', channel: number): string {
+  return `hakei.${driverId}.wave.v${WAVE_SETTINGS_VERSION}.${kind}.${channel}`;
+}
+function storedWaveSettings<T>(key: string): T | null {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? 'null');
+    return value && typeof value === 'object' && !Array.isArray(value) ? (value as T) : null;
+  } catch {
+    return null;
+  }
+}
+function storeWaveSettings(key: string, value: DigitalWaveSettings | AnalogWaveSettings): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+function validWaveName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const name = value.trim();
+  return name && name.length <= 80 ? name : null;
+}
 export function element<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
   if (!node) throw new Error(`Missing UI element: ${id}`);
@@ -749,6 +780,7 @@ export class AnalyzerApp {
     }
     this.syncTraces();
     this.renderer.setCapture(capture, viewport);
+    if (!capture.workspace) this.restoreWaveSettings(capture);
     this.updateCaptureLabels();
     this.selectProtocol(this.selectedId, false);
     if (capture.workspace) {
@@ -882,6 +914,7 @@ export class AnalyzerApp {
         if (this.capture !== capture) return;
         this.updateChannelName('logic', channel, name);
         this.renderer.setDigitalHeight(channel, nextHeight);
+        this.saveDigitalWaveSettings(capture, channel, name, nextHeight);
       },
       !this.captureAbort,
     );
@@ -899,12 +932,50 @@ export class AnalyzerApp {
         if (this.capture !== capture) return;
         const chip = this.updateChannelName('analog', channel, name);
         this.renderer.setAnalogSettings(channel, settings);
+        this.saveAnalogWaveSettings(capture, channel, name, settings);
         if (chip) {
           chip.style.setProperty('--channel-color', settings.color);
         }
       },
       !this.captureAbort,
     );
+  }
+  private restoreWaveSettings(capture: Capture): void {
+    const selection = capture.deviceChannels;
+    if (!selection) return;
+    selection.logic.forEach((physical, channel) => {
+      const stored = storedWaveSettings<DigitalWaveSettings>(waveSettingsKey(selection.driverId, 'logic', physical));
+      if (!stored) return;
+      const name = validWaveName(stored.name);
+      if (name !== null) capture.labels[channel] = name;
+      const height = stored.height;
+      if (typeof height === 'number' && Number.isInteger(height) && height >= 12 && height <= 250)
+        this.renderer.setDigitalHeight(channel, height);
+    });
+    selection.analog.forEach((physical, channel) => {
+      const item = capture.analogChannels?.[channel],
+        stored = storedWaveSettings<AnalogWaveSettings>(waveSettingsKey(selection.driverId, 'analog', physical));
+      if (!item || !stored) return;
+      const name = validWaveName(stored.name);
+      if (name !== null) item.name = name;
+      if (stored.settings) {
+        try {
+          this.renderer.setAnalogSettings(channel, parseAnalogSettings(stored.settings));
+        } catch {}
+      }
+    });
+  }
+  private saveDigitalWaveSettings(capture: Capture, channel: number, name: string, height: number): void {
+    const selection = capture.deviceChannels,
+      physical = selection?.logic[channel];
+    if (!selection || physical === undefined) return;
+    storeWaveSettings(waveSettingsKey(selection.driverId, 'logic', physical), { name, height });
+  }
+  private saveAnalogWaveSettings(capture: Capture, channel: number, name: string, settings: AnalogSettings): void {
+    const selection = capture.deviceChannels,
+      physical = selection?.analog[channel];
+    if (!selection || physical === undefined) return;
+    storeWaveSettings(waveSettingsKey(selection.driverId, 'analog', physical), { name, settings });
   }
   private clearCaptureForAcquisition(): void {
     const previous = this.capture;

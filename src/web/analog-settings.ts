@@ -51,10 +51,10 @@ export function defaultAnalogSettings(color = '#70d7a1'): AnalogSettings {
 }
 export function roundAnalogResolution(value: number, rounding: 'nearest' | 'up' = 'nearest'): number {
   if (!Number.isFinite(value)) throw new Error('Invalid analog resolution');
-  if (value >= Number.MAX_SAFE_INTEGER / 10) return value;
-  const steps = Math.max(1, value * 10),
+  if (value >= Number.MAX_SAFE_INTEGER / 1000) return value;
+  const steps = Math.max(1, value * 1000),
     epsilon = Number.EPSILON * Math.max(1, Math.abs(steps));
-  return (rounding === 'up' ? Math.ceil(steps - epsilon) : Math.round(steps + epsilon)) / 10;
+  return (rounding === 'up' ? Math.ceil(steps - epsilon) : Math.round(steps + epsilon)) / 1000;
 }
 export function parseAnalogSettings(value: unknown): AnalogSettings {
   const s = value as AnalogSettings;
@@ -112,8 +112,8 @@ export function analogAxis(
     );
   }
   return {
-    minimum: settings.negativeDivs ? -Number((settings.negativeDivs * perDivision).toFixed(1)) : 0,
-    maximum: Number((settings.positiveDivs * perDivision).toFixed(1)),
+    minimum: settings.negativeDivs ? -Number((settings.negativeDivs * perDivision).toFixed(3)) : 0,
+    maximum: Number((settings.positiveDivs * perDivision).toFixed(3)),
     perDivision,
   };
 }

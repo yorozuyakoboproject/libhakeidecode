@@ -71,16 +71,16 @@ export function openAnalogSettings(
       'resolution',
       String(settings.autorange && range ? analogAxis(range, settings).perDivision : settings.resolution),
       'number',
-      0.1,
+      0.001,
     ),
     auto = input('analog.autorange', 'autorange', '', 'checkbox');
   positive.step = negative.step = height.step = '1';
-  resolution.step = '0.1';
+  resolution.step = '0.001';
   if (!settings.autorange) resolution.value = String(roundAnalogResolution(settings.resolution));
   auto.checked = settings.autorange;
   const choices = document.createElement('datalist');
   choices.id = `analog-resolution-${channel}`;
-  for (let exponent = -1; exponent <= 9; exponent++)
+  for (let exponent = -3; exponent <= 9; exponent++)
     for (const multiple of [1, 2, 5]) {
       const option = document.createElement('option');
       option.value = String(multiple * 10 ** exponent);
