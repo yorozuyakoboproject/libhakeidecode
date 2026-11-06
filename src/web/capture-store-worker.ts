@@ -1,5 +1,12 @@
 import type { Capture } from './capture.js';
-import { SharedCaptureError, SharedChunkReader, SHARED_SUMMARY_GROUP_SAMPLES } from './shared-chunks.js';
+import {
+  SharedCaptureError,
+  SharedChunkReader,
+  SHARED_SUMMARY_GROUP_SAMPLES,
+  normalizePackedSamples,
+  readPackedSample,
+  type LogicSampleBytes,
+} from './shared-chunks.js';
 
 type Scope = {
   onmessage: ((event: MessageEvent<StorageRequest>) => void) | null;
@@ -7,10 +14,17 @@ type Scope = {
 };
 const scope = globalThis as unknown as Scope;
 const PAGE_GROUPS = 65_536;
-const RECORD_BYTES = 4;
+const RECORD_BYTES = 16;
 
 type StorageRequest =
-  | { type: 'start'; port: MessagePort; channelCount: number; sampleRate: number; labels?: readonly string[] }
+  | {
+      type: 'start';
+      port: MessagePort;
+      channelCount: number;
+      sampleRate: number;
+      bytesPerSample: LogicSampleBytes;
+      labels?: readonly string[];
+    }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'pack'; id: number; startSample: bigint; endSample: bigint; channels: number }
@@ -65,10 +79,11 @@ type StorageResponse =
     }
   | { type: 'error'; id?: number; message: string };
 
-type SummaryPage = { buffer: SharedArrayBuffer; view: Uint8Array };
+type SummaryPage = { buffer: SharedArrayBuffer; view: Uint32Array };
 type StorageSession = {
   reader: SharedChunkReader;
   channelCount: number;
+  bytesPerSample: LogicSampleBytes;
   sampleRate: number;
   labels: string[];
   length: bigint;
@@ -102,26 +117,23 @@ const exportControllers = new Map<number, AbortController>();
 function maskFor(channel: number): number {
   return 1 << channel;
 }
-function pageFor(s: StorageSession, group: number): Uint8Array {
+function pageFor(s: StorageSession, group: number): Uint32Array {
   const pageIndex = Math.floor(group / PAGE_GROUPS),
     existing = s.pages.get(pageIndex);
   if (existing) return existing.view;
   const buffer = new SharedArrayBuffer(PAGE_GROUPS * RECORD_BYTES),
-    view = new Uint8Array(buffer);
+    view = new Uint32Array(buffer);
   s.pages.set(pageIndex, { buffer, view });
   s.summaryBytes += buffer.byteLength;
   return view;
 }
-function foldedBytes(value: number): number {
-  return (value | (value >>> 8) | (value >>> 16) | (value >>> 24)) & 0xff;
-}
 function writeRecord(s: StorageSession, group: number): void {
   const page = pageFor(s, group),
-    offset = (group % PAGE_GROUPS) * RECORD_BYTES;
-  page[offset] = foldedBytes(s.ones);
-  page[offset + 1] = foldedBytes(s.zeros);
-  page[offset + 2] = s.first & 0xff;
-  page[offset + 3] = s.last & 0xff;
+    offset = (group % PAGE_GROUPS) * 4;
+  page[offset] = s.ones;
+  page[offset + 1] = s.zeros;
+  page[offset + 2] = s.first;
+  page[offset + 3] = s.last;
 }
 function groupCount(s: StorageSession): number {
   return s.groupCount ? s.completeGroups + 1 : s.completeGroups;
@@ -135,60 +147,36 @@ function report(s: StorageSession, force = false): void {
   }
 }
 function processPart(s: StorageSession, data: Uint8Array): void {
-  const packed = data.byteOffset % 4 === 0 ? new Uint32Array(data.buffer, data.byteOffset, data.byteLength >> 2) : null;
-  for (let offset = 0; offset < data.length;) {
-    const count = Math.min(data.length - offset, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount);
+  if (data.length % s.bytesPerSample) throw new Error('Shared block has a partial sample');
+  const count = data.length / s.bytesPerSample;
+  for (let sample = 0; sample < count; sample++) {
     if (!s.groupCount) {
-      s.first = data[offset]!;
+      s.first = readPackedSample(data, sample, s.bytesPerSample);
       s.ones = 0;
       s.zeros = 0;
     }
-    const end = offset + count;
-    while (offset < end && ((offset & 3) !== 0 || (s.groupCount & 3) !== 0)) {
-      const value = data[offset++]!;
-      s.ones |= value;
-      s.zeros |= ~value & 0xff;
-      s.last = value;
-      s.groupCount++;
-    }
-    const words = packed ? (end - offset) >> 2 : 0;
-    if (words) {
-      let index = offset >> 2;
-      const wordEnd = index + words;
-      for (; index < wordEnd; index++) {
-        const value = packed![index]!;
-        s.ones |= value;
-        s.zeros |= ~value;
-      }
-      const bytes = words * 4;
-      offset += bytes;
-      s.groupCount += bytes;
-      s.last = data[offset - 1]!;
-    }
-    while (offset < end) {
-      const value = data[offset++]!;
-      s.ones |= value;
-      s.zeros |= ~value & 0xff;
-      s.last = value;
-      s.groupCount++;
-    }
+    const value = readPackedSample(data, sample, s.bytesPerSample);
+    s.ones |= value;
+    s.zeros |= ~value;
+    s.last = value;
+    s.groupCount++;
     if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) {
       writeRecord(s, s.completeGroups++);
       s.groupCount = 0;
     }
   }
-  s.length += BigInt(data.length);
+  s.length += BigInt(count);
   if (s.groupCount) writeRecord(s, s.completeGroups);
   report(s);
 }
 function recordAt(s: StorageSession, group: number): [number, number, number, number] | null {
   const page = s.pages.get(Math.floor(group / PAGE_GROUPS));
   if (!page) return null;
-  const offset = (group % PAGE_GROUPS) * RECORD_BYTES;
+  const offset = (group % PAGE_GROUPS) * 4;
   return [page.view[offset]!, page.view[offset + 1]!, page.view[offset + 2]!, page.view[offset + 3]!];
 }
 function sampleAt(s: StorageSession, position: bigint): number {
-  const value = s.reader.readByte(position);
+  const value = s.reader.readSample(position);
   if (value === null) throw new Error(`Shared sample ${position} is not committed`);
   return value;
 }
@@ -283,9 +271,8 @@ function answerPack(s: StorageSession, request: Extract<StorageRequest, { type: 
     throw new RangeError('channel count out of range');
   const raw = s.reader.readRange(request.startSample, request.endSample);
   if (!raw) throw new Error('Requested capture range is not committed');
-  const mask = (1 << request.channels) - 1;
-  if (mask !== 0xff) for (let index = 0; index < raw.length; index++) raw[index] &= mask;
-  scope.postMessage({ type: 'pack-result', id: request.id, data: raw }, [raw.buffer]);
+  const data = normalizePackedSamples(raw, s.bytesPerSample, request.channels);
+  scope.postMessage({ type: 'pack-result', id: request.id, data }, [data.buffer]);
   s.packMs += performance.now() - started;
 }
 function answerEdges(s: StorageSession, request: Extract<StorageRequest, { type: 'edges' }>): void {
@@ -301,10 +288,11 @@ function answerEdges(s: StorageSession, request: Extract<StorageRequest, { type:
     for (let position = start; position < end;) {
       const chunkEnd = position + CHUNK > end ? end : position + CHUNK;
       const chunk = s.reader.readRange(position, chunkEnd);
-      if (!chunk || chunk.length !== Number(chunkEnd - position))
+      if (!chunk || chunk.length !== Number(chunkEnd - position) * s.bytesPerSample)
         throw new Error('Requested capture range is not committed');
-      for (let index = 0; index < chunk.length; index++) {
-        const value = chunk[index]! & bit;
+      const samples = chunk.length / s.bytesPerSample;
+      for (let index = 0; index < samples; index++) {
+        const value = readPackedSample(chunk, index, s.bytesPerSample) & bit;
         if (value !== previous) output.push(position + BigInt(index));
         previous = value;
       }
@@ -381,9 +369,8 @@ function connectPackedReader(s: StorageSession, port: MessagePort): void {
           throw new RangeError('channel count out of range');
         const raw = s.reader.readRange(data.startSample, data.endSample);
         if (!raw) throw new Error('Requested capture range is not committed');
-        const mask = (1 << data.channels) - 1;
-        if (mask !== 0xff) for (let index = 0; index < raw.length; index++) raw[index] &= mask;
-        port.postMessage({ type: 'read-result', id: data.id, data: raw }, [raw.buffer]);
+        const packed = normalizePackedSamples(raw, s.bytesPerSample, data.channels);
+        port.postMessage({ type: 'read-result', id: data.id, data: packed }, [packed.buffer]);
       } catch (error) {
         port.postMessage({
           type: 'read-error',
@@ -402,7 +389,8 @@ async function handle(request: StorageRequest): Promise<void> {
     if (
       !Number.isInteger(request.channelCount) ||
       request.channelCount < 1 ||
-      request.channelCount > 8 ||
+      request.channelCount > 32 ||
+      ![1, 2, 3, 4].includes(request.bytesPerSample) ||
       !Number.isSafeInteger(request.sampleRate) ||
       request.sampleRate < 1
     )
@@ -412,10 +400,11 @@ async function handle(request: StorageRequest): Promise<void> {
       : Array.from({ length: request.channelCount }, (_, index) => 'D' + index);
     if (labels.length !== request.channelCount || labels.some((label) => typeof label !== 'string'))
       throw new Error('Invalid shared channel labels');
-    const reader = new SharedChunkReader(request.port);
+    const reader = new SharedChunkReader(request.port, request.bytesPerSample);
     const created: StorageSession = {
       reader,
       channelCount: request.channelCount,
+      bytesPerSample: request.bytesPerSample,
       sampleRate: request.sampleRate,
       labels,
       length: 0n,
@@ -485,9 +474,7 @@ async function exportSR(s: StorageSession, request: Extract<StorageRequest, { ty
     readPackedRange: async (startSample: bigint, endSample: bigint, channels = s.channelCount): Promise<Uint8Array> => {
       const raw = s.reader.readRange(startSample, endSample);
       if (!raw) throw new Error('Requested capture range is not committed');
-      const mask = (1 << channels) - 1;
-      if (mask !== 0xff) for (let index = 0; index < raw.length; index++) raw[index] &= mask;
-      return raw;
+      return normalizePackedSamples(raw, s.bytesPerSample, channels);
     },
   };
   const capture = {

@@ -219,16 +219,16 @@ function readBinary(request: Extract<DecodeStreamRequest, { type: 'decode-read-b
   });
 }
 function startShared(s: Session, request: DecodeSharedStartRequest): void {
-  if (request.channelCount < 1 || request.channelCount > 8)
-    throw new Error('Shared packed capture supports 1..8 logic channels');
+  if (request.channelCount < 1 || request.channelCount > 32 || ![1, 2, 3, 4].includes(request.bytesPerSample))
+    throw new Error('Shared packed capture supports 1..32 logic channels');
   if (s.sharedTask) throw new Error('Shared decode source is already connected');
-  const reader = new SharedChunkReader(request.port);
+  const reader = new SharedChunkReader(request.port, request.bytesPerSample);
   s.sharedReader = reader;
-  s.sharedTask = consumeShared(s, reader, request.channels);
+  s.sharedTask = consumeShared(s, reader, request.channels, request.bytesPerSample);
 }
 function startPackedReader(s: Session, request: DecodePackedReaderStartRequest): void {
-  if (!Number.isInteger(request.channelCount) || request.channelCount < 1 || request.channelCount > 8)
-    throw new Error('Packed capture supports 1..8 logic channels');
+  if (!Number.isInteger(request.channelCount) || request.channelCount < 1 || request.channelCount > 32)
+    throw new Error('Packed capture supports 1..32 logic channels');
   if (s.sharedTask) throw new Error('Decode source is already connected');
   for (const [key, channel] of Object.entries(request.channels)) {
     if (!s.channels.includes(key) || !Number.isInteger(channel) || channel < 0 || channel >= request.channelCount)
@@ -276,24 +276,27 @@ async function pushPacked(
   startSample: bigint,
   data: Uint8Array,
   selected: Record<string, number>,
+  sampleBytes: number,
 ): Promise<void> {
   const started = performance.now();
-  const end = startSample + BigInt(data.length);
+  const samples = data.length / sampleBytes,
+    end = startSample + BigInt(samples);
   await s.runtime.push(
-    createPackedWindow(startSample, s.sampleRate, data, selected),
+    createPackedWindow(startSample, s.sampleRate, data, selected, sampleBytes),
     Number((end * 1000n) / (s.length || 1n)) / 1000,
   );
   await s.runtime.flush(progress(s));
   s.stages.decoderPushMs += performance.now() - started;
-  s.decodedSamples += BigInt(data.length);
+  s.decodedSamples += BigInt(samples);
   s.processed = end;
 }
 async function consumePacked(s: Session): Promise<void> {
   const selected = s.packedChannels!;
+  const sampleBytes = Math.ceil(s.packedChannelCount / 8);
   for (let start = 0n; start < s.length;) {
     const end = start + 1_048_576n < s.length ? start + 1_048_576n : s.length;
     const packed = await requestPackedRange(s, start, end);
-    await pushPacked(s, start, packed, selected);
+    await pushPacked(s, start, packed, selected, sampleBytes);
     maybePostProgress(s);
     start = end;
   }
@@ -388,19 +391,25 @@ async function consumeWorkerReader(s: Session, edgeInput: string | undefined, ed
     maybePostProgress(s);
   }
 }
-async function consumeShared(s: Session, reader: SharedChunkReader, selected: Record<string, number>): Promise<void> {
+async function consumeShared(
+  s: Session,
+  reader: SharedChunkReader,
+  selected: Record<string, number>,
+  sampleBytes: number,
+): Promise<void> {
   try {
     const picked: Record<string, number> = {};
     for (const channel of s.channels) {
       const bit = selected[channel];
-      if (!Number.isInteger(bit) || bit! < 0 || bit! > 7) throw new Error('Invalid shared decode channel');
+      if (!Number.isInteger(bit) || bit! < 0 || bit! >= sampleBytes * 8)
+        throw new Error('Invalid shared decode channel');
       picked[channel] = bit!;
     }
     let lastYield = performance.now();
     while (true) {
       const part = await reader.next(1_048_576);
       if (!part) break;
-      await pushPacked(s, part.startSample, part.data, picked);
+      await pushPacked(s, part.startSample, part.data, picked, sampleBytes);
       maybePostProgress(s);
       if (performance.now() - lastYield >= 8) {
         const yieldStarted = performance.now();

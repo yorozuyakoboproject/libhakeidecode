@@ -57,11 +57,9 @@ export function restoreBlock(input: Uint8Array, meta: BlockEncoding, bits = 16):
   let raw =
     meta.encoding === 1
       ? decodeLz4(input, meta.rawBytes)
-      : meta.encoding === 2
-        ? decodeRuns(input, meta.rawBytes)
-        : meta.encoding === 3
-          ? unpackBits(input, meta.rawBytes / 2, bits)
-          : input;
+      : meta.encoding === 3
+        ? unpackBits(input, meta.rawBytes / 2, bits)
+        : input;
   if (meta.transform) {
     const scans = meta.rawBytes / (2 * meta.channels);
     const restored = new Uint8Array(meta.rawBytes);
@@ -84,35 +82,6 @@ export function restoreBlock(input: Uint8Array, meta: BlockEncoding, bits = 16):
   return raw;
 }
 
-function decodeRuns(input: Uint8Array, length: number): Uint8Array {
-  const out = new Uint8Array(length);
-  let p = 0,
-    n = 0;
-  while (p < input.length) {
-    let token = 0,
-      shift = 0,
-      byte: number;
-    do {
-      if (p === input.length || shift >= 21) throw new Error('Invalid run length');
-      byte = input[p++]!;
-      token |= (byte & 127) << shift;
-      shift += 7;
-    } while (byte & 128);
-    const count = token >>> 1;
-    if (!count || count > length - n) throw new Error('Oversized run');
-    if (token & 1) {
-      if (p === input.length) throw new Error('Missing run value');
-      out.fill(input[p++]!, n, n + count);
-    } else {
-      if (count > input.length - p) throw new Error('Truncated literal run');
-      out.set(input.subarray(p, p + count), n);
-      p += count;
-    }
-    n += count;
-  }
-  if (n !== length) throw new Error('Incomplete run block');
-  return out;
-}
 function unpackBits(input: Uint8Array, count: number, bits: number): Uint8Array {
   if (!Number.isInteger(count) || bits < 8 || bits > 12 || input.length !== Math.ceil((count * bits) / 8))
     throw new Error('Invalid bit-packed block');

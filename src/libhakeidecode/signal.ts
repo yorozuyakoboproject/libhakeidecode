@@ -36,14 +36,32 @@ export class PackedLogicWindow implements LogicWindow {
   readonly data: Uint8Array;
   readonly bit: number;
   readonly length: number;
-  constructor(data: Uint8Array, bit: number) {
-    if (!Number.isInteger(bit) || bit < 0 || bit > 7) throw new DecodeError('Packed logic bit must be in 0..7.');
+  readonly sampleBytes: number;
+  constructor(data: Uint8Array, bit: number, sampleBytes = 1) {
+    if (!Number.isInteger(bit) || bit < 0 || bit >= sampleBytes * 8)
+      throw new DecodeError('Packed logic bit is outside the sample width.');
+    if (![1, 2, 3, 4].includes(sampleBytes) || data.length % sampleBytes)
+      throw new DecodeError('Packed logic data does not contain whole samples.');
     this.data = data;
     this.bit = bit;
-    this.length = data.length;
+    this.sampleBytes = sampleBytes;
+    this.length = data.length / sampleBytes;
   }
   at(index: number): Pin {
-    return ((this.data[index]! >>> this.bit) & 1) as LogicLevel;
+    const offset = index * this.sampleBytes;
+    const value =
+      this.sampleBytes === 1
+        ? this.data[offset]!
+        : this.sampleBytes === 2
+          ? this.data[offset]! | (this.data[offset + 1]! << 8)
+          : this.sampleBytes === 3
+            ? this.data[offset]! | (this.data[offset + 1]! << 8) | (this.data[offset + 2]! << 16)
+            : (this.data[offset]! |
+                (this.data[offset + 1]! << 8) |
+                (this.data[offset + 2]! << 16) |
+                (this.data[offset + 3]! << 24)) >>>
+              0;
+    return ((value >>> this.bit) & 1) as LogicLevel;
   }
   nextEdge(index: number): number {
     let cursor = Math.max(1, index);
@@ -159,9 +177,17 @@ export function createPackedWindow(
   sampleRate: number,
   data: Uint8Array,
   channels: Readonly<Record<string, number>>,
+  sampleBytes = 1,
 ): SignalWindow {
-  const views = Object.fromEntries(Object.entries(channels).map(([id, bit]) => [id, new PackedLogicWindow(data, bit)]));
-  return createSignalWindow({ startSample, endSample: startSample + BigInt(data.length), sampleRate, channels: views });
+  const views = Object.fromEntries(
+    Object.entries(channels).map(([id, bit]) => [id, new PackedLogicWindow(data, bit, sampleBytes)]),
+  );
+  return createSignalWindow({
+    startSample,
+    endSample: startSample + BigInt(data.length / sampleBytes),
+    sampleRate,
+    channels: views,
+  });
 }
 
 export function createEdgeWindow(
@@ -202,8 +228,7 @@ export function materializeLogicWindow(window: LogicWindow): ArrayLike<number> {
     return window.data;
   const output = new Uint8Array(window.length);
   if (window.kind === 'packed' && window.data) {
-    const bit = window.bit!;
-    for (let index = 0; index < output.length; index++) output[index] = (window.data[index]! >>> bit) & 1;
+    for (let index = 0; index < output.length; index++) output[index] = window.at(index) as LogicLevel;
   } else if (window.kind === 'edges') {
     let level = window.initial ?? 0,
       edge = 0;

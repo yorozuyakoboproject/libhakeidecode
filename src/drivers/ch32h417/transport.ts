@@ -9,6 +9,7 @@ import {
   EP_OUT,
   FrameParser,
   INTERFACE,
+  ALTERNATE,
   MAX_FRAME_BYTES,
   RESPONSE,
   encodeCommand,
@@ -25,6 +26,7 @@ export interface UsbDevice {
     interfaces: readonly {
       interfaceNumber: number;
       alternates: readonly {
+        alternateSetting: number;
         endpoints: readonly {
           endpointNumber: number;
           direction: string;
@@ -38,6 +40,7 @@ export interface UsbDevice {
   open(): Promise<void>;
   close(): Promise<void>;
   claimInterface(value: number): Promise<void>;
+  selectAlternateInterface(iface: number, alternate: number): Promise<void>;
   releaseInterface(value: number): Promise<void>;
   clearHalt?(direction: 'in' | 'out', endpoint: number): Promise<void>;
   transferOut(endpoint: number, data: Uint8Array): Promise<{ status: string; bytesWritten?: number }>;
@@ -58,11 +61,6 @@ export interface UsbApi {
   getDevices(): Promise<UsbDevice[]>;
   addEventListener?(type: string, listener: (event: { device: UsbDevice }) => void): void;
   removeEventListener?(type: string, listener: (event: { device: UsbDevice }) => void): void;
-}
-export function browserUsb(): UsbApi {
-  const usb = (globalThis.navigator as (Navigator & { usb?: UsbApi }) | undefined)?.usb;
-  if (!usb) throw new Error('WebUSB requires Chrome/Edge on HTTPS or localhost');
-  return usb;
 }
 export async function deadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -109,7 +107,7 @@ export function statusError(error: number, samples?: bigint): Error {
   return new Error(`H417: ${errors[error] ?? `device error ${error}`}${detail}`);
 }
 export const USB_READ_DEPTH = 32;
-export const USB_READ_BYTES = 256 * 1024;
+export const USB_READ_BYTES = 768 * 1024;
 const FRAMES_PER_READ = Math.ceil(USB_READ_BYTES / 512) + 1;
 export const USB_QUEUE_BLOCKS = 2048;
 export const TRANSPORT_WORKING_BYTES =
@@ -143,7 +141,7 @@ export class H417Transport {
   private ended = false;
   private discarding = false;
   private starting = false;
-  private strictRuns = false;
+  sampleBytes = 1;
   private lastReadCompleted = 0;
   private first = 0n;
   private analogFirst = [0n, 0n];
@@ -164,7 +162,7 @@ export class H417Transport {
     codecDecodeMs: 0,
     codecMaxHoldMs: 0,
     codecQueuePeak: 0,
-    codecFallbacks: 0,
+    codecBlocks: 0,
     usbReadMaxMs: 0,
     usbReadMaxGapMs: 0,
     parserStartDelayMaxMs: 0,
@@ -211,15 +209,14 @@ export class H417Transport {
     if (this.device.configuration?.configurationValue !== 1)
       throw new Error('H417 is not configured; initialize UHSIF in the management webpage first');
     const iface = this.device.configuration?.interfaces.find((i) => i.interfaceNumber === INTERFACE);
-    const endpoints = iface?.alternates[0]?.endpoints;
+    const endpoints = iface?.alternates.find((a) => a.alternateSetting === ALTERNATE)?.endpoints;
     const out = endpoints?.find((e) => e.endpointNumber === EP_OUT && e.direction === 'out' && e.type === 'bulk');
     const input = endpoints?.find((e) => e.endpointNumber === EP_IN && e.direction === 'in' && e.type === 'bulk');
     if (!out || !input || ![512, 1024].includes(input.packetSize) || out.packetSize !== input.packetSize)
-      throw new Error(
-        'H417 logic analyzer Interface 1 is unavailable; initialize UHSIF in the management webpage first, then reconnect the analyzer',
-      );
+      throw new Error('H417 shared data interface is unavailable; update the device firmware');
     this.packet = input.packetSize as 512 | 1024;
     await this.device.claimInterface(INTERFACE);
+    await this.device.selectAlternateInterface(INTERFACE, ALTERNATE);
     if (this.device.clearHalt) {
       await this.device.clearHalt('out', EP_OUT);
       await this.device.clearHalt('in', EP_IN);
@@ -241,10 +238,9 @@ export class H417Transport {
     this.fail(error);
   }
   private receive(frame: Frame): void {
-    if (frame.type === DATA && this.strictRuns && frame.codec?.encoding !== 2)
-      throw new ComponentError('driver.ch32h417.error.encoding');
     if (frame.codec) {
       const c = frame.codec;
+      this.counters.codecBlocks++;
       this.counters.codecRawBytes += c.rawBytes;
       this.counters.codecWireBytes += c.wireBytes;
       this.counters.codecCycles += c.cycles;
@@ -252,7 +248,6 @@ export class H417Transport {
       this.counters.codecDecodeMs += c.decodeMs;
       this.counters.codecMaxHoldMs = Math.max(this.counters.codecMaxHoldMs, c.holdMs);
       this.counters.codecQueuePeak = Math.max(this.counters.codecQueuePeak, c.queuePeak);
-      this.counters.codecFallbacks += Number(c.encoding === 0);
     }
     if (frame.type & RESPONSE) {
       const pending = this.pending.get(frame.requestId);
@@ -274,7 +269,8 @@ export class H417Transport {
     )
       throw new Error('H417 stream discontinuity (session, sequence or sample index)');
     if (frame.type === DATA) {
-      this.first += BigInt(frame.payload.length);
+      if (frame.payload.length % this.sampleBytes) throw new Error('H417 digital block has a partial sample');
+      this.first += BigInt(frame.payload.length / this.sampleBytes);
       this.sequence = (this.sequence + 1) >>> 0;
       this.counters.dataFrames++;
     } else if (frame.type === ANALOG) {
@@ -314,7 +310,7 @@ export class H417Transport {
   private async readLoop(): Promise<void> {
     const parser = new FrameParser(this.packet, (frame) => this.receive(frame));
     this.parser = parser;
-    const frameBytes = this.packet + BLOCK_BYTES,
+    const frameBytes = this.packet === 1024 ? BLOCK_BYTES : this.packet + BLOCK_BYTES,
       readBytes = USB_READ_BYTES - (USB_READ_BYTES % frameBytes);
     const read = () => {
       this.counters.reads++;
@@ -339,7 +335,7 @@ export class H417Transport {
       if (result.value.status !== 'ok' || !result.value.data?.byteLength)
         throw new Error('H417 bulk IN failed or stalled');
       const data = result.value.data;
-      if (this.active || this.starting) {
+      if ((this.active || this.starting) && !this.ended) {
         this.counters.usbReadMaxMs = Math.max(this.counters.usbReadMaxMs, result.completed - result.started);
         if (this.lastReadCompleted)
           this.counters.usbReadMaxGapMs = Math.max(
@@ -398,7 +394,21 @@ export class H417Transport {
     this.serial = run.catch(() => {});
     return run;
   }
-  async start(payload: Uint8Array): Promise<void> {
+  keepalive(): Promise<void> {
+    const run = this.serial.then(async () => {
+      if (this.closed || this.error) throw this.error ?? new Error('H417 connection closed');
+      this.requestId = (this.requestId + 1) >>> 0 || 1;
+      const bytes = encodeCommand(Command.keepalive, this.requestId, this.session, this.packet);
+      const sent = await deadline(this.device.transferOut(EP_OUT, bytes), 2000, 'H417 keepalive OUT timeout');
+      if (sent.status !== 'ok' || sent.bytesWritten !== bytes.length)
+        throw new Error('H417 bulk OUT failed or stalled');
+    });
+    this.serial = run.catch(() => {});
+    return run;
+  }
+  async start(payload: Uint8Array, sampleBytes = 1): Promise<void> {
+    if (![1, 2, 3, 4].includes(sampleBytes)) throw new Error('Invalid H417 digital sample width');
+    this.sampleBytes = sampleBytes;
     await this.command(Command.config, payload);
     this.starting = true;
     this.beginTransfer();
@@ -412,8 +422,9 @@ export class H417Transport {
       this.starting = false;
     }
   }
-  async setCompression(mode: number, transform = 0): Promise<void> {
+  async setCompression(transform = 0): Promise<void> {
     if (this.active || !this.parser) throw new Error('Set compression before capture');
+    if (![0, 1].includes(transform)) throw new Error('Invalid H417 analog encoding');
     const until = performance.now() + 1000;
     while (true) {
       const status = readStatus((await this.command(Command.status)).payload);
@@ -421,9 +432,7 @@ export class H417Transport {
       if (status.state !== 2 || performance.now() >= until) throw new Error('H417 capture resources are busy');
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
-    await this.command(Command.codec, new Uint8Array([mode, transform, 0, 0]));
-    this.strictRuns = this.parser.appProtocol >= 22 && mode === 4;
-    this.parser.codecEnabled = mode !== 0;
+    await this.command(Command.codec, new Uint8Array([0, transform, 0, 0]));
   }
   async next(): Promise<Frame | null> {
     while (!this.queue.length && !this.error && !this.closed && !this.ended)

@@ -8,28 +8,35 @@ export const SS_RATES = [
   6_250_000, 8_000_000, 10_000_000, 20_000_000, 25_000_000, 40_000_000, 50_000_000, 80_000_000, 100_000_000,
   200_000_000,
 ] as const;
+export const MAX_LOGIC_BYTES_PER_SECOND = 400_000_000;
 export const defaultCaps: Capabilities = {
-  appProtocol: 19,
+  appProtocol: 29,
   channelRates: [],
   compressionMask: 0,
   hsadcBlockSamples: 4096,
   analogMask: 0,
   adc1Mask: 0,
   hsadcMask: 0,
+  digitalMask: 0,
   adc1Budget: 562500,
   hsadcMax: 20000000,
   packetBytes: 1024,
-  blockBytes: 16384,
+  blockBytes: 16320,
   heartbeatMs: 5000,
-  channels: 8,
+  channels: 32,
   rates: [...SS_RATES],
 };
 function capabilities(caps: Capabilities): DeviceCapabilities {
+  const width = caps.digitalMask ? Math.ceil((32 - Math.clz32(caps.digitalMask >>> 0)) / 8) * 8 : 0;
+  let available = 0;
+  for (let channel = 0; channel < 32; channel++) available += Number(Boolean(caps.digitalMask & (1 << channel)));
+  const rates = caps.rates.filter((rate) => !width || rate * (width / 8) <= MAX_LOGIC_BYTES_PER_SECOND);
+  const preferred = caps.packetBytes === 1024 ? 40_000_000 : 10_000_000;
   return {
     sampleRate: {
       kind: 'list',
-      values: caps.rates,
-      default: caps.packetBytes === 1024 ? 40_000_000 : 10_000_000,
+      values: rates,
+      default: rates.includes(preferred) ? preferred : rates.at(-1)!,
     },
     sampleCount: {
       kind: 'range',
@@ -38,7 +45,11 @@ function capabilities(caps: Capabilities): DeviceCapabilities {
       step: 1n,
       default: 200_000n,
     },
-    logicChannels: { kind: 'list', values: [0, 1, 2, 3, 4, 5, 6, 7, 8], default: 8 },
+    logicChannels: {
+      kind: 'list',
+      values: Array.from({ length: available + 1 }, (_, count) => count),
+      default: 0,
+    },
     analogChannels: {
       kind: 'range',
       min: 0,
@@ -50,10 +61,14 @@ function capabilities(caps: Capabilities): DeviceCapabilities {
 }
 
 export function descriptor(caps: Capabilities = defaultCaps): DeviceDescriptor {
+  const digital = Array.from({ length: 32 }, (_, channel) => channel).filter(
+    (channel) => caps.digitalMask & (1 << channel),
+  );
   return {
     id: 'ch32h417',
     name: 'CH32H417 Logic Analyzer',
     capabilities: capabilities(caps),
+    logicInputs: digital.map((index) => ({ index, name: `D${index}` })),
     analogInputs: [0, 1]
       .filter((i) => caps.analogMask & (1 << i))
       .map((index) => ({
@@ -61,26 +76,15 @@ export function descriptor(caps: Capabilities = defaultCaps): DeviceDescriptor {
         name: `PC${index + 1} · ${caps.hsadcMask & (1 << index) ? 'HSADC' : 'ADC1'}`,
       })),
     options: [
-      ...(caps.appProtocol >= 22 && caps.compressionMask
+      ...(caps.compressionMask && caps.analogMask
         ? [
             {
-              id: 'digitalEncoding',
-              name: 'Digital encoding',
+              id: 'analogEncoding',
+              name: 'Analog encoding',
               kind: 'choice' as const,
-              values: ['raw', 'runs'],
-              default: 'raw',
+              values: ['packed', 'split'],
+              default: 'packed',
             },
-            ...(caps.analogMask
-              ? [
-                  {
-                    id: 'analogEncoding',
-                    name: 'Analog encoding',
-                    kind: 'choice' as const,
-                    values: ['packed', 'split'],
-                    default: 'packed',
-                  },
-                ]
-              : []),
           ]
         : []),
       ...(caps.appProtocol >= 21

@@ -1,4 +1,9 @@
-import { SharedCaptureError, SharedChunkReader, SHARED_SUMMARY_GROUP_SAMPLES } from './shared-chunks.js';
+import {
+  SharedCaptureError,
+  SharedChunkReader,
+  SHARED_SUMMARY_GROUP_SAMPLES,
+  type LogicSampleBytes,
+} from './shared-chunks.js';
 
 type Scope = {
   onmessage: ((event: MessageEvent<ViewRequest>) => void) | null;
@@ -6,12 +11,12 @@ type Scope = {
 };
 const scope = globalThis as unknown as Scope;
 const PAGE_GROUPS = 65_536;
-const RECORD_BYTES = 4;
+const RECORD_BYTES = 16;
 const SUMMARY_FOLD_FACTORS = [32, 16, 32] as const;
 const MAX_SAFE_SAMPLE = BigInt(Number.MAX_SAFE_INTEGER);
 
 type ViewRequest =
-  | { type: 'start'; port: MessagePort; channelCount: number }
+  | { type: 'start'; port: MessagePort; channelCount: number; bytesPerSample: LogicSampleBytes }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | {
       type: 'query-many';
@@ -60,13 +65,14 @@ type ViewResponse =
   | { type: 'done'; state: 'complete' | 'stopped' | 'error'; length: bigint; error?: string; summaryBytes: number }
   | { type: 'error'; message: string };
 
-type SummaryPage = { buffer: ArrayBuffer; view: Uint8Array };
+type SummaryPage = { buffer: ArrayBuffer; view: Uint32Array };
 type SummaryLevel = { groupSamples: number; foldFactor: number; pages: Map<number, SummaryPage>; count: number };
 type SummaryFold = { count: number; ones: number; zeros: number; first: number; last: number };
 type RangeState = { low: number; high: number; edge: number; previous: number };
 type ViewSession = {
   reader: SharedChunkReader;
   channelCount: number;
+  bytesPerSample: LogicSampleBytes;
   length: bigint;
   groupCount: number;
   ones: number;
@@ -101,19 +107,16 @@ function yieldWorkerTask(): Promise<void> {
 function maskFor(channel: number): number {
   return 1 << channel;
 }
-function pageFor(s: ViewSession, level: number, group: number): Uint8Array {
+function pageFor(s: ViewSession, level: number, group: number): Uint32Array {
   const pages = s.levels[level]!.pages,
     pageIndex = Math.floor(group / PAGE_GROUPS),
     existing = pages.get(pageIndex);
   if (existing) return existing.view;
   const buffer = new ArrayBuffer(PAGE_GROUPS * RECORD_BYTES),
-    view = new Uint8Array(buffer);
+    view = new Uint32Array(buffer);
   pages.set(pageIndex, { buffer, view });
   s.summaryBytes += buffer.byteLength;
   return view;
-}
-function foldedBytes(value: number): number {
-  return (value | (value >>> 8) | (value >>> 16) | (value >>> 24)) & 0xff;
 }
 function writeRecord(
   s: ViewSession,
@@ -125,7 +128,7 @@ function writeRecord(
   last: number,
 ): void {
   const page = pageFor(s, level, group),
-    offset = (group % PAGE_GROUPS) * RECORD_BYTES;
+    offset = (group % PAGE_GROUPS) * 4;
   page[offset] = ones;
   page[offset + 1] = zeros;
   page[offset + 2] = first;
@@ -156,7 +159,7 @@ function writeLevelRecord(
   last: number,
 ): void {
   const target = s.levels[level]!;
-  writeRecord(s, level, target.count, foldedBytes(ones), foldedBytes(zeros), first & 0xff, last & 0xff);
+  writeRecord(s, level, target.count, ones, zeros, first, last);
   target.count++;
   foldRecord(s, level + 1, ones, zeros, first, last);
 }
@@ -177,69 +180,214 @@ function report(s: ViewSession, force = false): void {
     scope.postMessage({ type: 'progress', length: s.length, summaryBytes: s.summaryBytes });
   }
 }
-function processPart(s: ViewSession, data: Uint8Array): void {
-  const packed = data.byteOffset % 4 === 0 ? new Uint32Array(data.buffer, data.byteOffset, data.byteLength >> 2) : null;
-  for (let offset = 0; offset < data.length;) {
-    const count = Math.min(data.length - offset, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount);
+function completeSummaryGroup(s: ViewSession): void {
+  writeLevelRecord(s, 0, s.ones, s.zeros, s.first, s.last);
+  s.groupCount = 0;
+}
+function processPart8(s: ViewSession, data: Uint8Array, count: number): void {
+  const words =
+    data.byteOffset % 4 === 0 ? new Uint32Array(data.buffer, data.byteOffset, Math.floor(data.byteLength / 4)) : null;
+  let index = 0;
+  while (index < count) {
+    const span = Math.min(count - index, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount),
+      end = index + span;
     if (!s.groupCount) {
-      s.first = data[offset]!;
+      s.first = data[index]!;
       s.ones = 0;
       s.zeros = 0;
     }
-    const end = offset + count;
-    while (offset < end && packed && (offset & 3) !== 0) {
-      const value = data[offset++]!;
-      s.ones |= value;
-      s.zeros |= ~value & 0xff;
-      s.last = value;
-      s.groupCount++;
-    }
-    const words = packed ? Math.floor((end - offset) / 4) : 0;
+    let ones = s.ones,
+      zeros = s.zeros,
+      at = index;
     if (words) {
-      let index = offset >> 2;
-      const wordEnd = index + words;
-      for (; index < wordEnd; index++) {
-        const value = packed![index]!;
-        s.ones |= value;
-        s.zeros |= ~value;
+      while (at < end && (at & 3) !== 0) {
+        const value = data[at++]!;
+        ones |= value;
+        zeros |= ~value;
       }
-      const bytes = words * 4;
-      offset += bytes;
-      s.groupCount += bytes;
-      s.last = data[offset - 1]!;
+      const wordEnd = end >>> 2;
+      for (let word = at >>> 2; word < wordEnd; word++) {
+        const value = words[word]!;
+        ones |= value;
+        zeros |= ~value;
+      }
+      at = wordEnd << 2;
     }
-    while (offset < end) {
-      const value = data[offset++]!;
-      s.ones |= value;
-      s.zeros |= ~value & 0xff;
-      s.last = value;
-      s.groupCount++;
+    while (at < end) {
+      const value = data[at++]!;
+      ones |= value;
+      zeros |= ~value;
     }
-    if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) {
-      writeLevelRecord(s, 0, s.ones, s.zeros, s.first, s.last);
-      s.groupCount = 0;
-    }
+    s.ones = ones;
+    s.zeros = zeros;
+    s.last = data[end - 1]!;
+    s.groupCount += span;
+    index = end;
+    if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) completeSummaryGroup(s);
   }
-  s.length += BigInt(data.length);
-  if (s.groupCount)
-    writeRecord(s, 0, s.levels[0]!.count, foldedBytes(s.ones), foldedBytes(s.zeros), s.first & 0xff, s.last & 0xff);
+}
+function processPart16(s: ViewSession, data: Uint8Array, count: number): void {
+  const values = data.byteOffset % 2 === 0 ? new Uint16Array(data.buffer, data.byteOffset, count) : null;
+  let index = 0;
+  while (index < count) {
+    const span = Math.min(count - index, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount),
+      end = index + span;
+    let ones = s.ones,
+      zeros = s.zeros,
+      first = s.first,
+      last = s.last;
+    if (!s.groupCount) {
+      first = values ? values[index]! : data[index * 2]! | (data[index * 2 + 1]! << 8);
+      ones = 0;
+      zeros = 0;
+    }
+    if (values) {
+      for (let at = index; at < end; at++) {
+        const value = values[at]!;
+        ones |= value;
+        zeros |= ~value;
+      }
+      last = values[end - 1]!;
+    } else {
+      for (let at = index; at < end; at++) {
+        const value = data[at * 2]! | (data[at * 2 + 1]! << 8);
+        ones |= value;
+        zeros |= ~value;
+      }
+      const offset = (end - 1) * 2;
+      last = data[offset]! | (data[offset + 1]! << 8);
+    }
+    s.first = first;
+    s.ones = ones;
+    s.zeros = zeros;
+    s.last = last;
+    s.groupCount += span;
+    index = end;
+    if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) completeSummaryGroup(s);
+  }
+}
+function processPart24(s: ViewSession, data: Uint8Array, count: number): void {
+  let index = 0;
+  while (index < count) {
+    const span = Math.min(count - index, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount),
+      end = index + span;
+    let ones = s.ones,
+      zeros = s.zeros,
+      first = s.first,
+      last = s.last;
+    if (!s.groupCount) {
+      const offset = index * 3;
+      first = data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16);
+      ones = 0;
+      zeros = 0;
+    }
+    for (let at = index, offset = index * 3; at < end; at++, offset += 3) {
+      const value = data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16);
+      ones |= value;
+      zeros |= ~value;
+      last = value;
+    }
+    s.first = first;
+    s.ones = ones;
+    s.zeros = zeros;
+    s.last = last;
+    s.groupCount += span;
+    index = end;
+    if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) completeSummaryGroup(s);
+  }
+}
+function processPart32(s: ViewSession, data: Uint8Array, count: number): void {
+  const values = data.byteOffset % 4 === 0 ? new Uint32Array(data.buffer, data.byteOffset, count) : null;
+  let index = 0;
+  while (index < count) {
+    const span = Math.min(count - index, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount),
+      end = index + span;
+    let ones = s.ones,
+      zeros = s.zeros,
+      first = s.first,
+      last = s.last;
+    if (!s.groupCount) {
+      const offset = index * 4;
+      first = values
+        ? values[index]!
+        : (data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) >>> 0;
+      ones = 0;
+      zeros = 0;
+    }
+    if (values) {
+      for (let at = index; at < end; at++) {
+        const value = values[at]!;
+        ones |= value;
+        zeros |= ~value;
+      }
+      last = values[end - 1]!;
+    } else {
+      for (let at = index; at < end; at++) {
+        const offset = at * 4,
+          value =
+            (data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) >>> 0;
+        ones |= value;
+        zeros |= ~value;
+      }
+      const offset = (end - 1) * 4;
+      last = (data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) >>> 0;
+    }
+    s.first = first;
+    s.ones = ones;
+    s.zeros = zeros;
+    s.last = last;
+    s.groupCount += span;
+    index = end;
+    if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) completeSummaryGroup(s);
+  }
+}
+function processPart(s: ViewSession, data: Uint8Array): void {
+  if (data.length % s.bytesPerSample) throw new Error('Shared block has a partial sample');
+  const count = data.length / s.bytesPerSample;
+  if (s.bytesPerSample === 1) processPart8(s, data, count);
+  else if (s.bytesPerSample === 2) processPart16(s, data, count);
+  else if (s.bytesPerSample === 3) processPart24(s, data, count);
+  else processPart32(s, data, count);
+  s.length += BigInt(count);
+  if (s.groupCount) writeRecord(s, 0, s.levels[0]!.count, s.ones, s.zeros, s.first, s.last);
   report(s);
 }
 function recordAt(s: ViewSession, level: number, group: number): [number, number, number, number] | null {
   if (group < 0 || group >= s.levels[level]!.count) return null;
   const page = s.levels[level]!.pages.get(Math.floor(group / PAGE_GROUPS));
   if (!page) return null;
-  const offset = (group % PAGE_GROUPS) * RECORD_BYTES;
+  const offset = (group % PAGE_GROUPS) * 4;
   return [page.view[offset]!, page.view[offset + 1]!, page.view[offset + 2]!, page.view[offset + 3]!];
 }
 function sampleAt(s: ViewSession, position: bigint): number {
-  const value = s.reader.readByte(position);
+  const value = s.reader.readSample(position);
   if (value === null) throw new Error(`Shared sample ${position} is not committed`);
   return value;
 }
-function exactPoints(data: Uint8Array, bit: number): Uint8Array {
-  const points = new Uint8Array(data.length);
-  for (let index = 0; index < data.length; index++) points[index] = data[index]! & bit ? 1 : 0;
+function exactPoints(data: Uint8Array, bit: number, bytesPerSample: LogicSampleBytes): Uint8Array {
+  const samples = data.length / bytesPerSample,
+    points = new Uint8Array(samples);
+  if (bytesPerSample === 1) {
+    for (let index = 0; index < samples; index++) points[index] = (data[index]! & bit) !== 0 ? 1 : 0;
+  } else if (bytesPerSample === 2 && data.byteOffset % 2 === 0) {
+    const values = new Uint16Array(data.buffer, data.byteOffset, samples);
+    for (let index = 0; index < samples; index++) points[index] = (values[index]! & bit) !== 0 ? 1 : 0;
+  } else if (bytesPerSample === 2) {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 2)
+      points[index] = ((data[offset]! | (data[offset + 1]! << 8)) & bit) !== 0 ? 1 : 0;
+  } else if (bytesPerSample === 3) {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 3)
+      points[index] = ((data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16)) & bit) !== 0 ? 1 : 0;
+  } else if (data.byteOffset % 4 === 0) {
+    const values = new Uint32Array(data.buffer, data.byteOffset, samples);
+    for (let index = 0; index < samples; index++) points[index] = (values[index]! & bit) !== 0 ? 1 : 0;
+  } else {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 4)
+      points[index] =
+        ((data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) & bit) !== 0
+          ? 1
+          : 0;
+  }
   return points;
 }
 function alignUp(position: bigint, step: bigint): bigint {
@@ -318,7 +466,7 @@ function addRecordAt(s: ViewSession, state: RangeState, bit: number, level: numb
   if (group < 0 || group >= target.count) return false;
   const page = target.pages.get(Math.floor(group / PAGE_GROUPS));
   if (!page) return false;
-  const offset = (group % PAGE_GROUPS) * RECORD_BYTES,
+  const offset = (group % PAGE_GROUPS) * 4,
     view = page.view;
   const ones = (view[offset]! & bit) !== 0,
     zeros = (view[offset + 1]! & bit) !== 0,
@@ -334,13 +482,63 @@ function addSamplesAt(s: ViewSession, state: RangeState, bit: number, start: num
   if (start >= end) return;
   const data = s.reader.readRange(BigInt(start), BigInt(end));
   if (!data) throw new Error(`Shared samples ${start}..${end} are not committed`);
-  for (let index = 0; index < data.length; index++) {
-    const active = (data[index]! & bit) !== 0 ? 1 : 0;
-    if (active) state.high = 1;
-    else state.low = 0;
-    if (active !== state.previous) state.edge = 1;
-    state.previous = active;
+  const samples = data.length / s.bytesPerSample;
+  let previous = state.previous;
+  if (s.bytesPerSample === 1) {
+    for (let index = 0; index < samples; index++) {
+      const active = (data[index]! & bit) !== 0 ? 1 : 0;
+      if (active) state.high = 1;
+      else state.low = 0;
+      if (active !== previous) state.edge = 1;
+      previous = active;
+    }
+  } else if (s.bytesPerSample === 2 && data.byteOffset % 2 === 0) {
+    const values = new Uint16Array(data.buffer, data.byteOffset, samples);
+    for (let index = 0; index < samples; index++) {
+      const active = (values[index]! & bit) !== 0 ? 1 : 0;
+      if (active) state.high = 1;
+      else state.low = 0;
+      if (active !== previous) state.edge = 1;
+      previous = active;
+    }
+  } else if (s.bytesPerSample === 2) {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 2) {
+      const active = ((data[offset]! | (data[offset + 1]! << 8)) & bit) !== 0 ? 1 : 0;
+      if (active) state.high = 1;
+      else state.low = 0;
+      if (active !== previous) state.edge = 1;
+      previous = active;
+    }
+  } else if (s.bytesPerSample === 3) {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 3) {
+      const active = ((data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16)) & bit) !== 0 ? 1 : 0;
+      if (active) state.high = 1;
+      else state.low = 0;
+      if (active !== previous) state.edge = 1;
+      previous = active;
+    }
+  } else if (data.byteOffset % 4 === 0) {
+    const values = new Uint32Array(data.buffer, data.byteOffset, samples);
+    for (let index = 0; index < samples; index++) {
+      const active = (values[index]! & bit) !== 0 ? 1 : 0;
+      if (active) state.high = 1;
+      else state.low = 0;
+      if (active !== previous) state.edge = 1;
+      previous = active;
+    }
+  } else {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 4) {
+      const active =
+        ((data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) & bit) !== 0
+          ? 1
+          : 0;
+      if (active) state.high = 1;
+      else state.low = 0;
+      if (active !== previous) state.edge = 1;
+      previous = active;
+    }
   }
+  state.previous = previous;
 }
 function scanRangeNumber(
   s: ViewSession,
@@ -418,7 +616,7 @@ function answerQueryNumbers(
     }
     if (availableEnd - start <= request.bins) {
       const data = s.reader.readRange(begin, BigInt(availableEnd));
-      if (data) points = exactPoints(data, bit);
+      if (data) points = exactPoints(data, bit, s.bytesPerSample);
     }
   }
   scope.postMessage(
@@ -449,15 +647,81 @@ function addSamplesAtMany(
   if (start >= end) return;
   const data = s.reader.readRange(BigInt(start), BigInt(end));
   if (!data) throw new Error(`Shared samples ${start}..${end} are not committed`);
-  for (let index = 0; index < data.length; index++) {
-    const value = data[index]!;
-    for (let channel = 0; channel < states.length; channel++) {
-      const state = states[channel]!,
-        active = (value & bits[channel]!) !== 0 ? 1 : 0;
-      if (active) state.high = 1;
-      else state.low = 0;
-      if (active !== state.previous) state.edge = 1;
-      state.previous = active;
+  const samples = data.length / s.bytesPerSample;
+  if (s.bytesPerSample === 1) {
+    for (let index = 0; index < samples; index++) {
+      const value = data[index]!;
+      for (let channel = 0; channel < states.length; channel++) {
+        const state = states[channel]!,
+          active = (value & bits[channel]!) !== 0 ? 1 : 0;
+        if (active) state.high = 1;
+        else state.low = 0;
+        if (active !== state.previous) state.edge = 1;
+        state.previous = active;
+      }
+    }
+  } else if (s.bytesPerSample === 2 && data.byteOffset % 2 === 0) {
+    const values = new Uint16Array(data.buffer, data.byteOffset, samples);
+    for (let index = 0; index < samples; index++) {
+      const value = values[index]!;
+      for (let channel = 0; channel < states.length; channel++) {
+        const state = states[channel]!,
+          active = (value & bits[channel]!) !== 0 ? 1 : 0;
+        if (active) state.high = 1;
+        else state.low = 0;
+        if (active !== state.previous) state.edge = 1;
+        state.previous = active;
+      }
+    }
+  } else if (s.bytesPerSample === 2) {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 2) {
+      const value = data[offset]! | (data[offset + 1]! << 8);
+      for (let channel = 0; channel < states.length; channel++) {
+        const state = states[channel]!,
+          active = (value & bits[channel]!) !== 0 ? 1 : 0;
+        if (active) state.high = 1;
+        else state.low = 0;
+        if (active !== state.previous) state.edge = 1;
+        state.previous = active;
+      }
+    }
+  } else if (s.bytesPerSample === 3) {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 3) {
+      const value = data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16);
+      for (let channel = 0; channel < states.length; channel++) {
+        const state = states[channel]!,
+          active = (value & bits[channel]!) !== 0 ? 1 : 0;
+        if (active) state.high = 1;
+        else state.low = 0;
+        if (active !== state.previous) state.edge = 1;
+        state.previous = active;
+      }
+    }
+  } else if (data.byteOffset % 4 === 0) {
+    const values = new Uint32Array(data.buffer, data.byteOffset, samples);
+    for (let index = 0; index < samples; index++) {
+      const value = values[index]!;
+      for (let channel = 0; channel < states.length; channel++) {
+        const state = states[channel]!,
+          active = (value & bits[channel]!) !== 0 ? 1 : 0;
+        if (active) state.high = 1;
+        else state.low = 0;
+        if (active !== state.previous) state.edge = 1;
+        state.previous = active;
+      }
+    }
+  } else {
+    for (let index = 0, offset = 0; index < samples; index++, offset += 4) {
+      const value =
+        (data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) >>> 0;
+      for (let channel = 0; channel < states.length; channel++) {
+        const state = states[channel]!,
+          active = (value & bits[channel]!) !== 0 ? 1 : 0;
+        if (active) state.high = 1;
+        else state.low = 0;
+        if (active !== state.previous) state.edge = 1;
+        state.previous = active;
+      }
     }
   }
 }
@@ -472,7 +736,7 @@ function addRecordAtMany(
   if (group < 0 || group >= target.count) return false;
   const page = target.pages.get(Math.floor(group / PAGE_GROUPS));
   if (!page) return false;
-  const offset = (group % PAGE_GROUPS) * RECORD_BYTES,
+  const offset = (group % PAGE_GROUPS) * 4,
     view = page.view;
   const ones = view[offset]!,
     zeros = view[offset + 1]!,
@@ -578,7 +842,7 @@ function answerQueryManyNumbers(
       const data = s.reader.readRange(begin, BigInt(availableEnd));
       if (data)
         for (let channel = 0; channel < results.length; channel++)
-          results[channel]!.points = exactPoints(data, bits[channel]!);
+          results[channel]!.points = exactPoints(data, bits[channel]!, s.bytesPerSample);
     }
   }
   const transfer: Transferable[] = [];
@@ -636,7 +900,7 @@ function answerQuery(s: ViewSession, request: Extract<ViewRequest, { type: 'quer
     }
     if (availableEnd - start <= BigInt(request.bins)) {
       const data = s.reader.readRange(start, availableEnd);
-      if (data) points = exactPoints(data, maskFor(request.channel));
+      if (data) points = exactPoints(data, maskFor(request.channel), s.bytesPerSample);
     }
   }
   scope.postMessage(
@@ -728,13 +992,19 @@ async function consume(s: ViewSession): Promise<void> {
 async function handle(request: ViewRequest): Promise<void> {
   if (request.type === 'start') {
     if (session) throw new Error('Viewport Worker already started');
-    if (!Number.isInteger(request.channelCount) || request.channelCount < 1 || request.channelCount > 8)
+    if (
+      !Number.isInteger(request.channelCount) ||
+      request.channelCount < 1 ||
+      request.channelCount > 32 ||
+      ![1, 2, 3, 4].includes(request.bytesPerSample)
+    )
       throw new Error('Invalid viewport configuration');
-    const reader = new SharedChunkReader(request.port);
+    const reader = new SharedChunkReader(request.port, request.bytesPerSample);
     const levels = createLevels();
     const created: ViewSession = {
       reader,
       channelCount: request.channelCount,
+      bytesPerSample: request.bytesPerSample,
       length: 0n,
       groupCount: 0,
       ones: 0,

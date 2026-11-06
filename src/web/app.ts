@@ -223,6 +223,9 @@ export class AnalyzerApp {
       void this.startCapture();
     });
     this.deviceControls.onConnectionChange = () => {
+      this.signalControls.refresh();
+      this.refreshProtocolMappings();
+      this.renderChannelControls();
       this.renderStatus();
       this.runFirstCapture();
     };
@@ -818,9 +821,11 @@ export class AnalyzerApp {
         : capture
           ? (capture.logicChannelCount ?? capture.store.channelCount)
           : 0;
-      const count = device ? this.deviceControls.channelCapacity(kind) : capturedCount;
       const selected = this.deviceControls.selectedChannels(kind);
-      for (let id = 0; id < count; id++) {
+      const ids = device
+        ? this.deviceControls.channelIndices(kind)
+        : Array.from({ length: capturedCount }, (_, index) => index);
+      for (const id of ids) {
         const index = device ? (matching ? selection![kind].indexOf(id) : -1) : id;
         const chip = document.createElement('label');
         chip.className = analog ? 'channel-chip analog-chip' : 'channel-chip';

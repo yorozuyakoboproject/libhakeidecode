@@ -2,6 +2,13 @@ import type { ComponentMessages } from '../../components.js';
 
 export const messages = {
   en: {
+    'driver.ch32h417.transport.label': 'USB transport',
+    'driver.ch32h417.transport.auto': 'Auto (prefer native relay)',
+    'driver.ch32h417.transport.native': 'Native USB relay',
+    'driver.ch32h417.transport.webusb': 'Direct WebUSB',
+    'driver.ch32h417.transport.active.native': 'Current transport: native USB relay',
+    'driver.ch32h417.transport.active.webusb': 'Current transport: direct WebUSB',
+    'driver.ch32h417.transport.active.none': 'Current transport: disconnected',
     'driver.ch32h417.error.adcRate': 'ADC1 scan rate exceeds the device-supported range.',
     'driver.ch32h417.error.captureOverflow':
       'Capture buffer overflow; capture stopped. Available diagnostics cannot determine the bottleneck.',
@@ -22,7 +29,6 @@ export const messages = {
     'driver.ch32h417.timebase': 'Timeline clock (Hz, not ADC rate)',
     'driver.ch32h417.option.hsadcHz': 'HSADC sampling rate (Hz)',
     'driver.ch32h417.option.adc1Hz': 'ADC1 rate per channel (Hz)',
-    'driver.ch32h417.option.digitalEncoding': 'Digital encoding',
     'driver.ch32h417.option.analogEncoding': 'Analog encoding',
     'driver.ch32h417.option.adc1Period': 'ADC1 hardware sample rate',
     'driver.ch32h417.option.hsadcPeriod': 'HSADC hardware sample rate',
@@ -35,7 +41,6 @@ export const messages = {
     'driver.ch32h417.hint.pc2Bits':
       'Reducing output bits loses precision. Encoding preserves the quantized samples exactly.',
     'driver.ch32h417.value.raw': 'Uncompressed',
-    'driver.ch32h417.value.runs': 'Run-length compression',
     'driver.ch32h417.value.packed': 'Bit packing',
     'driver.ch32h417.value.split': 'Byte-split LZ4',
     'driver.ch32h417.name': 'CH32H417 Logic Analyzer',
@@ -48,6 +53,13 @@ export const messages = {
       'H417 protocol mismatch: device v{actual}, analyzer requires v{expected}. Update the analyzer and firmware to matching versions.',
   },
   'zh-CN': {
+    'driver.ch32h417.transport.label': 'USB 传输通道',
+    'driver.ch32h417.transport.auto': '自动（优先后台转发）',
+    'driver.ch32h417.transport.native': '后台原生 USB 转发',
+    'driver.ch32h417.transport.webusb': '浏览器 WebUSB 直连',
+    'driver.ch32h417.transport.active.native': '当前通道：后台原生 USB 转发',
+    'driver.ch32h417.transport.active.webusb': '当前通道：浏览器 WebUSB 直连',
+    'driver.ch32h417.transport.active.none': '当前通道：未连接',
     'driver.ch32h417.error.adcRate': 'ADC1 扫描速率超出设备支持范围。',
     'driver.ch32h417.error.captureOverflow': '采样缓冲区溢出，已停止采集；现有诊断信息不足以确定具体瓶颈。',
     'driver.ch32h417.error.processingOverflow':
@@ -64,7 +76,6 @@ export const messages = {
     'driver.ch32h417.timebase': '时间轴时钟（Hz，非 ADC 采样率）',
     'driver.ch32h417.option.hsadcHz': 'HSADC 采样率（Hz）',
     'driver.ch32h417.option.adc1Hz': 'ADC1 每通道采样率（Hz）',
-    'driver.ch32h417.option.digitalEncoding': '数字编码',
     'driver.ch32h417.option.analogEncoding': '模拟编码',
     'driver.ch32h417.option.adc1Period': 'ADC1 采样率',
     'driver.ch32h417.option.hsadcPeriod': 'HSADC 采样率',
@@ -75,7 +86,6 @@ export const messages = {
     'driver.ch32h417.hint.pc1Bits': '降低输出位数会损失精度；编码无损还原量化后的样本。',
     'driver.ch32h417.hint.pc2Bits': '降低输出位数会损失精度；编码无损还原量化后的样本。',
     'driver.ch32h417.value.raw': '无压缩',
-    'driver.ch32h417.value.runs': '游程压缩',
     'driver.ch32h417.value.packed': '位打包',
     'driver.ch32h417.value.split': '字节分离 LZ4',
     'driver.ch32h417.name': 'CH32H417 逻辑分析仪',

@@ -217,6 +217,7 @@ export class DecodeClient {
           type: 'decode-shared-start',
           port: channel.port1,
           channelCount: capture.logicChannelCount ?? capture.store.channelCount,
+          bytesPerSample: sharedSource.bytesPerSample,
           channels: Object.fromEntries(channelIndexes),
         },
         [channel.port1],

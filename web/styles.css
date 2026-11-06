@@ -1216,3 +1216,12 @@ h2 {
     min-height: 0;
   }
 }
+#device-transport-status {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
+#device-transport-status[data-transport='native'] {
+  color: var(--accent, #167d68);
+}

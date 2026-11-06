@@ -31,8 +31,12 @@ scope.onmessage = ({ data }) => {
         if (!device.connect) throw new Error('Driver does not support device authorization');
         await device.connect(data.initialization);
       } else if (data.type === 'disconnect') await device.disconnect?.();
-      else if (data.type === 'configure') settings = resolveDeviceConfiguration(device, data.configuration);
+      else if (data.type === 'transport') {
+        if (data.mode === undefined) await device.refreshTransport?.();
+        else await device.setTransport?.(data.mode);
+      } else if (data.type === 'configure') settings = resolveDeviceConfiguration(device, data.configuration);
       else if (data.type === 'prepare') {
+        await device.refreshTransport?.();
         validateDeviceConfiguration(device, data.configuration);
         const acquisition = device.getAcquisitionDescription(data.configuration);
         if (
@@ -51,6 +55,7 @@ scope.onmessage = ({ data }) => {
         description,
       });
     } catch (error) {
+      if (device) scope.postMessage({ type: 'state', state: state(device) });
       scope.postMessage({ type: 'error', requestId: data.requestId, ...componentFailure(error) });
     }
   });

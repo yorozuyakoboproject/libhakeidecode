@@ -6,7 +6,8 @@ import { PlanarSampleStore } from './data/planarStore.js';
 import { RleSampleStore } from './data/rleStore.js';
 import { AnalogSampleStore, type AnalogStore } from './data/analogStore.js';
 import { TimedAnalogStore, PendingAnalogStore } from './data/timed-analogStore.js';
-import { channelWidthForProbes } from './data/channel-count.js';
+import { channelWidthForProbes, widenPackedSamples } from './data/channel-count.js';
+import { packedLogicSampleBytes } from '../libhakei/device.js';
 import type { MemoryBudget } from './memory.js';
 
 export class MultiRateCapture {
@@ -28,8 +29,8 @@ export class MultiRateCapture {
           samplerate: config.sampleRate,
           budget,
           transpose32: 'js',
-          stagePacked: true,
-          keepPacked: true,
+          stagePacked: this.labels.length <= 8,
+          keepPacked: this.labels.length <= 8,
           deferPyramid: true,
         })
       : this.timeline(0n);
@@ -85,7 +86,10 @@ export class MultiRateCapture {
         this.store.length + BigInt(chunk.length) > BigInt(this.config.sampleCount)
       )
         throw new Error('Invalid digital stream');
-      this.store.append(chunk.data.subarray(0, chunk.length));
+      const sampleBytes = packedLogicSampleBytes(chunk);
+      this.store.append(
+        widenPackedSamples(chunk.data.subarray(0, chunk.length * sampleBytes), sampleBytes, this.store.channelCount),
+      );
       return;
     }
     const index = this.selected.indexOf(chunk.channel),

@@ -15,6 +15,7 @@ import { SharedWorkerSampleStore } from './shared-sample-store.js';
 import { WorkerCaptureStore } from './worker-store.js';
 export interface SharedCaptureConsumerSource {
   readonly allocatedBytes: number;
+  readonly bytesPerSample: 1 | 2 | 3 | 4;
   readonly publishedSamples: bigint;
   readonly publisherMetrics?: { calls: number; bytes: number; totalMs: number; maxMs: number };
   readonly driverDiagnostics?: DriverDiagnostics;
@@ -118,8 +119,7 @@ function capturePlan(
     throw new RangeError('Invalid acquisition block size');
   if (
     !['channel-arrays', 'packed-logic', 'multi-rate'].includes(description.layout) ||
-    ![1, 2, 4, 8].includes(description.logicSampleBytes) ||
-    (description.layout === 'packed-logic' && description.logicSampleBytes !== 1) ||
+    ![1, 2, 3, 4, 8].includes(description.logicSampleBytes) ||
     ![4, 8].includes(description.analogSampleBytes)
   )
     throw new Error('Unsupported acquisition format');
@@ -227,7 +227,13 @@ async function captureSharedWorkerSource(
 ): Promise<Capture> {
   const started = performance.now();
   const labels = deviceChannelIndices(configuration, 'logic').map((index) => 'D' + index);
-  const store = new SharedWorkerSampleStore(source, configuration.logicChannels, configuration.sampleRate, labels);
+  const store = new SharedWorkerSampleStore(
+    source,
+    configuration.logicChannels,
+    configuration.sampleRate,
+    labels,
+    source.logicSampleBytes,
+  );
   const diagnostics: CaptureDiagnostics = {
     mainThreadAppend: { calls: 0, totalMs: 0, maxMs: 0 },
     mainThreadPublish: { calls: 0, totalMs: 0, maxMs: 0 },

@@ -2,6 +2,7 @@ import { componentFailure, type ComponentFailure } from '../components.js';
 import {
   validateDeviceConfiguration,
   deviceChannelIndices,
+  packedLogicSampleBytes,
   type AcquisitionChunk,
   type DeviceConfiguration,
   type DriverDiagnostics,
@@ -14,7 +15,7 @@ import type { SharedChunkProducer, SharedPublisherMetrics } from './shared-chunk
 import type { SharedChunkAllocator } from './shared-chunk-allocator.js';
 import { PlanarSampleStore, type PlanarStoreTimings } from './data/planarStore.js';
 import { AnalogSampleStore } from './data/analogStore.js';
-import { channelWidthForProbes } from './data/channel-count.js';
+import { channelWidthForProbes, widenPackedSamples } from './data/channel-count.js';
 import { DEFAULT_CAPTURE_BUDGET_BYTES, MemoryBudget, type BudgetSnapshot } from './memory.js';
 import { WorkerStoreServer } from './worker-store-server.js';
 import { yieldWorkerTask } from './worker-task.js';
@@ -30,6 +31,7 @@ export type AcquisitionRequest =
       buffers: ArrayBuffer[];
       sharedSampleCount?: bigint;
       sharedChunkBytes?: number;
+      sharedSampleBytes?: 1 | 2 | 3 | 4;
       store?: { budgetBytes: number };
       storePort?: MessagePort;
     }
@@ -128,9 +130,10 @@ scope.onmessage = ({ data }) => {
         return 0;
       }
       if ('format' in input) {
+        const sampleBytes = input.format === 'packed-logic' ? packedLogicSampleBytes(input) : 0;
         if (
           input.format !== 'packed-logic' ||
-          input.encoding !== 'raw8' ||
+          !['raw8', 'raw16', 'raw24', 'raw32'].includes(input.encoding) ||
           !(input.data instanceof Uint8Array) ||
           typeof input.startSample !== 'bigint' ||
           input.startSample < 0n ||
@@ -138,10 +141,10 @@ scope.onmessage = ({ data }) => {
           input.sampleRate < 1 ||
           !Number.isInteger(input.channelCount) ||
           input.channelCount < 1 ||
-          input.channelCount > 8 ||
+          input.channelCount > 32 ||
           !Number.isSafeInteger(input.length) ||
           input.length < 1 ||
-          input.length > input.data.length
+          input.length * sampleBytes > input.data.length
         )
           throw new Error('Invalid packed logic chunk');
         if (!store) {
@@ -152,8 +155,8 @@ scope.onmessage = ({ data }) => {
             samplerate: input.sampleRate,
             transpose32: 'js',
             deferPyramid: true,
-            stagePacked: true,
-            keepPacked: true,
+            stagePacked: input.channelCount <= 8,
+            keepPacked: input.channelCount <= 8,
             ...(budget ? { budget } : {}),
           });
           storeServer?.connect(data.storePort!);
@@ -170,7 +173,9 @@ scope.onmessage = ({ data }) => {
         )
           throw new Error('Device sample rate, channel layout or sample continuity changed during capture');
         if (input.length > data.chunkSamples) throw new Error('Device exceeded its declared buffer capacity');
-        store.append(input.data.subarray(0, input.length));
+        store.append(
+          widenPackedSamples(input.data.subarray(0, input.length * sampleBytes), sampleBytes, store.channelCount),
+        );
         return input.length;
       }
       const chunk = createSampleChunk(input);
@@ -289,6 +294,7 @@ scope.onmessage = ({ data }) => {
         producer = new SharedChunkProducer({
           sampleCount: data.sharedSampleCount,
           chunkBytes: data.sharedChunkBytes,
+          bytesPerSample: data.sharedSampleBytes,
           allocate: (byteLength) => allocator!.allocate(byteLength),
           onProgress: (bytes, samples, publisher) => reportSharedProgress(bytes, samples, publisher),
         });
@@ -343,7 +349,11 @@ scope.onmessage = ({ data }) => {
         const timeline = 'format' in result.value && result.value.format === 'timeline';
         if (!borrowed && !timeline) throw new Error('Worker driver must use the managed buffer contract');
         if (producer && 'format' in result.value && result.value.format === 'packed-logic') {
-          await producer.append(result.value.data.subarray(0, result.value.length));
+          const sampleBytes = packedLogicSampleBytes(result.value);
+          if (producer.bytesPerSample !== sampleBytes)
+            throw new Error('Device digital sample width changed during capture');
+          const bytes = result.value.length * sampleBytes;
+          await producer.append(result.value.data.subarray(0, bytes));
         } else if (data.store) {
           appendChunk(result.value);
           reportLocal();

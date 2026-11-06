@@ -31,6 +31,7 @@ export class DeviceControls {
   private connectionSequence = 0;
   private configurationError: unknown = null;
   private connectionError: unknown = null;
+  private pendingTransport?: string;
   constructor(
     readonly form: HTMLFormElement,
     readonly devices: readonly DeviceControl[],
@@ -50,6 +51,7 @@ export class DeviceControls {
       device.onConnectionChange = () => {
         if (device === this.device) {
           if (!this.busy) this.renderOptions();
+          this.reconcileChannelSelection();
           this.refreshConnection();
           this.onConnectionChange?.();
         }
@@ -73,7 +75,7 @@ export class DeviceControls {
       void this.restoreAuthorizedDevices();
     });
     form.addEventListener('change', (event) => {
-      if (event.target === select || this.busy) return;
+      if (event.target === select || (event.target as HTMLElement).id === 'device-transport' || this.busy) return;
       if ((event.target as HTMLElement).id.startsWith('device-option-')) this.rememberOptions();
       if ((event.target as HTMLElement).id === 'capture-duration')
         this.durationSeconds = Number(this.control('capture-duration').value);
@@ -84,6 +86,10 @@ export class DeviceControls {
       this.refreshConnection();
     });
     void this.restoreAuthorizedDevices();
+    setInterval(() => {
+      if (!this.busy && !this.connecting && !this.configuring && this.device.descriptor.transport)
+        void this.updateTransport();
+    }, 3000);
   }
   private control<T extends HTMLInputElement | HTMLSelectElement = HTMLInputElement>(id: string): T {
     const node = this.form.querySelector<T>(`#${id}`);
@@ -105,21 +111,30 @@ export class DeviceControls {
     );
   }
   channelCapacity(kind: 'logic' | 'analog'): number {
+    const inputs = kind === 'analog' ? this.device.descriptor.analogInputs : this.device.descriptor.logicInputs;
+    if (inputs) return inputs.reduce((maximum, input) => Math.max(maximum, input.index + 1), 0);
     const capability = this.device.descriptor.capabilities[`${kind}Channels`];
     return capability.kind === 'list' ? Math.max(...capability.values) : capability.max;
+  }
+  channelIndices(kind: 'logic' | 'analog'): readonly number[] {
+    const inputs = kind === 'analog' ? this.device.descriptor.analogInputs : this.device.descriptor.logicInputs;
+    return (
+      inputs?.map((input) => input.index) ?? Array.from({ length: this.channelCapacity(kind) }, (_, index) => index)
+    );
   }
   selectedChannels(kind: 'logic' | 'analog'): readonly number[] {
     return kind === 'logic' ? this.logicSelection : this.analogSelection;
   }
   channelAvailable(kind: 'logic' | 'analog', index: number): boolean {
-    const inputs = kind === 'analog' ? this.device.descriptor.analogInputs : undefined;
+    const inputs = kind === 'analog' ? this.device.descriptor.analogInputs : this.device.descriptor.logicInputs;
     return !inputs || inputs.some((input) => input.index === index);
   }
   channelName(kind: 'logic' | 'analog', index: number): string {
     return (
       (kind === 'analog'
         ? this.device.descriptor.analogInputs?.find((input) => input.index === index)?.name
-        : undefined) ?? `${kind === 'analog' ? 'A' : 'D'}${index}`
+        : this.device.descriptor.logicInputs?.find((input) => input.index === index)?.name) ??
+      `${kind === 'analog' ? 'A' : 'D'}${index}`
     );
   }
   selectChannel(kind: 'logic' | 'analog', channel: number, enabled: boolean): void {
@@ -127,9 +142,12 @@ export class DeviceControls {
     const selected = new Set(this.selectedChannels(kind));
     if (enabled) selected.add(channel);
     else selected.delete(channel);
-    const indices = [...selected].sort((a, b) => a - b);
-    if (kind === 'logic') this.logicSelection = indices;
-    else this.analogSelection = indices;
+    if (kind === 'logic') {
+      const available = this.channelIndices('logic');
+      const index = available.indexOf(channel);
+      if (enabled && index >= 0) this.logicSelection = [...available.slice(0, index + 1)];
+      else this.logicSelection = this.logicPrefix(available.filter((item) => selected.has(item)));
+    } else this.analogSelection = [...selected].sort((a, b) => a - b);
     try {
       localStorage.setItem(
         `hakei.${this.device.descriptor.id}.channels`,
@@ -190,18 +208,43 @@ export class DeviceControls {
         const indices: unknown = saved?.[kind];
         if (
           Array.isArray(indices) &&
-          indices.every((id) => Number.isInteger(id) && id >= 0 && id < this.channelCapacity(kind)) &&
+          indices.every((id) => Number.isInteger(id) && id >= 0) &&
           new Set(indices).size === indices.length
         ) {
-          if (kind === 'logic') this.logicSelection = [...indices].sort((a, b) => a - b);
-          else this.analogSelection = [...indices].sort((a, b) => a - b);
+          const filtered = indices.filter((id) => this.channelAvailable(kind, id)).sort((a, b) => a - b);
+          const next = filtered.length || !indices.length ? filtered : [...this.channelIndices(kind)];
+          if (kind === 'logic') {
+            const prefix = this.logicPrefix(next);
+            this.logicSelection = prefix.length || !next.length ? prefix : [...this.channelIndices(kind)];
+          } else this.analogSelection = next;
+        } else if (indices === undefined && kind === 'logic') {
+          this.logicSelection = [...this.channelIndices(kind)];
         }
       }
     } catch {}
   }
+  private reconcileChannelSelection(): void {
+    const logic = this.logicPrefix(this.logicSelection.filter((id) => this.channelAvailable('logic', id)));
+    const analog = this.analogSelection.filter((id) => this.channelAvailable('analog', id));
+    if (logic.length === this.logicSelection.length && analog.length === this.analogSelection.length) return;
+    this.logicSelection = logic;
+    this.analogSelection = analog;
+    this.onChange?.();
+  }
+  private logicPrefix(selection: readonly number[]): number[] {
+    const selected = new Set(selection),
+      prefix: number[] = [];
+    for (const channel of this.channelIndices('logic')) {
+      if (!selected.has(channel)) break;
+      prefix.push(channel);
+    }
+    return prefix;
+  }
   private selectDevice(): void {
     const defaults = defaultDeviceConfiguration(this.device.descriptor);
-    this.logicSelection = Array.from({ length: defaults.logicChannels }, (_, i) => i);
+    this.logicSelection =
+      this.device.descriptor.logicInputs?.map((input) => input.index) ??
+      Array.from({ length: defaults.logicChannels }, (_, i) => i);
     this.analogSelection = Array.from({ length: defaults.analogChannels }, (_, i) => i);
     this.restoreChannelSelection();
     const configuration = {
@@ -306,6 +349,43 @@ export class DeviceControls {
     const device = this.device,
       row = this.form.querySelector<HTMLElement>('#device-connection');
     if (!row) return;
+    let transport = row.querySelector<HTMLSelectElement>('#device-transport');
+    let transportStatus = row.querySelector<HTMLElement>('#device-transport-status');
+    if (!transport && device.descriptor.transport) {
+      const label = document.createElement('label');
+      label.className = 'field';
+      label.id = 'device-transport-field';
+      const name = document.createElement('span');
+      this.caption(name, `driver.${device.descriptor.id}.transport.label`, 'USB transport');
+      transport = document.createElement('select');
+      transport.id = 'device-transport';
+      for (const mode of device.descriptor.transport.choices) {
+        const option = document.createElement('option');
+        option.value = mode;
+        this.caption(option, `driver.${device.descriptor.id}.transport.${mode}`, mode);
+        transport.append(option);
+      }
+      transport.addEventListener('change', () => {
+        void this.updateTransport(transport!.value);
+      });
+      transportStatus = document.createElement('strong');
+      transportStatus.id = 'device-transport-status';
+      transportStatus.role = 'status';
+      label.append(name, transport, transportStatus);
+      row.prepend(label);
+    }
+    const transportField = row.querySelector<HTMLElement>('#device-transport-field');
+    if (transportField) transportField.hidden = !device.descriptor.transport;
+    if (transport && device.descriptor.transport) {
+      transport.value = device.descriptor.transport.selected;
+      transport.disabled = this.busy || this.connecting || this.configuring;
+      this.caption(
+        transportStatus!,
+        `driver.${device.descriptor.id}.transport.active.${device.descriptor.transport.active ?? 'none'}`,
+        'Disconnected',
+      );
+      transportStatus!.dataset.transport = device.descriptor.transport.active ?? 'none';
+    }
     const disconnected = device.connected === false;
     this.form.querySelector<HTMLElement>('#device-sampling')!.hidden = disconnected;
     this.form.querySelector<HTMLElement>('#device-options')!.hidden =
@@ -339,6 +419,48 @@ export class DeviceControls {
     if (this.device.connected !== false) return;
     await this.updateConnection('restore');
   }
+  private async updateTransport(mode?: string): Promise<void> {
+    if (this.busy || this.configuring) return;
+    if (this.connecting) {
+      if (mode !== undefined) this.pendingTransport = mode;
+      return;
+    }
+    const device = this.device;
+    const settingsKey = () =>
+      JSON.stringify(
+        [
+          device.descriptor.capabilities,
+          device.descriptor.logicInputs,
+          device.descriptor.analogInputs,
+          device.descriptor.options,
+        ],
+        (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
+      );
+    const previousSettings = settingsKey();
+    const connected = device.connected;
+    this.connecting = true;
+    this.refreshConnection();
+    this.onConnectionChange?.();
+    try {
+      await device.setTransport(mode);
+      this.connectionError = null;
+      if (connected && device.connected && previousSettings === settingsKey()) return;
+      if (device === this.device) {
+        this.restoreChannelSelection();
+        this.reconcileChannelSelection();
+        await this.refreshCapabilities();
+      }
+    } catch (error) {
+      if (device === this.device) this.connectionError = error;
+    } finally {
+      this.connecting = false;
+      this.refreshConnection();
+      this.onConnectionChange?.();
+      const pending = this.pendingTransport;
+      this.pendingTransport = undefined;
+      if (pending !== undefined) void this.updateTransport(pending);
+    }
+  }
   private async updateConnection(action: 'connect' | 'disconnect' | 'restore'): Promise<void> {
     const device = this.device,
       sequence = ++this.connectionSequence;
@@ -350,6 +472,7 @@ export class DeviceControls {
       await device[action]();
       if (device === this.device && sequence === this.connectionSequence) {
         if (action !== 'disconnect') this.restoreChannelSelection();
+        this.reconcileChannelSelection();
         await this.refreshCapabilities();
       }
     } catch (error) {

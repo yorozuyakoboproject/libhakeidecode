@@ -1,5 +1,6 @@
 export const DEFAULT_SHARED_CHUNK_BYTES = 128 * 1024 * 1024;
 export const SHARED_SUMMARY_GROUP_SAMPLES = 1024;
+export type LogicSampleBytes = 1 | 2 | 3 | 4;
 const HEADER_BYTES = 64;
 const COMMITTED_SAMPLES = 0;
 const VALID_SAMPLES = 1;
@@ -60,6 +61,48 @@ function checkChunkBytes(chunkBytes: number, bytesPerSample: number): void {
 }
 function sharedHeader(chunk: SharedChunkDescriptor): Int32Array {
   return new Int32Array(chunk.buffer, 0, HEADER_BYTES / 4);
+}
+export function readPackedSample(data: Uint8Array, sample: number, bytesPerSample: LogicSampleBytes): number {
+  const offset = sample * bytesPerSample;
+  const value =
+    bytesPerSample === 1
+      ? data[offset]!
+      : bytesPerSample === 2
+        ? data[offset]! | (data[offset + 1]! << 8)
+        : bytesPerSample === 3
+          ? data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16)
+          : (data[offset]! | (data[offset + 1]! << 8) | (data[offset + 2]! << 16) | (data[offset + 3]! << 24)) >>> 0;
+  return value >>> 0;
+}
+export function normalizePackedSamples(data: Uint8Array, inputBytes: LogicSampleBytes, channels: number): Uint8Array {
+  if (!Number.isInteger(channels) || channels < 1 || channels > 32 || data.length % inputBytes)
+    throw new RangeError('Invalid packed sample normalization');
+  const outputBytes = Math.ceil(channels / 8) as LogicSampleBytes;
+  if (inputBytes === outputBytes) {
+    const mask = channels === 32 ? 0xffffffff : 2 ** channels - 1;
+    for (let index = 0; index < data.length; index += inputBytes) {
+      let value = readPackedSample(data, index / inputBytes, inputBytes) & mask;
+      for (let byte = 0; byte < inputBytes; byte++) {
+        data[index + byte] = value & 0xff;
+        value >>>= 8;
+      }
+    }
+    return data;
+  }
+  const count = data.length / inputBytes,
+    output = new Uint8Array(count * outputBytes);
+  for (let sample = 0; sample < count; sample++)
+    for (let byte = 0; byte < outputBytes; byte++)
+      output[sample * outputBytes + byte] = byte < inputBytes ? data[sample * inputBytes + byte]! : 0;
+  if ((channels & 7) !== 0 && outputBytes) {
+    const last = outputBytes - 1,
+      keep = (1 << (channels & 7)) - 1;
+    for (let sample = 0; sample < count; sample++) {
+      const offset = sample * outputBytes + last;
+      output[offset] = output[offset]! & keep;
+    }
+  }
+  return output;
 }
 
 export interface SharedChunkProducerOptions {
@@ -342,9 +385,9 @@ export class SharedChunkReader {
 
   constructor(
     readonly port: MessagePort,
-    readonly bytesPerSample = 1,
+    readonly bytesPerSample: LogicSampleBytes = 1,
   ) {
-    if (!Number.isSafeInteger(bytesPerSample) || bytesPerSample < 1) throw new RangeError('Invalid sample width');
+    if (![1, 2, 3, 4].includes(bytesPerSample)) throw new RangeError('Invalid sample width');
     port.addEventListener('message', this.onMessage as EventListener);
     port.start();
   }
@@ -385,14 +428,22 @@ export class SharedChunkReader {
     return output;
   }
 
-  readByte(sample: bigint): number | null {
+  readSample(sample: bigint): number | null {
     if (sample < 0n) return null;
     const chunk = this.findChunk(sample);
     if (!chunk) return null;
     const committed = Atomics.load(sharedHeader(chunk), COMMITTED_SAMPLES);
     const offset = Number(sample - chunk.startSample);
     if (offset >= committed) return null;
-    return new Uint8Array(chunk.buffer, HEADER_BYTES + offset * this.bytesPerSample, this.bytesPerSample)[0]!;
+    return readPackedSample(
+      new Uint8Array(chunk.buffer, HEADER_BYTES + offset * this.bytesPerSample, this.bytesPerSample),
+      0,
+      this.bytesPerSample as LogicSampleBytes,
+    );
+  }
+
+  readByte(sample: bigint): number | null {
+    return this.readSample(sample);
   }
 
   async next(maxSamples = 1_048_576): Promise<SharedSampleRead | null> {

@@ -111,6 +111,7 @@ export interface DecodeSharedStartRequest {
   type: 'decode-shared-start';
   port: MessagePort;
   channelCount: number;
+  bytesPerSample: 1 | 2 | 3 | 4;
   channels: Record<string, number>;
 }
 export interface DecodePackedReaderStartRequest {

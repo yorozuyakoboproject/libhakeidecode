@@ -44,6 +44,8 @@ export type DeviceOption = DeviceOptionBase &
       }
   );
 export interface DeviceDescriptor {
+  readonly transport?: { readonly selected: string; readonly active?: string; readonly choices: readonly string[] };
+  readonly logicInputs?: readonly { readonly index: number; readonly name: string }[];
   readonly analogInputs?: readonly { readonly index: number; readonly name: string }[];
   readonly id: string;
   readonly name: string;
@@ -72,7 +74,7 @@ export interface DeviceConfigurationState {
   readonly capabilities: DeviceCapabilities;
 }
 interface AcquisitionBuffers {
-  readonly logicSampleBytes: 1 | 2 | 4 | 8;
+  readonly logicSampleBytes: 1 | 2 | 3 | 4 | 8;
   readonly analogSampleBytes: 4 | 8;
   readonly chunkSamples: number;
   readonly workingBytes?: number;
@@ -82,7 +84,7 @@ export interface ChannelArrayAcquisitionDescription extends AcquisitionBuffers {
 }
 export interface PackedLogicAcquisitionDescription extends AcquisitionBuffers {
   readonly layout: 'packed-logic';
-  readonly logicSampleBytes: 1;
+  readonly logicSampleBytes: 1 | 2 | 3 | 4;
 }
 export interface MultiRateAcquisitionDescription extends AcquisitionBuffers {
   readonly layout: 'multi-rate';
@@ -106,8 +108,11 @@ export interface PackedLogicChunk {
   readonly sampleRate: number;
   readonly channelCount: number;
   readonly length: number;
-  readonly encoding: 'raw8';
+  readonly encoding: 'raw8' | 'raw16' | 'raw24' | 'raw32';
   readonly data: Uint8Array;
+}
+export function packedLogicSampleBytes(chunk: Pick<PackedLogicChunk, 'encoding'>): 1 | 2 | 3 | 4 {
+  return chunk.encoding === 'raw16' ? 2 : chunk.encoding === 'raw24' ? 3 : chunk.encoding === 'raw32' ? 4 : 1;
 }
 export interface AnalogTiming {
   readonly direct?: true;
@@ -156,6 +161,8 @@ interface DeviceBase {
   restore?(initialization?: unknown): Promise<boolean>;
   connect?(initialization?: unknown): Promise<void>;
   disconnect?(): Promise<void>;
+  setTransport?(mode: string): Promise<void>;
+  refreshTransport?(): Promise<void>;
   onConnectionChange?: (() => void) | null;
 
   readonly initialization?: unknown;
@@ -228,12 +235,14 @@ export function numericChoices<T extends number | bigint>(capability: NumericCap
 }
 export function defaultDeviceConfiguration(descriptor: DeviceDescriptor): DeviceConfiguration {
   const caps = descriptor.capabilities;
+  const logicInputs = descriptor.logicInputs?.map((input) => input.index);
   return {
     sampleRate: caps.sampleRate.default,
     ...(caps.analogSampleRate ? { analogSampleRate: Number(caps.analogSampleRate.default) } : {}),
     sampleCount: caps.sampleCount.default,
-    logicChannels: caps.logicChannels.default,
+    logicChannels: logicInputs?.length ?? caps.logicChannels.default,
     analogChannels: caps.analogChannels.default,
+    ...(logicInputs ? { logicChannelIndices: logicInputs } : {}),
     options: Object.fromEntries(descriptor.options.map((option) => [option.id, option.default])),
   };
 }
@@ -310,14 +319,20 @@ export function validateDeviceConfiguration(device: SampleDevice, configuration:
     throw new RangeError('Select at least one channel');
   for (const kind of ['logic', 'analog'] as const) {
     const indices = deviceChannelIndices(configuration, kind),
-      capability = caps[`${kind}Channels`];
-    const maximum = capability.kind === 'list' ? Math.max(...capability.values) : capability.max;
-    if (
-      kind === 'analog' &&
-      device.descriptor.analogInputs &&
-      indices.some((index) => !device.descriptor.analogInputs!.some((input) => input.index === index))
-    )
-      throw new RangeError('Analog input is not initialized');
+      capability = caps[`${kind}Channels`],
+      inputs = kind === 'analog' ? device.descriptor.analogInputs : device.descriptor.logicInputs;
+    const maximum = inputs
+      ? inputs.reduce((value, input) => Math.max(value, input.index + 1), 0)
+      : capability.kind === 'list'
+        ? Math.max(...capability.values)
+        : capability.max;
+    if (inputs && indices.some((index) => !inputs.some((input) => input.index === index)))
+      throw new RangeError(`${kind === 'analog' ? 'Analog' : 'Logic'} input is not initialized`);
+    if (kind === 'logic' && inputs) {
+      const positions = indices.map((index) => inputs.findIndex((input) => input.index === index));
+      if (positions.some((position, offset) => position !== offset))
+        throw new RangeError('Logic channels must be a contiguous prefix');
+    }
     if (
       indices.length !== configuration[`${kind}Channels`] ||
       new Set(indices).size !== indices.length ||

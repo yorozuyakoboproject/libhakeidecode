@@ -49,6 +49,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   onLocalProgress: (() => void) | null = null;
   onTransferProgress?: (progress: TransferProgress) => void;
   readonly capacity: number;
+  readonly logicSampleBytes: 1 | 2 | 3 | 4;
   readonly channelSelection: { driverId: string; logic: readonly number[]; analog: readonly number[] };
   maxQueued = 0;
   constructor(
@@ -63,6 +64,10 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
       this.completionResolve = resolve;
     });
     this.capacity = buffers.length;
+    this.logicSampleBytes =
+      description.logicSampleBytes === 2 || description.logicSampleBytes === 3 || description.logicSampleBytes === 4
+        ? description.logicSampleBytes
+        : 1;
     this.channelSelection = {
       driverId: description.worker.driverId,
       logic: deviceChannelIndices(configuration, 'logic'),
@@ -155,7 +160,11 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
           buffers,
           ...(storeCapture ? { store: { budgetBytes: DEFAULT_CAPTURE_BUDGET_BYTES }, storePort: storePort! } : {}),
           ...(this.shared
-            ? { sharedSampleCount: BigInt(configuration.sampleCount), sharedChunkBytes: DEFAULT_SHARED_CHUNK_BYTES }
+            ? {
+                sharedSampleCount: BigInt(configuration.sampleCount),
+                sharedChunkBytes: DEFAULT_SHARED_CHUNK_BYTES,
+                sharedSampleBytes: this.logicSampleBytes,
+              }
             : {}),
         } satisfies AcquisitionRequest,
         storePort ? [...buffers, storePort] : buffers,
@@ -170,6 +179,9 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   }
   get allocatedBytes(): number {
     return this.sharedAllocatedBytes;
+  }
+  get bytesPerSample(): 1 | 2 | 3 | 4 {
+    return this.logicSampleBytes;
   }
   get publishedSamples(): bigint {
     return this.sharedPublishedSamples;

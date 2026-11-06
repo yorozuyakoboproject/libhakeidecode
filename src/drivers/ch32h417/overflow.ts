@@ -26,7 +26,6 @@ async function processingLoad(
     const channels = pins.filter((p) => mask & (1 << p)).length;
     return channels && period > 0 ? (2 * channels * 400000000) / period : 0;
   });
-  rates.push(configuration.logicChannels ? configuration.sampleRate : 0);
   return stats.streams.reduce(
     (load, s, i) => load + (s.inputBytes > 0n ? ((Number(s.cycles) / Number(s.inputBytes)) * rates[i]!) / clockHz : 0),
     0,
@@ -54,7 +53,7 @@ export async function captureError(
     const failure = stats.failure;
     if (!failure || ![1, 2, 5, 11, 13].includes(failure.kind)) return fallback;
     const load = await processingLoad(transport, stats, configuration, caps).catch(() => undefined);
-    const rawDigital = !configuration.analogChannels && configuration.options.digitalEncoding === 'raw';
+    const rawDigital = !configuration.analogChannels;
     const sending = [1, 2, 3, 5, 6].includes(failure.txKind);
     const usbBacklog =
       sending &&

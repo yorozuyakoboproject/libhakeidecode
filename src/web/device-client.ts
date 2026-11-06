@@ -48,11 +48,14 @@ export class DeviceClient implements DeviceControl {
   }
   async connect(): Promise<void> {
     if (!this.definition.connection) return;
-    const initialization = await this.definition.connection.authorize();
+    const initialization = await this.definition.connection.authorize(this.state.initialization);
     await this.request({ type: 'connect', initialization });
   }
   async disconnect(): Promise<void> {
     await this.request({ type: 'disconnect' });
+  }
+  async setTransport(mode?: string): Promise<void> {
+    await this.request({ type: 'transport', mode });
   }
   async configure(configuration: DeviceConfiguration): Promise<DeviceConfigurationState> {
     const result = await this.request({ type: 'configure', configuration });

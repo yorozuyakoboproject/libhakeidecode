@@ -16,6 +16,7 @@ export interface DeviceControl {
   restore(): Promise<boolean>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  setTransport(mode?: string): Promise<void>;
   configure(configuration: DeviceConfiguration): Promise<DeviceConfigurationState>;
   prepare(configuration: DeviceConfiguration): Promise<WorkerAcquisitionDescription>;
 }
@@ -25,6 +26,7 @@ export interface DeviceState {
   readonly initialization?: unknown;
 }
 export type DeviceCommand =
+  | { readonly type: 'transport'; readonly mode?: string }
   | { readonly type: 'restore' | 'connect'; readonly initialization?: unknown }
   | { readonly type: 'disconnect' }
   | { readonly type: 'configure' | 'prepare'; readonly configuration: DeviceConfiguration };

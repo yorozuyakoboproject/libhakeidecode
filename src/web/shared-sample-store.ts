@@ -5,7 +5,14 @@ import type { SharedCaptureState } from './shared-chunks.js';
 import type { WorkspaceSettings } from './workspace.js';
 
 type Request =
-  | { type: 'start'; port: MessagePort; channelCount: number; sampleRate: number; labels?: readonly string[] }
+  | {
+      type: 'start';
+      port: MessagePort;
+      channelCount: number;
+      sampleRate: number;
+      bytesPerSample: 1 | 2 | 3 | 4;
+      labels?: readonly string[];
+    }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | { type: 'edges'; id: number; channel: number; startSample: bigint; endSample: bigint }
   | { type: 'pack'; id: number; startSample: bigint; endSample: bigint; channels: number }
@@ -59,7 +66,7 @@ type Response =
     }
   | { type: 'error'; id?: number; message: string };
 type ViewRequest =
-  | { type: 'start'; port: MessagePort; channelCount: number }
+  | { type: 'start'; port: MessagePort; channelCount: number; bytesPerSample: 1 | 2 | 3 | 4 }
   | { type: 'query'; id: number; channel: number; startSample: bigint; endSample: bigint; bins: number }
   | {
       type: 'query-many';
@@ -146,7 +153,9 @@ export class SharedWorkerSampleStore implements SampleStore {
     channelCount: number,
     samplerate: number,
     labels: readonly string[] = Array.from({ length: channelCount }, (_, index) => 'D' + index),
+    readonly bytesPerSample: 1 | 2 | 3 | 4 = 1,
   ) {
+    if (![1, 2, 3, 4].includes(bytesPerSample)) throw new Error('Invalid shared sample width');
     this.channelCount = channelCount;
     this.samplerate = samplerate;
     if (labels.length !== channelCount) throw new Error('Invalid shared channel labels');
@@ -242,13 +251,20 @@ export class SharedWorkerSampleStore implements SampleStore {
           port: storageChannel.port1,
           channelCount,
           sampleRate: samplerate,
+          bytesPerSample: this.bytesPerSample,
           labels: [...labels],
         } satisfies Request,
         [storageChannel.port1],
       );
-      this.viewWorker.postMessage({ type: 'start', port: viewChannel.port1, channelCount } satisfies ViewRequest, [
-        viewChannel.port1,
-      ]);
+      this.viewWorker.postMessage(
+        {
+          type: 'start',
+          port: viewChannel.port1,
+          channelCount,
+          bytesPerSample: this.bytesPerSample,
+        } satisfies ViewRequest,
+        [viewChannel.port1],
+      );
       source.connectConsumer(storageChannel.port2);
       source.connectConsumer(viewChannel.port2);
     } catch (error) {
