@@ -637,6 +637,7 @@ export class CH32H417Device implements MultiRateDevice {
         'transport.queueWaitMs': lastTransport?.receiveQueueWaitMs ?? 0,
         'transport.queuePeak': lastTransport?.queuePeak ?? 0,
         'transport.dataFrames': lastTransport?.dataFrames ?? 0,
+        'transport.dataCore': lastTransport?.dataCore ?? 0,
         'compression.rawBytes': lastTransport?.codecRawBytes ?? 0,
         'compression.wireBytes': lastTransport?.codecWireBytes ?? 0,
         'compression.cycles': lastTransport?.codecCycles ?? 0,

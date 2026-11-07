@@ -10,7 +10,7 @@ export const SS_RATES = [
 ] as const;
 export const MAX_LOGIC_BYTES_PER_SECOND = 400_000_000;
 export const defaultCaps: Capabilities = {
-  appProtocol: 29,
+  appProtocol: 31,
   channelRates: [],
   compressionMask: 0,
   hsadcBlockSamples: 4096,
@@ -21,7 +21,7 @@ export const defaultCaps: Capabilities = {
   adc1Budget: 562500,
   hsadcMax: 20000000,
   packetBytes: 1024,
-  blockBytes: 16320,
+  blockBytes: 24480,
   heartbeatMs: 5000,
   channels: 32,
   rates: [...SS_RATES],

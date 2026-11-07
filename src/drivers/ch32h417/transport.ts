@@ -155,6 +155,7 @@ export class H417Transport {
     receiveQueuePauses: 0,
     receiveQueueWaitMs: 0,
     dataFrames: 0,
+    dataCore: 0,
     codecRawBytes: 0,
     codecWireBytes: 0,
     codecCycles: 0,
@@ -273,6 +274,7 @@ export class H417Transport {
       this.first += BigInt(frame.payload.length / this.sampleBytes);
       this.sequence = (this.sequence + 1) >>> 0;
       this.counters.dataFrames++;
+      if (frame.dataCore !== undefined) this.counters.dataCore = frame.dataCore;
     } else if (frame.type === ANALOG) {
       const a = frame.analog!;
       const stream = a.pin ?? (a.timing.bits === 10 ? 1 : 0);

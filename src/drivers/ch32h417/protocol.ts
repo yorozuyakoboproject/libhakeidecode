@@ -2,7 +2,7 @@ import { SS_RATES } from './descriptor.js';
 import { ComponentError } from '../../components.js';
 import { restoreBlock, type BlockEncoding } from './compression.js';
 export { USB_VID, USB_PID, SS_RATES } from './descriptor.js';
-export const APP_PROTOCOL = 29;
+export const APP_PROTOCOL = 31;
 export const INTERFACE = 1,
   ALTERNATE = 1,
   EP_OUT = 1,
@@ -11,9 +11,10 @@ export const MAGIC = 0x414c3448,
   VERSION = 2,
   HEADER_BYTES = 32,
   BLOCK_BYTES = 16_384;
-export const DIGITAL_HEADER_BYTES = 64,
-  DIGITAL_BLOCK_BYTES = BLOCK_BYTES - DIGITAL_HEADER_BYTES;
-export const MAX_FRAME_BYTES = BLOCK_BYTES + 2048;
+export const DIGITAL_FRAME_BYTES = 24_576,
+  DIGITAL_HEADER_BYTES = 96,
+  DIGITAL_BLOCK_BYTES = DIGITAL_FRAME_BYTES - DIGITAL_HEADER_BYTES;
+export const MAX_FRAME_BYTES = DIGITAL_FRAME_BYTES;
 export const Command = {
   caps: 1,
   config: 2,
@@ -30,6 +31,7 @@ export const DATA = 0x40,
   ANALOG = 0x42,
   RESPONSE = 0x80;
 export interface Frame {
+  dataCore?: number;
   codec?: BlockEncoding;
   analog?: {
     pin?: number;
@@ -116,7 +118,7 @@ export function readCapabilities(frame: Frame): Capabilities {
     v.getUint8(12) !== 32 ||
     count !== (packet === 1024 ? 10 : 4) ||
     status.speed !== (packet === 1024 ? 3 : 2) ||
-    !!(v.getUint16(14, true) & ~7)
+    !!(v.getUint16(14, true) & ~0x107)
   )
     throw new Error('Unsupported H417 USB capabilities');
   const rates = Array.from({ length: count }, (_, i) => v.getUint32(16 + i * 4, true));
@@ -164,7 +166,7 @@ export function readCapabilities(frame: Frame): Capabilities {
   return {
     appProtocol: actual,
     channelRates,
-    compressionMask: v.getUint16(14, true),
+    compressionMask: v.getUint16(14, true) & 7,
     hsadcBlockSamples: 4096,
     packetBytes: packet,
     blockBytes,
@@ -341,6 +343,7 @@ export class FrameParser {
       this.appProtocol = new DataView(samples.buffer, samples.byteOffset).getUint16(16, true);
     }
     this.onFrame({
+      ...(type === DATA && header === DIGITAL_HEADER_BYTES ? { dataCore: payload[HEADER_BYTES]! } : {}),
       ...(codec ? { codec } : {}),
       ...(analog ? { analog } : {}),
       type,
