@@ -18,6 +18,8 @@ export interface StoreAnalogMetadata {
   readonly mean: number | null;
 }
 export interface StoreMetadata {
+  readonly queryDiagnostics?: Readonly<Record<string, number>>;
+  readonly sampleOffset?: bigint;
   readonly channelCount: number;
   readonly samplerate: number;
   readonly length: bigint;
@@ -77,7 +79,8 @@ export type StoreRequest =
       acquisition?: AcquisitionResult;
     }
   | { type: 'cancel-export'; id: number }
-  | { type: 'decode-reader'; port: MessagePort };
+  | { type: 'decode-reader'; id: number; port: MessagePort; live?: boolean }
+  | { type: 'close-decode-reader'; id: number };
 export type StoreResponse =
   | { type: 'metadata'; metadata: StoreMetadata }
   | {
@@ -107,7 +110,25 @@ export interface DecodeReadRequest {
   readonly edgeLimit: number;
 }
 export type DecodeReadResponse =
-  | { type: 'decode-read-result'; id: number; kind: 'wait'; startSample: bigint; availableEnd: bigint }
+  | {
+      type: 'decode-read-result';
+      id: number;
+      kind: 'edges';
+      startSample: bigint;
+      endSample: bigint;
+      channels: Record<string, { initial: 0 | 1; edges: bigint[] }>;
+      sampleRate: number;
+      availableStart?: bigint;
+      availableEnd?: bigint;
+    }
+  | {
+      type: 'decode-read-result';
+      id: number;
+      kind: 'wait';
+      startSample: bigint;
+      availableEnd: bigint;
+      availableStart?: bigint;
+    }
   | {
       type: 'decode-read-result';
       id: number;
@@ -116,6 +137,8 @@ export type DecodeReadResponse =
       endSample: bigint;
       sampleRate: number;
       channels: Record<string, Uint8Array>;
+      availableStart?: bigint;
+      availableEnd?: bigint;
     }
   | {
       type: 'decode-read-result';
@@ -124,6 +147,8 @@ export type DecodeReadResponse =
       startSample: bigint;
       endSample: bigint;
       parts: DecodeEdgePart[];
+      availableStart?: bigint;
+      availableEnd?: bigint;
     }
   | { type: 'decode-read-error'; id: number; message: string };
 
@@ -136,7 +161,7 @@ type StoreQueryRequest = Extract<
   StoreRequest,
   { type: 'prepare-digital' | 'prepare-analog' | 'pack-range' | 'analog-range' | 'probe-analog' }
 >;
-type DigitalPrepared = { view: ColumnView; availableEnd: bigint; edges: bigint[] | null };
+type DigitalPrepared = { view: ColumnView; availableEnd: bigint; edges: bigint[] | null; revision: number };
 const keyFor = (channel: number, start: bigint, end: bigint, bins: number): string =>
   `${channel}:${start}:${end}:${bins}`;
 
@@ -261,7 +286,12 @@ export class WorkerCaptureStore implements SampleStore {
       length = this.length;
     const missing = unique.filter((channel) => {
       const cached = this.views.get(keyFor(channel, start, end, bins));
-      return !cached || cached.availableEnd < (end < length ? end : length) || (includeEdges && cached.edges === null);
+      return (
+        !cached ||
+        (this.state.metadata.sampleOffset !== undefined && cached.revision !== revision) ||
+        cached.availableEnd < (end < length ? end : length) ||
+        (includeEdges && cached.edges === null)
+      );
     });
     if (!missing.length) return;
     const pendingKey = `${start}:${end}:${bins}:${includeEdges ? 1 : 0}:${revision}:${missing.join(',')}`;
@@ -279,6 +309,7 @@ export class WorkerCaptureStore implements SampleStore {
       if (response.type !== 'prepared-digital') throw new Error('Invalid prepared waveform response');
       for (const result of response.views) {
         this.views.set(keyFor(result.channel, start, end, bins), {
+          revision,
           availableEnd: response.availableEnd,
           view: {
             channel: result.channel,
@@ -327,8 +358,12 @@ export class WorkerCaptureStore implements SampleStore {
       if (key.startsWith(`${channel}:${start}:${end}:`) && value.edges) return value.edges;
     return [];
   }
-  connectDecodeReader(port: MessagePort): void {
-    this.port.postMessage({ type: 'decode-reader', port } satisfies StoreRequest, [port]);
+  connectDecodeReader(port: MessagePort, live = false): () => void {
+    const id = this.nextId++;
+    this.port.postMessage({ type: 'decode-reader', id, port, live } satisfies StoreRequest, [port]);
+    return () => {
+      if (!this.disposed) this.port.postMessage({ type: 'close-decode-reader', id } satisfies StoreRequest);
+    };
   }
   exportSR(
     workspace: WorkspaceSettings | undefined,
@@ -427,6 +462,8 @@ export class WorkerCaptureStore implements SampleStore {
     this.pending.clear();
     this.views.clear();
     this.pendingViews.clear();
+    for (const analog of this.analogs) analog.dispose();
+    this.analogs.length = 0;
   }
   private syncAnalogs(): void {
     const metadata = this.state.metadata.analog;
@@ -447,7 +484,7 @@ export class WorkerCaptureStore implements SampleStore {
     });
   }
   updateMetadata(metadata: StoreMetadata): void {
-    if (metadata.length < this.state.metadata.length) return;
+    if (metadata.sampleOffset === undefined && metadata.length < this.state.metadata.length) return;
     this.state.metadata = copyMetadata(metadata);
     this.state.revision++;
     this.syncAnalogs();

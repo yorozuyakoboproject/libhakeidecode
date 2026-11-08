@@ -4,6 +4,7 @@ import {
   deviceChannelIndices,
   packedLogicSampleBytes,
   type AcquisitionChunk,
+  type CaptureMode,
   type DeviceConfiguration,
   type DriverDiagnostics,
   type ManagedSampleSourceContext,
@@ -21,12 +22,14 @@ import { WorkerStoreServer } from './worker-store-server.js';
 import { yieldWorkerTask } from './worker-task.js';
 import type { StoreMetadata } from './worker-store.js';
 import { MultiRateCapture } from './multirate-capture.js';
+import { RollingCapture } from './rolling-capture.js';
 export type AcquisitionRequest =
   | {
       type: 'start';
       driverId: string;
       initialization?: unknown;
       configuration: DeviceConfiguration;
+      mode?: CaptureMode;
       chunkSamples: number;
       buffers: ArrayBuffer[];
       sharedSampleCount?: bigint;
@@ -105,6 +108,8 @@ scope.onmessage = ({ data }) => {
     let store: PlanarSampleStore | null = null,
       analogStores: AnalogSampleStore[] = [];
     let multiRate: MultiRateCapture | null = null;
+    let rolling: RollingCapture | null = null;
+    const continuous = data.mode === 'continuous';
     let logicIds: string[] = [],
       analogIds: string[] = [],
       padding: Uint8Array | null = null;
@@ -113,6 +118,7 @@ scope.onmessage = ({ data }) => {
     const storeServer = data.store
       ? new WorkerStoreServer(
           () =>
+            rolling?.source() ??
             multiRate ??
             (store
               ? {
@@ -125,6 +131,10 @@ scope.onmessage = ({ data }) => {
         )
       : null;
     const appendChunk = (input: AcquisitionChunk): number => {
+      if (rolling) {
+        rolling.append(input);
+        return 0;
+      }
       if (multiRate) {
         multiRate.append(input);
         return 0;
@@ -246,14 +256,14 @@ scope.onmessage = ({ data }) => {
       return chunk.length;
     };
     const reportLocal = (force = false): void => {
-      if ((!store && !multiRate) || !budget || !storeServer) return;
+      if ((!store && !multiRate && !rolling) || !budget || !storeServer) return;
       const now = performance.now();
       if (!force && now - lastProgressAt < 100) return;
       lastProgressAt = now;
       storeServer.publish();
       scope.postMessage({
         type: 'local-progress',
-        length: (multiRate?.store ?? store!).length,
+        length: (rolling?.store ?? multiRate?.store ?? store!).length,
         memory: budget.snapshot(),
         driverDiagnostics,
       });
@@ -305,10 +315,30 @@ scope.onmessage = ({ data }) => {
       controller.signal.throwIfAborted();
       const device = createDriverDevice(data.driverId, data.initialization);
       validateDeviceConfiguration(device, data.configuration);
-      const description = device.getAcquisitionDescription(data.configuration);
-      if (!!producer !== (description.layout === 'packed-logic'))
+      let configuration = data.configuration;
+      if (continuous) {
+        const capability = device.getCapabilities(configuration).sampleCount;
+        const maximum =
+          capability.kind === 'list'
+            ? capability.values.reduce((best, value) => (BigInt(value) > BigInt(best) ? value : best))
+            : BigInt(capability.max) - ((BigInt(capability.max) - BigInt(capability.min)) % BigInt(capability.step));
+        configuration = { ...configuration, sampleCount: maximum };
+        validateDeviceConfiguration(device, configuration);
+      }
+      const description = device.getAcquisitionDescription(configuration);
+      if (!continuous && !!producer !== (description.layout === 'packed-logic'))
         throw new Error('Driver acquisition layout does not match the capture pipeline');
-      if (description.layout === 'multi-rate') {
+      if (continuous) {
+        if (!budget || !storeServer || !data.storePort)
+          throw new Error('Continuous acquisition requires Worker storage');
+        rolling = new RollingCapture(
+          data.configuration,
+          budget,
+          BigInt(configuration.sampleCount),
+          description.layout === 'channel-arrays',
+        );
+        storeServer.connect(data.storePort);
+      } else if (description.layout === 'multi-rate') {
         if (!budget || !storeServer || !data.storePort)
           throw new Error('Multi-rate acquisition requires Worker storage');
         multiRate = new MultiRateCapture(data.configuration, budget);
@@ -331,19 +361,26 @@ scope.onmessage = ({ data }) => {
             })));
         },
       };
-      iterator = (
-        description.layout === 'multi-rate' && device.layout === 'multi-rate'
-          ? device.createMultiRateSource(data.configuration, context)
+      const createSource = () =>
+        (description.layout === 'multi-rate' && device.layout === 'multi-rate'
+          ? device.createMultiRateSource(configuration, context)
           : device.layout !== 'channel-arrays'
-            ? device.createPackedSource(data.configuration, context)
-            : device.createSource(data.configuration, context)
-      )[Symbol.asyncIterator]();
+            ? device.createPackedSource(configuration, context)
+            : device.createSource(configuration, context))[Symbol.asyncIterator]();
+      iterator = createSource();
       let lastYield = performance.now();
       while (true) {
         controller.signal.throwIfAborted();
         const result = await iterator.next();
         if (result.done) {
           controller.signal.throwIfAborted();
+          if (rolling) {
+            await iterator.return?.();
+            rolling.nextSource();
+            iterator = createSource();
+            await yieldWorkerTask();
+            continue;
+          }
           break;
         }
         const timeline = 'format' in result.value && result.value.format === 'timeline';
@@ -438,6 +475,19 @@ scope.onmessage = ({ data }) => {
           type: 'local-done',
           metadata: storeServer!.metadata(),
           length: finalMultiRate.store.length,
+          memory: budget.snapshot(),
+          stopReason: terminal,
+          ...(failure.message ? { error: failure.message } : {}),
+          driverDiagnostics,
+        });
+      }
+      const finalRolling = rolling as RollingCapture | null;
+      if (finalRolling && budget) {
+        storeServer!.publish();
+        scope.postMessage({
+          type: 'local-done',
+          metadata: storeServer!.metadata(),
+          length: finalRolling.store.length,
           memory: budget.snapshot(),
           stopReason: terminal,
           ...(failure.message ? { error: failure.message } : {}),

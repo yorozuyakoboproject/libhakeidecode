@@ -1,7 +1,13 @@
 import { errorLabel } from './i18n.js';
 import { restoreComponentError } from '../components.js';
 import { deviceChannelIndices } from '../libhakei/device.js';
-import type { AcquisitionChunk, DeviceConfiguration, DriverDiagnostics, TransferProgress } from '../libhakei/device.js';
+import type {
+  AcquisitionChunk,
+  CaptureMode,
+  DeviceConfiguration,
+  DriverDiagnostics,
+  TransferProgress,
+} from '../libhakei/device.js';
 import type { WorkerAcquisitionDescription } from './device-protocol.js';
 import type { AcquisitionResponse, AcquisitionRequest } from './acquisition-worker.js';
 import { DEFAULT_SHARED_CHUNK_BYTES } from './shared-chunks.js';
@@ -59,6 +65,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
     buffers: ArrayBuffer[],
     private readonly signal?: AbortSignal,
     storeCapture = false,
+    mode: CaptureMode = 'single',
   ) {
     this.completion = new Promise<void>((resolve) => {
       this.completionResolve = resolve;
@@ -73,7 +80,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
       logic: deviceChannelIndices(configuration, 'logic'),
       analog: deviceChannelIndices(configuration, 'analog'),
     };
-    this.shared = description.layout === 'packed-logic';
+    this.shared = description.layout === 'packed-logic' && mode !== 'continuous';
     if (this.shared && typeof SharedArrayBuffer === 'undefined')
       throw new Error('Packed capture requires cross-origin isolation (COOP same-origin and COEP require-corp)');
     this.worker = new Worker(new URL('./acquisition-worker.js', import.meta.url), { type: 'module' });
@@ -156,6 +163,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
           type: 'start',
           ...description.worker,
           configuration,
+          mode,
           chunkSamples,
           buffers,
           ...(storeCapture ? { store: { budgetBytes: DEFAULT_CAPTURE_BUDGET_BYTES }, storePort: storePort! } : {}),

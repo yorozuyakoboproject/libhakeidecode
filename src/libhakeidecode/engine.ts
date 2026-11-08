@@ -1,24 +1,14 @@
-import { createSampleChunk } from '../libhakei/index.js';
-import type { LogicSamples } from '../libhakei/index.js';
 import { DecodeError } from './errors.js';
 import { DecoderRunner } from './runner.js';
-import { materializeLogicWindow } from './signal.js';
 import type {
   DecoderClass,
   DecoderEngine,
   DecoderEngineContext,
   DecoderPlugin,
   LogicDecoder,
-  LogicWindow,
   OutputEvent,
   SignalWindow,
 } from './types.js';
-
-function logicSamples(window: LogicWindow): LogicSamples {
-  if (window.kind === 'values' && window.data && ArrayBuffer.isView(window.data) && !(window.data instanceof DataView))
-    return window.data as LogicSamples;
-  return materializeLogicWindow(window) as LogicSamples;
-}
 
 export class GeneratorEngine implements DecoderEngine<readonly OutputEvent[]> {
   readonly runner: DecoderRunner;
@@ -40,16 +30,13 @@ export class GeneratorEngine implements DecoderEngine<readonly OutputEvent[]> {
     await this.sink.write(batch);
   }
   async push(window: SignalWindow): Promise<void> {
-    const channels: Record<string, LogicSamples> = {};
-    for (let index = 0; index < this.runner.channelMap.length; index++) {
-      const mapped = this.runner.channelMap[index];
-      if (mapped === null) continue;
-      const view = window.channel(this.runner.channelDeclarations[index]!.id);
-      if (view) channels[mapped] = logicSamples(view);
-    }
-    if (!Object.keys(channels).length) throw new DecodeError('No decoder channels are present in the signal window.');
-    const chunk = createSampleChunk({ startSample: window.startSample, sampleRate: window.sampleRate, channels });
-    this.runner.push(chunk, window);
+    if (
+      !this.runner.channelMap.some(
+        (mapped, index) => mapped !== null && window.channel(this.runner.channelDeclarations[index]!.id),
+      )
+    )
+      throw new DecodeError('No decoder channels are present in the signal window.');
+    this.runner.pushWindow(window);
     await this.emit();
   }
   async flush(): Promise<void> {

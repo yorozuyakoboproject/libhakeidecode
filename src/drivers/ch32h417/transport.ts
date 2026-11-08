@@ -45,6 +45,7 @@ export interface UsbDevice {
   clearHalt?(direction: 'in' | 'out', endpoint: number): Promise<void>;
   transferOut(endpoint: number, data: Uint8Array): Promise<{ status: string; bytesWritten?: number }>;
   transferIn(endpoint: number, length: number): Promise<{ status: string; data?: DataView }>;
+  consumeTransfer?(value: DataView): void;
   controlTransferIn?(
     setup: {
       requestType: 'vendor';
@@ -354,6 +355,7 @@ export class H417Transport {
       inflight.push(read());
       const parseStarted = performance.now();
       parser.push(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      this.device.consumeTransfer?.(data);
       this.counters.parserMs += performance.now() - parseStarted;
       while (this.queue.length >= USB_QUEUE_BLOCKS && !this.discarding && !this.closed && !this.error) {
         const waitStarted = performance.now();

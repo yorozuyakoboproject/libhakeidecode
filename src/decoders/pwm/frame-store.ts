@@ -27,10 +27,14 @@ export interface PWMFrame extends DecodeFrame {
 export class PWMFrameStore {
   private readonly pages: PositionPage[] = [];
   private count = 0;
+  private head = 0;
+  private removed = 0;
+  private removedDuty = 0;
+  private retained = false;
   private sampleRate = 1;
 
   get length(): number {
-    return this.count;
+    return this.count - this.head;
   }
   get rate(): number {
     return this.sampleRate;
@@ -48,6 +52,31 @@ export class PWMFrameStore {
   clear(): void {
     this.pages.length = 0;
     this.count = 0;
+    this.head = this.removed = 0;
+    this.removedDuty = 0;
+    this.retained = false;
+  }
+  discardBefore(start: bigint): number {
+    this.retained = true;
+    let low = 0,
+      high = this.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (this.frameAt(middle).es <= start) low = middle + 1;
+      else high = middle;
+    }
+    for (let i = 0; i < low; i++) this.removedDuty += this.frameAt(i).dutyCycle;
+    this.removed += low;
+    this.head += low;
+    while (this.head >= PAGE_SIZE) {
+      this.pages.shift();
+      this.head -= PAGE_SIZE;
+      this.count -= PAGE_SIZE;
+    }
+    return low;
+  }
+  get averageDuty(): number | null {
+    return this.length ? this.frameAt(this.length - 1).averageDutyCycle : null;
   }
 
   append(cycles: readonly Position[], averages: ArrayLike<number>): void {
@@ -221,7 +250,7 @@ export class PWMFrameStore {
       offset < 0 ||
       !Number.isSafeInteger(count) ||
       count < 0 ||
-      offset + count > this.count
+      offset + count > this.length
     )
       throw new RangeError('Invalid PWM frame page');
     const frames = new Array<PWMFrame>(count);
@@ -230,10 +259,11 @@ export class PWMFrameStore {
   }
 
   frameAt(index: number, sampleRate = this.sampleRate): PWMFrame {
-    if (!Number.isSafeInteger(index) || index < 0 || index >= this.count)
+    if (!Number.isSafeInteger(index) || index < 0 || index >= this.length)
       throw new RangeError('Invalid PWM frame index');
-    const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
-      offset = index % PAGE_SIZE,
+    const physical = index + this.head,
+      page = this.pages[Math.floor(physical / PAGE_SIZE)]!,
+      offset = physical % PAGE_SIZE,
       ss = page.base + BigInt(page.starts[offset]!);
     const activeSamples = BigInt(page.active[offset]!),
       periodSamples = BigInt(page.periods[offset]!),
@@ -246,18 +276,21 @@ export class PWMFrameStore {
       dutyCycle: sampleRatio(activeSamples, periodSamples) * 100,
       periodSeconds: Number(periodSamples) / sampleRate,
       frequencyHz: sampleRate / Number(periodSamples),
-      averageDutyCycle: page.averages[offset]!,
+      averageDutyCycle: this.retained
+        ? (page.averages[offset]! * (this.removed + index + 1) - this.removedDuty) / (index + 1)
+        : page.averages[offset]!,
     };
   }
 
   private positionAt(index: number): bigint {
+    index += this.head;
     const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
       offset = index % PAGE_SIZE;
     return page.base + BigInt(page.starts[offset]!);
   }
   private range(start: bigint, end: bigint): [number, number] {
     let low = 0,
-      high = this.count;
+      high = this.length;
     while (low < high) {
       const mid = Math.floor((low + high) / 2);
       if (this.positionAt(mid) < start) low = mid + 1;
@@ -266,7 +299,7 @@ export class PWMFrameStore {
     let first = low;
     if (first > 0 && this.frameAt(first - 1).es >= start) first--;
     low = first;
-    high = this.count;
+    high = this.length;
     while (low < high) {
       const mid = Math.floor((low + high) / 2);
       if (this.positionAt(mid) <= end) low = mid + 1;

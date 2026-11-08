@@ -34,12 +34,27 @@ export class DecodeClient {
   private acknowledge: (() => void) | null = null;
   private generation = 0;
   private requestId = 0;
+  private readerRelease?: () => void;
+  private liveOffset?: () => bigint;
+  get available(): boolean {
+    return this.worker !== null;
+  }
+  get sampleOffset(): bigint {
+    return this.liveOffset?.() ?? 0n;
+  }
+  private releaseReader(): void {
+    const release = this.readerRelease;
+    this.readerRelease = undefined;
+    release?.();
+  }
   private readonly pendingQueries = new Map<
     number,
     { resolve(value: QueryResult): void; reject(error: Error): void }
   >();
   cancel(): void {
     this.generation++;
+    this.liveOffset = undefined;
+    this.releaseReader();
     this.acknowledge?.();
     this.acknowledge = null;
     this.worker?.terminate();
@@ -52,18 +67,22 @@ export class DecodeClient {
     this.pendingQueries.clear();
   }
   queryAnnotations(start: bigint, end: bigint, maxResults: number): Promise<Annotation[]> {
-    return this.query({
-      type: 'decode-query-annotations',
-      requestId: this.nextRequestId(),
-      start,
-      end,
-      maxResults,
-    }) as Promise<Annotation[]>;
+    const offset = this.sampleOffset;
+    return (
+      this.query({
+        type: 'decode-query-annotations',
+        requestId: this.nextRequestId(),
+        start: start + offset,
+        end: end + offset,
+        maxResults,
+      }) as Promise<Annotation[]>
+    ).then((records) => records.map((record) => ({ ...record, ss: record.ss - offset, es: record.es - offset })));
   }
   readFrames(offset: number, count: number): Promise<Frame[]> {
-    return this.query({ type: 'decode-read-frames', requestId: this.nextRequestId(), offset, count }) as Promise<
-      Frame[]
-    >;
+    const origin = this.sampleOffset;
+    return (
+      this.query({ type: 'decode-read-frames', requestId: this.nextRequestId(), offset, count }) as Promise<Frame[]>
+    ).then((records) => records.map((record) => ({ ...record, ss: record.ss - origin, es: record.es - origin })));
   }
   readCsv(
     offset: number,
@@ -80,6 +99,7 @@ export class DecodeClient {
       sampleRate,
       triggerSample,
       includeHeader,
+      sampleOffset: this.sampleOffset,
     }) as Promise<string>;
   }
   readBinary(key: string): Promise<Blob | null> {
@@ -100,6 +120,7 @@ export class DecodeClient {
           sampleRate: number;
           triggerSample: bigint;
           includeHeader: boolean;
+          sampleOffset?: bigint;
         }
       | { type: 'decode-read-binary'; requestId: number; key: string },
   ): Promise<QueryResult> {
@@ -143,6 +164,9 @@ export class DecodeClient {
   ): LiveDecodeSession {
     this.cancel();
     if (!sharedSource && !(capture.store instanceof WorkerCaptureStore)) throw new UIError('error.worker');
+    const workerStore = capture.store instanceof WorkerCaptureStore ? capture.store : null;
+    const rolling = capture.acquisition?.mode === 'continuous';
+    if (rolling && workerStore) this.liveOffset = () => workerStore.metadata.sampleOffset ?? 0n;
     const channelIndexes = mappedChannels(decoder, mapping),
       edgeInput = decoderDefinition(decoder).ui.edgeInput;
     const worker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
@@ -159,6 +183,7 @@ export class DecodeClient {
     const cleanup = (): void => {
       worker.terminate();
       if (this.worker === worker) {
+        this.releaseReader();
         this.worker = null;
         this.reject = null;
         this.acknowledge = null;
@@ -171,6 +196,8 @@ export class DecodeClient {
       this.acknowledge?.();
       this.acknowledge = null;
       cleanup();
+      for (const pending of this.pendingQueries.values()) pending.reject(error);
+      this.pendingQueries.clear();
       rejectResult(error);
     };
     this.reject = reject;
@@ -184,6 +211,7 @@ export class DecodeClient {
         onProgress?.(event.data.progress, event.data.frames, event.data.annotations, event.data.memory.totalBytes);
       else if (event.data.type === 'done') {
         if (settled) return;
+        this.releaseReader();
         settled = true;
         this.acknowledge?.();
         this.acknowledge = null;
@@ -199,7 +227,9 @@ export class DecodeClient {
       }
     };
     worker.onerror = () => reject(new UIError('error.worker'));
-    const target = capture.acquisition?.targetSamples ?? capture.store.length;
+    const target = rolling
+      ? this.sampleOffset + capture.store.length
+      : (capture.acquisition?.targetSamples ?? capture.store.length);
     worker.postMessage({
       type: 'decode-start',
       decoder,
@@ -209,6 +239,8 @@ export class DecodeClient {
       gaps: [],
       options,
       paged: 'always',
+      rolling,
+      startSample: this.sampleOffset,
     });
     if (sharedSource) {
       const channel = new MessageChannel();
@@ -229,7 +261,6 @@ export class DecodeClient {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     }
-    const workerStore = capture.store instanceof WorkerCaptureStore ? capture.store : null;
     if (workerStore) {
       const channel = new MessageChannel();
       worker.postMessage(
@@ -242,7 +273,7 @@ export class DecodeClient {
         },
         [channel.port1],
       );
-      workerStore.connectDecodeReader(channel.port2);
+      this.readerRelease = workerStore.connectDecodeReader(channel.port2, rolling);
     }
 
     return {
@@ -251,7 +282,7 @@ export class DecodeClient {
         if (failure) return Promise.reject(failure);
         if (!settled && !finishPosted) {
           finishPosted = true;
-          worker.postMessage({ type: 'decode-finish', length: nextCapture.store.length });
+          worker.postMessage({ type: 'decode-finish', length: this.sampleOffset + nextCapture.store.length });
         }
         return result;
       },
@@ -297,6 +328,7 @@ export class DecodeClient {
           const cleanup = (): void => {
             worker.terminate();
             if (this.worker === worker) {
+              this.releaseReader();
               this.worker = null;
               this.reject = null;
             }
@@ -315,6 +347,7 @@ export class DecodeClient {
                 event.data.memory.totalBytes,
               );
             else if (event.data.type === 'done') {
+              this.releaseReader();
               this.acknowledge?.();
               this.acknowledge = null;
               if (this.worker === worker) this.reject = null;
@@ -379,13 +412,14 @@ export class DecodeClient {
               },
               [channel.port1],
             );
-            workerStore.connectDecodeReader(channel.port2);
+            this.readerRelease = workerStore.connectDecodeReader(channel.port2);
             worker.postMessage({ type: 'decode-finish', length });
             return;
           }
         } catch (error) {
           if (generation !== this.generation) return;
           activeWorker?.terminate();
+          this.releaseReader();
           if (this.worker === activeWorker) this.worker = null;
           this.reject = null;
           reject(error instanceof Error ? error : new Error(String(error)));

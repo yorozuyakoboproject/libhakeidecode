@@ -83,20 +83,21 @@ export class EdgesLogicWindow implements LogicWindow {
   readonly edges: readonly (number | bigint)[];
   readonly length: number;
   private readonly positions: number[];
-  constructor(initial: LogicLevel, edges: readonly (number | bigint)[], length: number) {
+  constructor(initial: LogicLevel, edges: readonly (number | bigint)[], length: number, startSample?: bigint) {
     if (initial !== 0 && initial !== 1) throw new DecodeError('Edge window initial level must be 0 or 1.');
     this.initial = initial;
     this.edges = edges;
     this.length = length;
-    this.positions = edges.map((edge) => {
-      if (typeof edge === 'bigint') {
-        if (edge < 0n || edge > BigInt(Number.MAX_SAFE_INTEGER))
+    this.positions = edges
+      .map((edge) => {
+        if (typeof edge === 'number' && (!Number.isSafeInteger(edge) || edge < 0))
+          throw new DecodeError('Invalid edge position.');
+        const position = BigInt(edge) - (startSample ?? 0n);
+        if (position > BigInt(Number.MAX_SAFE_INTEGER))
           throw new DecodeError('Edge position is outside the local window.');
-        return Number(edge);
-      }
-      if (!Number.isSafeInteger(edge) || edge < 0) throw new DecodeError('Edge position is outside the local window.');
-      return edge;
-    });
+        return Number(position);
+      })
+      .filter((position) => startSample === undefined || position > 0);
   }
   at(index: number): Pin {
     let low = 0,
@@ -203,7 +204,27 @@ export function createEdgeWindow(
     startSample,
     endSample,
     sampleRate,
-    channels: { [id]: new EdgesLogicWindow(initial, edges, length) },
+    channels: { [id]: new EdgesLogicWindow(initial, edges, length, startSample) },
+  });
+}
+
+export function createEdgesWindow(
+  startSample: bigint,
+  endSample: bigint,
+  sampleRate: number,
+  channels: Readonly<Record<string, { initial: LogicLevel; edges: readonly bigint[] }>>,
+): SignalWindow {
+  const length = Number(endSample - startSample);
+  return createSignalWindow({
+    startSample,
+    endSample,
+    sampleRate,
+    channels: Object.fromEntries(
+      Object.entries(channels).map(([id, channel]) => [
+        id,
+        new EdgesLogicWindow(channel.initial, channel.edges, length, startSample),
+      ]),
+    ),
   });
 }
 
@@ -230,15 +251,10 @@ export function materializeLogicWindow(window: LogicWindow): ArrayLike<number> {
   if (window.kind === 'packed' && window.data) {
     for (let index = 0; index < output.length; index++) output[index] = window.at(index) as LogicLevel;
   } else if (window.kind === 'edges') {
-    let level = window.initial ?? 0,
-      edge = 0;
-    const edges = window.edges ?? [];
-    for (let index = 0; index < output.length; index++) {
-      while (edge < edges.length && Number(edges[edge]!) <= index) {
-        level ^= 1;
-        edge++;
-      }
-      output[index] = level;
+    for (let index = 0; index < output.length;) {
+      const next = Math.min(output.length, Math.max(index + 1, window.nextEdge(index + 1)));
+      output.fill(window.at(index), index, next);
+      index = next;
     }
   } else {
     for (let index = 0; index < output.length; index++) output[index] = window.at(index) as LogicLevel;

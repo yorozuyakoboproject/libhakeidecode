@@ -1,3 +1,5 @@
+import { RelayData } from './relay-data.js';
+
 export type TransportMode = 'auto' | 'native' | 'webusb';
 export type TransportKind = Exclude<TransportMode, 'auto'>;
 export const RELAY_URL = 'http://127.0.0.1:17641';
@@ -28,6 +30,36 @@ type OutResult = { status: 'ok'; bytesWritten: number };
 type Setup = { requestType: 'vendor'; recipient: 'device'; request: number; value: number; index: number };
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout> };
 
+class RelayTiming {
+  count = 0;
+  totalMs = 0;
+  maxMs = 0;
+  readonly bucketUpperMs = [0.1, 1, 5, 20, 100, 500, 1000, 5000, null];
+  readonly buckets = new Array<number>(9).fill(0);
+  readonly recentLong: { atUnixMs: number; ms: number }[] = [];
+  activeSinceUnixMs: number | null = null;
+  add(at: number, ms = performance.now() - at): void {
+    ++this.count;
+    this.totalMs += ms;
+    this.maxMs = Math.max(this.maxMs, ms);
+    let bucket = 0;
+    while (bucket < 8 && ms > this.bucketUpperMs[bucket]!) ++bucket;
+    ++this.buckets[bucket]!;
+    if (ms >= 20) {
+      if (this.recentLong.length === 16) this.recentLong.shift();
+      this.recentLong.push({ atUnixMs: performance.timeOrigin + at, ms });
+    }
+  }
+}
+class RelayDiagnostics {
+  readonly timeOriginUnixMs = performance.timeOrigin;
+  readonly startedUnixMs = Date.now();
+  readonly heartbeat = new RelayTiming();
+  lastBeat = performance.now();
+  endedUnixMs = 0;
+  websocket?: RelayData['metrics'];
+}
+
 async function relayFetch(path: string): Promise<Response> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 1000);
@@ -40,12 +72,16 @@ async function relayFetch(path: string): Promise<Response> {
   }
 }
 export async function relayAvailable(): Promise<boolean> {
+  let status;
   try {
-    const status = await (await relayFetch('/api/status')).json();
-    return status.service === 'h417-usb-relay' && status.protocol === 1;
+    status = await (await relayFetch('/api/status')).json();
   } catch {
     return false;
   }
+  if (status.service !== 'h417-usb-relay') return false;
+  if (status.protocol !== 1 || !status.dataProtocols?.includes('ws-consumed-v1'))
+    throw new Error('USB relay data protocol is incompatible. Please update H417 USB Relay.');
+  return true;
 }
 
 export class RelayDevice implements Identity {
@@ -67,14 +103,11 @@ export class RelayDevice implements Identity {
   private socket?: WebSocket;
   private sequence = 0;
   private sessionId?: string;
-  private stream?: Promise<ReadableStreamDefaultReader<Uint8Array>>;
-  private streamAbort?: AbortController;
-  private streamPending: Promise<unknown> = Promise.resolve();
-  private streamChunk: Uint8Array = new Uint8Array(0);
-  private streamOffset = 0;
-  private recordRemaining = 0;
-  private streamError?: Error;
+  private data?: RelayData;
   private closing?: Promise<void>;
+  private diagnostics?: RelayDiagnostics;
+  private diagnosticsTimer?: ReturnType<typeof setInterval>;
+  private reporting?: Promise<void>;
   private readonly pending = new Map<number, Pending>();
   constructor(
     identity: Identity,
@@ -85,6 +118,7 @@ export class RelayDevice implements Identity {
   private fail(message: string): void {
     const wasOpen = this.opened;
     this.opened = false;
+    this.data?.fail(new Error(message));
     for (const item of this.pending.values()) {
       clearTimeout(item.timer);
       item.reject(new Error(message));
@@ -94,7 +128,6 @@ export class RelayDevice implements Identity {
   }
   async open(): Promise<void> {
     if (this.opened) return;
-    this.streamError = undefined;
     const socket = new WebSocket(RELAY_URL.replace('http:', 'ws:') + '/usb');
     this.socket = socket;
     socket.binaryType = 'arraybuffer';
@@ -103,8 +136,7 @@ export class RelayDevice implements Identity {
       if (typeof data === 'string') {
         const message = JSON.parse(data) as { id: number; result?: unknown; error?: string; event?: string };
         if (message.event === 'fault') {
-          this.streamError = new Error(message.error ?? 'Native USB relay failed');
-          if (this.stream) void this.stream.then((reader) => reader.cancel()).catch(() => {});
+          this.data?.fail(new Error(message.error ?? 'Native USB relay failed'));
           return;
         }
         const item = this.pending.get(message.id);
@@ -176,24 +208,45 @@ export class RelayDevice implements Identity {
   private rpc<T = void>(op: string, arguments_: Record<string, unknown> = {}, timeout?: number): Promise<T> {
     return this.request((id) => this.socket!.send(JSON.stringify({ id, op, ...arguments_ })), timeout);
   }
-  private async stopStream(): Promise<void> {
-    this.streamAbort?.abort();
-    this.streamAbort = undefined;
-    if (this.stream) await this.stream.then((reader) => reader.cancel()).catch(() => {});
-    await this.streamPending.catch(() => {});
-    this.stream = undefined;
-    this.streamChunk = new Uint8Array(0);
-    this.streamOffset = 0;
-    this.recordRemaining = 0;
-    this.streamPending = Promise.resolve();
-    this.streamError = undefined;
+  private reportDiagnostics(): Promise<void> {
+    if (this.reporting) return this.reporting;
+    if (!this.sessionId || !this.diagnostics) return Promise.resolve();
+    this.reporting = fetch(`${RELAY_URL}/api/diagnostics/${this.sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...this.diagnostics, atUnixMs: Date.now() }),
+      signal: AbortSignal.timeout(2000),
+      cache: 'no-store',
+    })
+      .then(
+        () => {},
+        () => {},
+      )
+      .finally(() => {
+        this.reporting = undefined;
+      });
+    return this.reporting;
+  }
+  private async stopData(): Promise<void> {
+    if (this.data) {
+      await this.data.stop();
+      if (this.socket?.readyState === WebSocket.OPEN) await this.rpc('release', { iface: 1 }).catch(() => {});
+    }
+    clearInterval(this.diagnosticsTimer);
+    this.diagnosticsTimer = undefined;
+    if (this.diagnostics) {
+      this.diagnostics.endedUnixMs = Date.now();
+      await this.reporting;
+      await this.reportDiagnostics();
+    }
+    this.data = undefined;
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.opened = false;
     this.closing = (async () => {
       try {
-        await this.stopStream();
+        await this.stopData();
         if (this.socket?.readyState === WebSocket.OPEN) await this.rpc('close').catch(() => {});
       } finally {
         const socket = this.socket;
@@ -214,11 +267,15 @@ export class RelayDevice implements Identity {
     return this.rpc('claim', { iface });
   }
   async releaseInterface(iface: number): Promise<void> {
-    if (iface === 1) await this.stopStream();
+    if (iface === 1) await this.stopData();
     await this.rpc('release', { iface });
   }
   async selectAlternateInterface(iface: number, alternate: number): Promise<void> {
-    if (iface === 1) await this.stopStream();
+    if (iface === 1) {
+      const hadData = Boolean(this.data);
+      await this.stopData();
+      if (hadData) await this.rpc('claim', { iface });
+    }
     await this.rpc('alternate', { iface, alternate });
     const item = this.configuration?.interfaces.find((i) => i.interfaceNumber === iface);
     const setting = item?.alternates.find((a) => a.alternateSetting === alternate);
@@ -235,74 +292,22 @@ export class RelayDevice implements Identity {
   }
   transferIn(endpoint: number, length: number): Promise<InResult> {
     if (endpoint !== 2) return this.rpc('read', { endpoint, length }, 0);
-    if (!this.stream) {
-      this.streamAbort = new AbortController();
-      this.stream = fetch(`${RELAY_URL}/stream/${this.sessionId}/130?length=${length}`, {
-        cache: 'no-store',
-        signal: this.streamAbort.signal,
-      }).then((response) => {
-        if (!response.ok || !response.body) throw new Error(`USB relay stream HTTP ${response.status}`);
-        return response.body.getReader();
-      });
+    if (!this.data) {
+      const diagnostics = new RelayDiagnostics();
+      this.diagnostics = diagnostics;
+      this.data = new RelayData(`${RELAY_URL.replace('http:', 'ws:')}/data/${this.sessionId}/130`);
+      diagnostics.websocket = this.data.metrics;
+      this.diagnosticsTimer = setInterval(() => {
+        const at = performance.now();
+        diagnostics.heartbeat.add(diagnostics.lastBeat, at - diagnostics.lastBeat);
+        diagnostics.lastBeat = at;
+        void this.reportDiagnostics();
+      }, 500);
     }
-    const stream = this.stream;
-    const run = this.streamPending.then(async () => {
-      const reader = await stream;
-      const take = async (size: number): Promise<Uint8Array<ArrayBuffer>> => {
-        const data = new Uint8Array(size);
-        let written = 0;
-        while (written < size) {
-          if (this.streamOffset === this.streamChunk.length) {
-            const chunk = await reader.read();
-            if (chunk.done) throw new Error('USB relay stream ended; capture stopped');
-            this.streamChunk = chunk.value;
-            this.streamOffset = 0;
-          }
-          const count = Math.min(size - written, this.streamChunk.length - this.streamOffset);
-          data.set(this.streamChunk.subarray(this.streamOffset, this.streamOffset + count), written);
-          written += count;
-          this.streamOffset += count;
-        }
-        return data;
-      };
-      if (!this.recordRemaining) {
-        const header = await take(4);
-        this.recordRemaining = new DataView(header.buffer).getUint32(0, true);
-        if (this.recordRemaining < 1 || this.recordRemaining > 2097152) throw new Error('Invalid USB relay record');
-      }
-      const count = Math.min(length, this.recordRemaining);
-      if (this.streamOffset === this.streamChunk.length) {
-        const chunk = await reader.read();
-        if (chunk.done) throw new Error('USB relay stream ended; capture stopped');
-        this.streamChunk = chunk.value;
-        this.streamOffset = 0;
-      }
-      let available = Math.min(count, this.streamChunk.length - this.streamOffset);
-      const packet =
-        this.configuration?.interfaces
-          .find((i) => i.interfaceNumber === 1)
-          ?.alternate.endpoints.find((e) => e.endpointNumber === 2)?.packetSize ?? 1024;
-      if (available >= packet) available -= available % packet;
-      else if (available < count && count >= packet) {
-        const data = await take(packet);
-        this.recordRemaining -= packet;
-        return { status: 'ok', data: new DataView(data.buffer) } satisfies InResult;
-      }
-      const data = this.streamChunk.subarray(this.streamOffset, this.streamOffset + available);
-      this.streamOffset += available;
-      this.recordRemaining -= available;
-      return { status: 'ok', data: new DataView(data.buffer, data.byteOffset, data.byteLength) } satisfies InResult;
-    });
-    const result = run.catch((error) => {
-      throw (
-        this.streamError ??
-        new Error(
-          `USB relay receive failed; capture stopped: ${error instanceof Error ? error.message : String(error)}`,
-        )
-      );
-    });
-    this.streamPending = result.catch(() => {});
-    return result;
+    return this.data.read(length).then((value) => ({ status: 'ok', data: value }));
+  }
+  consumeTransfer(value: DataView): void {
+    this.data?.consume(value);
   }
   transferOut(endpoint: number, data: Uint8Array): Promise<OutResult> {
     return this.request((id) => {

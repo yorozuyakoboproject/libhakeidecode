@@ -74,6 +74,7 @@ export class DecodeResultStore {
   readonly annotations = new AnnotationIndex();
   private readonly pages: FramePage[] = [];
   private frameCount = 0;
+  private head = 0;
   private lastFrame: DecodeFrame | null = null;
   private ordered = true;
   private binaries: Record<string, Uint8Array> = {};
@@ -81,6 +82,23 @@ export class DecodeResultStore {
 
   constructor(private readonly compare: (a: DecodeFrame, b: DecodeFrame) => number) {}
 
+  get length(): number {
+    return this.frameCount - this.head;
+  }
+  discardBefore(start: bigint): { frames: number; annotations: number } {
+    this.annotations.discardBefore(start);
+    while (this.head < this.frameCount) {
+      const page = this.pages[Math.floor(this.head / PAGE_SIZE)]!;
+      if (page.ends.get(this.head % PAGE_SIZE) > start) break;
+      this.head++;
+    }
+    while (this.head >= PAGE_SIZE) {
+      this.pages.shift();
+      this.head -= PAGE_SIZE;
+      this.frameCount -= PAGE_SIZE;
+    }
+    return { frames: this.length, annotations: this.annotations.length };
+  }
   append(batch: DecodeBatch): void {
     this.annotations.append(batch.annotations);
     for (const frame of batch.frames) this.appendFrame(frame);
@@ -113,7 +131,7 @@ export class DecodeResultStore {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(count) || count < 0)
       throw new RangeError('Invalid frame page');
     const frames: DecodeFrame[] = [];
-    for (let index = offset; index < Math.min(this.frameCount, offset + count); index++) {
+    for (let index = this.head + offset; index < Math.min(this.frameCount, this.head + offset + count); index++) {
       const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
         local = index % PAGE_SIZE;
       const frame = { ss: page.starts.get(local), es: page.ends.get(local) } as DecodeFrame & Record<string, unknown>;
@@ -135,9 +153,9 @@ export class DecodeResultStore {
 
   finish(binaries: Record<string, Uint8Array>): void {
     if (!this.ordered) {
-      const frames = this.readFrames(0, this.frameCount).sort(this.compare);
+      const frames = this.readFrames(0, this.length).sort(this.compare);
       this.pages.length = 0;
-      this.frameCount = 0;
+      this.frameCount = this.head = 0;
       this.lastFrame = null;
       this.ordered = true;
       for (const frame of frames) this.appendFrame(frame);

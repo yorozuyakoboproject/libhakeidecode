@@ -58,6 +58,13 @@
               ><span data-i18n="device.select">采集设备</span
               ><select id="device-select" data-i18n-attrs="aria-label:device.select"></select
             ></label>
+            <label class="field"
+              ><span data-i18n="capture.mode">采样模式</span
+              ><select id="capture-mode" data-i18n-attrs="aria-label:capture.mode">
+                <option value="single" data-i18n="capture.mode.single">单次采样</option>
+                <option value="continuous" data-i18n="capture.mode.continuous">连续采样</option>
+              </select></label
+            >
             <div id="device-connection" hidden>
               <div class="button-row">
                 <button id="connect-device" type="button" class="button" data-i18n="device.connect">Connect USB</button

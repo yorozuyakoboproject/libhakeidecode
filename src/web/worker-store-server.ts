@@ -1,8 +1,10 @@
+import { prepareDigitalView, type DigitalViewRequest } from './digital-view.js';
 import { minSample, maxSample, localNumber, rescaleSample } from '../libhakei/sample-index.js';
 import type { AnalogStore, AnalogColumnView } from './data/analogStore.js';
 import { channelStoreRange, packStoreRange } from './data/channel-range.js';
 import type { PlanarSampleStore } from './data/planarStore.js';
 import type { RleSampleStore } from './data/rleStore.js';
+import type { RollingSampleStore } from './rolling-capture.js';
 import { AnalogConversion } from './analog-conversion.js';
 import { parseAnalogSettings } from './analog-settings.js';
 import { TimedAnalogStore } from './data/timed-analogStore.js';
@@ -10,14 +12,16 @@ import type {
   DecodeReadRequest,
   DecodeReadResponse,
   PreparedAnalogView,
-  PreparedChannelView,
   StoreMetadata,
   StoreRequest,
   StoreResponse,
 } from './worker-store.js';
 
 export interface StoreCaptureSource {
-  readonly store: PlanarSampleStore | RleSampleStore;
+  readonly store: PlanarSampleStore | RleSampleStore | RollingSampleStore;
+  readonly sampleOffset?: bigint;
+  readonly snapshot?: (analog?: boolean) => StoreCaptureSource;
+  readonly dispose?: () => void;
   readonly labels: readonly string[];
   readonly logicChannelCount?: number;
   readonly analogChannels?: readonly { readonly name: string; readonly store: AnalogStore }[];
@@ -26,21 +30,13 @@ export interface StoreCaptureSource {
 const DECODE_EDGE_WINDOW_LIMIT = 100_000;
 const MAX_CHUNK = 2 ** 26;
 
-function blankDigital(bins: number): { low: Uint8Array; high: Uint8Array; edge: Uint8Array; packed: Uint8Array } {
-  return {
-    low: new Uint8Array(bins).fill(1),
-    high: new Uint8Array(bins),
-    edge: new Uint8Array(bins),
-    packed: new Uint8Array(bins).fill(8),
-  };
-}
-
 export class WorkerStoreServer {
   private port: MessagePort | null = null;
-  private readonly decodePorts = new Set<MessagePort>();
+  private readonly decodePorts = new Map<number, { port: MessagePort; snapshot?: StoreCaptureSource }>();
   private readonly exportControllers = new Map<number, AbortController>();
   private disposed = false;
   private readonly conversions = new Map<number, AnalogConversion>();
+  private sampleOffset?: bigint;
   constructor(private readonly source: () => StoreCaptureSource | null) {}
 
   metadata(): StoreMetadata {
@@ -59,6 +55,8 @@ export class WorkerStoreServer {
     const store = capture.store,
       analog = capture.analogChannels ?? [];
     return {
+      ...('queryDiagnostics' in store ? { queryDiagnostics: store.queryDiagnostics() } : {}),
+      ...(capture.sampleOffset === undefined ? {} : { sampleOffset: capture.sampleOffset }),
       channelCount: store.channelCount,
       samplerate: store.samplerate,
       length: store.length,
@@ -103,7 +101,13 @@ export class WorkerStoreServer {
 
   publish(): void {
     if (!this.port || this.disposed) return;
-    this.port.postMessage({ type: 'metadata', metadata: this.metadata() } satisfies StoreResponse);
+    const metadata = this.metadata();
+    if (metadata.sampleOffset !== this.sampleOffset) {
+      for (const conversion of this.conversions.values()) conversion.dispose();
+      this.conversions.clear();
+      this.sampleOffset = metadata.sampleOffset;
+    }
+    this.port.postMessage({ type: 'metadata', metadata } satisfies StoreResponse);
   }
 
   dispose(): void {
@@ -115,13 +119,16 @@ export class WorkerStoreServer {
     this.port = null;
     for (const controller of this.exportControllers.values()) controller.abort();
     this.exportControllers.clear();
-    for (const port of this.decodePorts) port.close();
-    this.decodePorts.clear();
+    for (const id of this.decodePorts.keys()) this.closeDecodeReader(id);
   }
 
   private async handle(request: StoreRequest): Promise<void> {
     if (request.type === 'decode-reader') {
-      this.connectDecodeReader(request.port);
+      this.connectDecodeReader(request.id, request.port, request.live);
+      return;
+    }
+    if (request.type === 'close-decode-reader') {
+      this.closeDecodeReader(request.id);
       return;
     }
     if (request.type === 'cancel-export') {
@@ -147,7 +154,7 @@ export class WorkerStoreServer {
       return;
     }
     if (request.type === 'prepare-digital') {
-      this.prepareDigital(capture, request);
+      await this.prepareDigital(capture, request);
       return;
     }
     if (request.type === 'prepare-analog') {
@@ -176,13 +183,39 @@ export class WorkerStoreServer {
   }
 
   private async exportSR(request: Extract<StoreRequest, { type: 'export-sr' }>): Promise<void> {
-    const capture = this.source();
+    const source = this.source(),
+      snapshot = source?.snapshot?.(true),
+      capture = snapshot ?? source;
     if (!capture) throw new Error('Capture data is not ready');
     const controller = new AbortController();
     this.exportControllers.set(request.id, controller);
     try {
       const { serializeSR } = await import('./sr.js');
       controller.signal.throwIfAborted();
+      const length = capture.store.length;
+      let workspace = request.workspace;
+      if (snapshot && workspace && length > 0n) {
+        const end = minSample(length, maxSample(1n, workspace.viewport[1])),
+          cursor = (value: bigint | null | undefined) => (value != null && value < length ? value : null);
+        workspace = {
+          ...workspace,
+          viewport: [minSample(workspace.viewport[0], end - 1n), end],
+          cursor: cursor(workspace.cursor),
+          cursorA: cursor(workspace.cursorA),
+          cursorB: cursor(workspace.cursorB),
+        };
+      }
+      const acquisition =
+        request.acquisition && snapshot
+          ? {
+              ...request.acquisition,
+              actualSamples: length,
+              stopReason:
+                request.acquisition.stopReason === 'complete' && length < request.acquisition.targetSamples
+                  ? ('stopped' as const)
+                  : request.acquisition.stopReason,
+            }
+          : request.acquisition;
       const blob = await serializeSR(
         {
           name: 'capture.sr',
@@ -196,9 +229,9 @@ export class WorkerStoreServer {
                 analogChannels: capture.analogChannels.map((channel) => ({ name: channel.name, store: channel.store })),
               }
             : {}),
-          ...(request.acquisition ? { acquisition: request.acquisition } : {}),
+          ...(acquisition ? { acquisition } : {}),
         },
-        request.workspace,
+        workspace,
         (fraction) => {
           if (!controller.signal.aborted)
             this.port?.postMessage({ type: 'export-sr-progress', id: request.id, fraction } satisfies StoreResponse);
@@ -209,50 +242,18 @@ export class WorkerStoreServer {
         this.port.postMessage({ type: 'export-sr-result', id: request.id, blob } satisfies StoreResponse);
     } finally {
       this.exportControllers.delete(request.id);
+      snapshot?.dispose?.();
     }
   }
 
-  private prepareDigital(
-    capture: StoreCaptureSource,
-    request: Extract<StoreRequest, { type: 'prepare-digital' }>,
-  ): void {
-    const store = capture.store,
-      bins = request.bins,
-      start = maxSample(0n, request.startSample),
-      requestedEnd = request.endSample > start ? request.endSample : start;
-    const availableEnd = minSample(store.length, requestedEnd),
-      span = requestedEnd - start,
-      availableSpan = availableEnd > start ? availableEnd - start : 0n;
-    const availableBins =
-      availableSpan >= span || span === 0n
-        ? bins
-        : Math.max(1, Math.floor((Number(availableSpan) / Number(span)) * bins));
-    const views: PreparedChannelView[] = [];
-    for (const channel of request.channels) {
-      if (!Number.isInteger(channel) || channel < 0 || channel >= store.channelCount)
-        throw new RangeError('Digital channel out of range');
-      let result = blankDigital(bins);
-      if (availableSpan > 0n) {
-        const view = store.query(channel, start, availableEnd, availableBins);
-        result = {
-          low: new Uint8Array(bins).fill(1),
-          high: new Uint8Array(bins),
-          edge: new Uint8Array(bins),
-          packed: new Uint8Array(bins).fill(8),
-        };
-        const count = Math.min(availableBins, view.bins, bins);
-        result.low.set(view.low.subarray(0, count));
-        result.high.set(view.high.subarray(0, count));
-        result.edge.set(view.edge.subarray(0, count));
-        result.packed.set(view.packed.subarray(0, count));
-      }
-      const edges = request.includeEdges ? store.edges(channel, start, availableEnd) : undefined;
-      const points =
-        request.bins >= Number(availableSpan) ? channelStoreRange(store, channel, start, availableEnd) : undefined;
-      views.push({ channel, ...result, ...(edges ? { edges } : {}), ...(points ? { points } : {}) });
-    }
+  private async prepareDigital(capture: StoreCaptureSource, request: DigitalViewRequest): Promise<void> {
+    const result =
+      'prepareDigitalView' in capture.store
+        ? await capture.store.prepareDigitalView(request)
+        : prepareDigitalView(capture.store, request);
+    if (!this.port || this.disposed) return;
     const transfer: Transferable[] = [];
-    for (const view of views)
+    for (const view of result.views)
       transfer.push(
         view.low.buffer,
         view.high.buffer,
@@ -260,18 +261,7 @@ export class WorkerStoreServer {
         view.packed.buffer,
         ...(view.points ? [view.points.buffer] : []),
       );
-    this.port!.postMessage(
-      {
-        type: 'prepared-digital',
-        id: request.id,
-        startSample: start,
-        endSample: requestedEnd,
-        availableEnd,
-        bins,
-        views,
-      } satisfies StoreResponse,
-      transfer,
-    );
+    this.port.postMessage(result, transfer);
   }
 
   private prepareAnalog(capture: StoreCaptureSource, request: Extract<StoreRequest, { type: 'prepare-analog' }>): void {
@@ -335,11 +325,27 @@ export class WorkerStoreServer {
     );
   }
 
-  private connectDecodeReader(port: MessagePort): void {
-    this.decodePorts.add(port);
+  private closeDecodeReader(id: number): void {
+    const reader = this.decodePorts.get(id);
+    if (!reader) return;
+    reader.port.close();
+    reader.snapshot?.dispose?.();
+    this.decodePorts.delete(id);
+  }
+  private connectDecodeReader(id: number, port: MessagePort, live = false): void {
+    let snapshot: StoreCaptureSource | undefined,
+      failure: unknown,
+      established = false;
+    try {
+      if (!live) snapshot = this.source()?.snapshot?.();
+    } catch (error) {
+      failure = error;
+    }
+    this.decodePorts.set(id, { port, snapshot });
     port.onmessage = ({ data }: MessageEvent<DecodeReadRequest>) => {
       try {
-        this.answerDecodeRequest(port, data);
+        if (failure) throw failure;
+        established = this.answerDecodeRequest(port, data, snapshot, live, live && !established) || established;
       } catch (error) {
         port.postMessage({
           type: 'decode-read-error',
@@ -351,46 +357,106 @@ export class WorkerStoreServer {
     port.start();
   }
 
-  private answerDecodeRequest(port: MessagePort, request: DecodeReadRequest): void {
-    if (request.type !== 'decode-read' || !Number.isSafeInteger(request.id)) return;
-    const capture = this.source();
+  private answerDecodeRequest(
+    port: MessagePort,
+    request: DecodeReadRequest,
+    snapshot?: StoreCaptureSource,
+    live = false,
+    opening = false,
+  ): boolean {
+    if (request.type !== 'decode-read' || !Number.isSafeInteger(request.id)) return false;
+    const capture = snapshot ?? this.source();
     if (!capture) throw new Error('Capture data is not ready');
     const store = capture.store,
-      start = maxSample(0n, request.startSample),
-      requestedEnd = request.endSample > start ? request.endSample : start;
-    const availableEnd = minSample(store.length, requestedEnd);
-    if (start >= availableEnd) {
+      offset = live ? (capture.sampleOffset ?? 0n) : 0n,
+      sourceEnd = offset + store.length,
+      requestedStart = maxSample(0n, request.startSample),
+      requestedSpan = maxSample(0n, request.endSample - requestedStart),
+      absoluteStart = opening ? maxSample(offset, requestedStart) : requestedStart,
+      absoluteEnd = opening ? minSample(sourceEnd, absoluteStart + requestedSpan) : requestedStart + requestedSpan;
+    if (absoluteStart < offset) throw new Error('Decoder fell behind the retained capture window');
+    if (
+      Object.values(request.channels).some(
+        (channel) => !Number.isInteger(channel) || channel < 0 || channel >= store.channelCount,
+      )
+    )
+      throw new RangeError('Invalid decode channel');
+    const start = absoluteStart - offset,
+      availableEnd = minSample(sourceEnd, absoluteEnd) - offset;
+    if (absoluteStart >= sourceEnd || (live && absoluteEnd > sourceEnd)) {
       port.postMessage({
         type: 'decode-read-result',
         id: request.id,
         kind: 'wait',
-        startSample: start,
-        availableEnd,
+        startSample: absoluteStart,
+        availableEnd: sourceEnd,
+        availableStart: offset,
       } satisfies DecodeReadResponse);
-      return;
+      return false;
     }
     if (availableEnd - start > BigInt(MAX_CHUNK)) throw new RangeError('Decode read range is too large');
     const edgeIndex = request.edgeInput === undefined ? undefined : request.channels[request.edgeInput];
+    if (edgeIndex === undefined && 'decodeEdges' in store && store.gaps().length === 0) {
+      const channels: Record<string, { initial: 0 | 1; edges: bigint[] }> = {};
+      let remaining = DECODE_EDGE_WINDOW_LIMIT,
+        complete = true;
+      for (const [name, index] of Object.entries(request.channels)) {
+        const edges = store.decodeEdges(index, start, availableEnd, remaining);
+        if (edges === null) {
+          complete = false;
+          break;
+        }
+        remaining -= edges.length;
+        channels[name] = { initial: store.sampleAt(index, start) as 0 | 1, edges: edges.map((edge) => edge + offset) };
+      }
+      if (complete) {
+        port.postMessage({
+          type: 'decode-read-result',
+          id: request.id,
+          kind: 'edges',
+          startSample: absoluteStart,
+          endSample: availableEnd + offset,
+          availableStart: offset,
+          availableEnd: sourceEnd,
+          channels,
+          sampleRate: store.samplerate,
+        } satisfies DecodeReadResponse);
+        return availableEnd > start;
+      }
+    }
+    const fastEdges =
+      edgeIndex !== undefined && 'decodeEdges' in store
+        ? store.decodeEdges(edgeIndex, start, availableEnd, Math.min(request.edgeLimit, DECODE_EDGE_WINDOW_LIMIT))
+        : undefined;
     if (
       edgeIndex !== undefined &&
       store.gaps().length === 0 &&
-      'edgeCount' in store &&
-      typeof store.edgeCount === 'function'
+      (fastEdges !== undefined || ('edgeCount' in store && typeof store.edgeCount === 'function'))
     ) {
-      const edgeCount = store.edgeCount(edgeIndex, start, availableEnd);
+      const edgeCount =
+        fastEdges === null
+          ? Infinity
+          : (fastEdges?.length ?? ('edgeCount' in store ? store.edgeCount(edgeIndex, start, availableEnd) : Infinity));
       if (edgeCount <= Math.min(request.edgeLimit, DECODE_EDGE_WINDOW_LIMIT)) {
-        const edges = store.edges(edgeIndex, start, availableEnd);
+        const edges = (fastEdges ?? store.edges(edgeIndex, start, availableEnd)).map((edge) => edge + offset);
         port.postMessage({
           type: 'decode-read-result',
           id: request.id,
           kind: 'edge',
-          startSample: start,
-          endSample: availableEnd,
+          startSample: absoluteStart,
+          endSample: availableEnd + offset,
+          availableStart: offset,
+          availableEnd: sourceEnd,
           parts: [
-            { startSample: start, endSample: availableEnd, initial: store.sampleAt(edgeIndex, start) as 0 | 1, edges },
+            {
+              startSample: absoluteStart,
+              endSample: availableEnd + offset,
+              initial: store.sampleAt(edgeIndex, start) as 0 | 1,
+              edges,
+            },
           ],
         } satisfies DecodeReadResponse);
-        return;
+        return availableEnd > start;
       }
     }
     const channels: Record<string, Uint8Array> = {},
@@ -405,13 +471,16 @@ export class WorkerStoreServer {
         type: 'decode-read-result',
         id: request.id,
         kind: 'channels',
-        startSample: start,
-        endSample: availableEnd,
+        startSample: absoluteStart,
+        endSample: availableEnd + offset,
+        availableStart: offset,
+        availableEnd: sourceEnd,
         sampleRate: store.samplerate,
         channels,
       } satisfies DecodeReadResponse,
       transfer,
     );
+    return availableEnd > start;
   }
 }
 

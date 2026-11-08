@@ -20,6 +20,9 @@ export interface DecodeStats {
   truncated: boolean;
   binaryTruncated: boolean;
   memory: DecodeResultMemory;
+  processedSample?: bigint;
+  availableEnd?: bigint;
+  availableStart?: bigint;
   stages?: {
     sharedUnpackMs: number;
     decoderPushMs: number;
@@ -39,6 +42,9 @@ export interface DecodeProgressMessage {
   annotations: number;
   samples: bigint;
   memory: DecodeResultMemory;
+  processedSample?: bigint;
+  availableEnd?: bigint;
+  availableStart?: bigint;
 }
 export interface DecodeQueryAnnotationsRequest {
   type: 'decode-query-annotations';
@@ -71,6 +77,7 @@ export interface DecodeReadCsvRequest {
   sampleRate: number;
   triggerSample: bigint;
   includeHeader: boolean;
+  sampleOffset?: bigint;
 }
 export interface DecodeReadCsvResult {
   type: 'decode-read-csv-result';
@@ -106,6 +113,8 @@ export interface DecodeStartRequest {
   gaps: GapSpan[];
   options: Record<string, OptionValue>;
   paged?: 'always' | 'auto' | 'never';
+  rolling?: boolean;
+  startSample?: bigint;
 }
 export interface DecodeSharedStartRequest {
   type: 'decode-shared-start';

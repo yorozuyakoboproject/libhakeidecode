@@ -18,6 +18,10 @@ import { OutputStreams, SRD_CONF_SAMPLERATE } from './outputs.js';
 import { ValuesLogicWindow } from './signal.js';
 import { WaitToken, compileWait, matchWaitInto } from './wait.js';
 
+type RunnerChunk = Pick<SampleChunk, 'startSample' | 'endSample' | 'sampleRate' | 'length' | 'isFinal'> & {
+  channels?: SampleChunk['channels'];
+};
+
 export class DecoderRunner {
   readonly decoder: LogicDecoder;
   readonly channelDeclarations: readonly ChannelDeclaration[];
@@ -31,7 +35,7 @@ export class DecoderRunner {
   generator!: LogicGenerator | null;
   pendingWait!: CompiledWait | null;
   firstWait!: boolean;
-  chunk!: SampleChunk | null;
+  chunk!: RunnerChunk | null;
   window!: SignalWindow | null;
   position!: bigint | null;
   expectedSample!: bigint | null;
@@ -98,7 +102,11 @@ export class DecoderRunner {
   channelValue(id: ChannelId, sample = this.decoder.samplenum): Pin | undefined {
     if (!this.chunk || sample < this.chunk.startSample || sample >= this.chunk.endSample) return undefined;
     const name = this.channelMap[this.channelIndex(id)];
-    return name == null ? 255 : (this.chunk.channels[name][Number(sample - this.chunk.startSample)] as Pin);
+    if (name == null) return 255;
+    const index = this.channelIndex(id),
+      offset = Number(sample - this.chunk.startSample);
+    const view = this.window?.channel(this.channelDeclarations[index]!.id) ?? this.window?.channel(index);
+    return view ? view.at(offset) : (this.chunk.channels?.[name]?.[offset] as Pin | undefined);
   }
   start(sampleRate: number, { deferMetadata = false }: { deferMetadata?: boolean } = {}): void {
     if (this.started) return;
@@ -123,9 +131,32 @@ export class DecoderRunner {
     this.started = true;
   }
   push(input: SampleChunkInput, signalWindow?: SignalWindow): this {
+    return this.pushChunk(createSampleChunk(input), signalWindow);
+  }
+  pushWindow(window: SignalWindow): this {
+    if (
+      !Number.isSafeInteger(window.length) ||
+      window.length < 0 ||
+      window.startSample < 0n ||
+      window.endSample - window.startSample !== BigInt(window.length) ||
+      !Number.isSafeInteger(window.sampleRate) ||
+      window.sampleRate < 1
+    )
+      throw new DecodeError('Invalid signal window.');
+    return this.pushChunk(
+      {
+        startSample: window.startSample,
+        endSample: window.endSample,
+        length: window.length,
+        sampleRate: window.sampleRate,
+        isFinal: false,
+      },
+      window,
+    );
+  }
+  private pushChunk(chunk: RunnerChunk, signalWindow?: SignalWindow): this {
     if (this.ended) throw new DecodeError('Cannot push after EOF or cancellation.');
     if (this.failed) throw this.failed;
-    const chunk = createSampleChunk(input);
     if (this.expectedSample !== null && chunk.startSample !== this.expectedSample) {
       if (!this.allowGaps || chunk.startSample < this.expectedSample)
         throw new SampleGapError(this.expectedSample, chunk.startSample);
@@ -133,12 +164,18 @@ export class DecoderRunner {
     }
     if (this.sampleRate !== null && chunk.sampleRate !== this.sampleRate)
       throw new DecodeError('Sample rate changed; reset the runner first.');
-    const keys = Object.keys(chunk.channels).sort().join('\0');
+    const present = signalWindow
+      ? this.channelMap.flatMap((name, index) =>
+          name !== null && (signalWindow.channel(this.channelDeclarations[index]!.id) ?? signalWindow.channel(index))
+            ? [name]
+            : [],
+        )
+      : Object.keys(chunk.channels!);
+    const keys = present.sort().join('\0');
     if (this.channelKeys !== null && keys !== this.channelKeys)
       throw new DecodeError('Input channel layout changed; reset the runner first.');
     for (const name of this.channelMap)
-      if (name != null && !Object.hasOwn(chunk.channels, name))
-        throw new DecodeError(`Input chunk has no mapped channel: ${name}`);
+      if (name != null && !present.includes(name)) throw new DecodeError(`Input chunk has no mapped channel: ${name}`);
     if (!this.started) this.start(chunk.sampleRate);
     this.channelKeys = keys;
     if (this.position === null) this.position = chunk.startSample;
@@ -172,7 +209,7 @@ export class DecoderRunner {
       const declaration = this.channelDeclarations[index]!;
       const view = this.window?.channel(declaration.id) ?? this.window?.channel(index);
       const name = this.channelMap[index];
-      this.windows[index] = view ?? (name == null ? null : new ValuesLogicWindow(chunk.channels[name]!));
+      this.windows[index] = view ?? (name == null ? null : new ValuesLogicWindow(chunk.channels![name]!));
     }
     this.pins.length = this.channelMap.length;
   }
@@ -185,18 +222,28 @@ export class DecoderRunner {
   private skipOffset(conditions: CompiledWait, cursor: number, length: number): number {
     let best = length - cursor;
     for (const terms of conditions) {
-      if (terms.length !== 1) return 0;
-      const term = terms[0]!;
-      let candidate: number;
-      if (term.kind === 'skip') {
-        if (term.count < 0) return 0;
-        candidate = Number(term.count - term.skipped + 1n);
-      } else if (term.kind === 'e' || term.kind === 'r' || term.kind === 'f') {
-        const view = this.windows[term.channel];
-        candidate = view ? view.nextEdge(cursor + 1) - cursor : length - cursor;
-      } else return 0;
-      if (candidate < 1) candidate = 1;
-      if (candidate < best) best = candidate;
+      if (terms.length > 1 && terms.some((term) => term.kind === 'skip')) return 0;
+      let candidate = 1;
+      for (const term of terms) {
+        let earliest = 1;
+        if (term.kind === 'skip') {
+          if (term.count < 0) return 0;
+          earliest = Number(term.count - term.skipped + 1n);
+        } else {
+          const view = this.windows[term.channel];
+          if (!view) earliest = length - cursor;
+          else if (
+            term.kind === 'e' ||
+            term.kind === 'r' ||
+            term.kind === 'f' ||
+            (term.kind === 'h' && this.previous![term.channel] !== 1) ||
+            (term.kind === 'l' && this.previous![term.channel] !== 0)
+          )
+            earliest = view.nextEdge(cursor + 1) - cursor;
+        }
+        candidate = Math.max(candidate, earliest);
+      }
+      best = Math.min(best, candidate);
     }
     return best > 1 ? Math.min(best, length - cursor) : 0;
   }

@@ -31,6 +31,9 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   private readonly values = new Map<string, number>();
   private annotationsCount = 0;
   private framesCount = 0;
+  private eventEnd = 0n;
+  private retained = false;
+  private retainedStart = 0n;
 
   constructor(plugin: DecoderPlugin<any, any>, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
     this.host = context.host;
@@ -54,11 +57,13 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     return resultMemory(0, 0, this.binaries.reservedBytes);
   }
   addFrame(frame: F): void {
+    if (this.retained && frame.es <= this.retainedStart) return;
     this.frames.push(frame);
     this.framesCount++;
   }
   addBinary(key: string, bytes: Uint8Array): void {
-    this.binaries.append(key, bytes);
+    if (this.retained && this.eventEnd <= this.retainedStart) return;
+    this.binaries.append(key, bytes, this.retained ? this.eventEnd : undefined);
   }
   addValue(key: string, value: number): void {
     if (Number.isFinite(value)) this.values.set(key, value);
@@ -78,6 +83,15 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     this.handler.reset?.(this);
     this.engine.reset();
   }
+  retain(startSample: bigint): void {
+    this.retained = true;
+    this.retainedStart = startSample;
+    const counts = this.host.retain?.(startSample);
+    if (!counts) throw new Error('Rolling result storage is unavailable');
+    this.framesCount = counts.frames;
+    this.annotationsCount = counts.annotations;
+    this.binaries.discardBefore(startSample);
+  }
   async finish(progress: number): Promise<DecodeRuntimeResult> {
     await this.engine.finish();
     this.handler.finish?.(this);
@@ -93,7 +107,9 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   }
   private consume(events: readonly OutputEvent[]): void {
     for (const event of events) {
+      this.eventEnd = event.es;
       if (event.type === OUTPUT_ANN) {
+        if (this.retained && event.es <= this.retainedStart) continue;
         const data = event.data as readonly [number, readonly string[], number?];
         this.annotations.push({ ss: event.ss, es: event.es, classIndex: data[0], texts: data[1], value: data[2] });
         this.annotationsCount++;

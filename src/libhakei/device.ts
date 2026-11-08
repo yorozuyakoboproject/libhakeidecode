@@ -63,6 +63,8 @@ export interface DeviceConfiguration {
   readonly options: Readonly<Record<string, string | number>>;
 }
 
+export type CaptureMode = 'single' | 'continuous';
+
 export function deviceChannelIndices(configuration: DeviceConfiguration, kind: 'logic' | 'analog'): readonly number[] {
   return (
     configuration[`${kind}ChannelIndices`] ?? Array.from({ length: configuration[`${kind}Channels`] }, (_, i) => i)

@@ -6,13 +6,14 @@ import { UIError, type MessageKey } from './i18n.js';
 import type { WorkspaceSettings } from './workspace.js';
 import type { Pipeline32Backend } from './transpose32-pipeline.js';
 import type { AnalogStore } from './data/analogStore.js';
-import type { DeviceConfiguration, DriverDiagnostics, TransferProgress } from '../libhakei/device.js';
+import type { CaptureMode, DeviceConfiguration, DriverDiagnostics, TransferProgress } from '../libhakei/device.js';
 import { deviceChannelIndices } from '../libhakei/device.js';
 
 import { MemoryBudget, DEFAULT_CAPTURE_BUDGET_BYTES, type BudgetSnapshot } from './memory.js';
 import { WorkerSampleSource } from './acquisition-source.js';
 import { SharedWorkerSampleStore } from './shared-sample-store.js';
 import { WorkerCaptureStore } from './worker-store.js';
+import type { RollingSampleStore } from './rolling-capture.js';
 export interface SharedCaptureConsumerSource {
   readonly allocatedBytes: number;
   readonly bytesPerSample: 1 | 2 | 3 | 4;
@@ -57,6 +58,7 @@ export interface CaptureDiagnostics {
   };
 }
 export interface AcquisitionResult {
+  mode?: CaptureMode;
   targetSamples: bigint;
   actualSamples: bigint;
   stopReason: 'complete' | 'stopped' | 'budget' | 'allocation-failed' | 'store-limit' | 'error';
@@ -66,7 +68,12 @@ export interface AcquisitionResult {
   buffers: number;
   maxQueued: number;
 }
-export type Store = PlanarSampleStore | RleSampleStore | SharedWorkerSampleStore | WorkerCaptureStore;
+export type Store =
+  | PlanarSampleStore
+  | RleSampleStore
+  | RollingSampleStore
+  | SharedWorkerSampleStore
+  | WorkerCaptureStore;
 export interface AnalogCaptureChannel {
   name: string;
   store: AnalogStore;
@@ -88,6 +95,7 @@ export interface Capture {
 }
 
 export interface CaptureOptions {
+  mode?: CaptureMode;
   budgetBytes?: number;
 
   stopSignal?: AbortSignal;
@@ -112,9 +120,11 @@ function capturePlan(
   if (typeof Worker === 'undefined') throw new UIError('error.worker');
   const chunkSamples =
     options.chunkSamples ??
-    (description.layout === 'packed-logic' && configuration.sampleCount >= 262_144
-      ? description.chunkSamples
-      : Math.min(description.chunkSamples, configuration.sampleCount < 262_144 ? 16_384 : 65_536));
+    (options.mode === 'continuous'
+      ? Math.min(description.chunkSamples, 65536)
+      : description.layout === 'packed-logic' && configuration.sampleCount >= 262_144
+        ? description.chunkSamples
+        : Math.min(description.chunkSamples, configuration.sampleCount < 262_144 ? 16_384 : 65_536));
   if (!Number.isSafeInteger(chunkSamples) || chunkSamples < 1 || chunkSamples > 2 ** 26)
     throw new RangeError('Invalid acquisition block size');
   if (
@@ -184,7 +194,8 @@ export async function deviceCapture(
       plan.chunkSamples,
       buffers,
       sourceSignal,
-      plan.description.layout !== 'packed-logic',
+      plan.description.layout !== 'packed-logic' || options.mode === 'continuous',
+      options.mode,
     );
     source.onTransferProgress = options.onTransferProgress;
     if (source.sharedCapture) {
@@ -213,7 +224,7 @@ export async function deviceCapture(
     if (source && result?.store !== source.captureStore) await source.return();
     releasePipeline();
     for (const free of release.reverse()) free();
-    if (result?.acquisition) result.acquisition.memory = budget.snapshot();
+    if (result?.acquisition && result.store !== source?.captureStore) result.acquisition.memory = budget.snapshot();
   }
 }
 
@@ -260,6 +271,7 @@ async function captureSharedWorkerSource(
     analogChannels: [],
     store,
     acquisition: {
+      mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: 0n,
       stopReason,
@@ -273,6 +285,7 @@ async function captureSharedWorkerSource(
     const samples = source.publishedSamples;
     capture.loadedMs = performance.now() - started;
     capture.acquisition = {
+      mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: samples,
       stopReason,
@@ -310,6 +323,7 @@ async function captureSharedWorkerSource(
     }
     capture.loadedMs = performance.now() - started;
     capture.acquisition = {
+      mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: stored.length,
       stopReason,
@@ -372,6 +386,7 @@ async function captureLocalWorkerSource(
     analogChannels,
     store,
     acquisition: {
+      mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: 0n,
       stopReason,
@@ -390,6 +405,7 @@ async function captureLocalWorkerSource(
     const samples = source.localLengthValue;
     capture.loadedMs = performance.now() - started;
     capture.acquisition = {
+      mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: samples,
       stopReason,
@@ -422,6 +438,7 @@ async function captureLocalWorkerSource(
     }
     capture.loadedMs = performance.now() - started;
     capture.acquisition = {
+      mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: result.length,
       stopReason,

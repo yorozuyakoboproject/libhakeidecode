@@ -43,6 +43,7 @@ export function resultMemory(annotationsBytes = 0, framesBytes = 0, binaryBytes 
 export interface DecodeRuntimeHost {
   postBatch(batch: DecodeBatch): Promise<void>;
   postPaged(frames: number, annotations: number, resultBytes: number): void;
+  retain?(startSample: bigint): { frames: number; annotations: number };
 }
 export interface DecodeRuntime {
   readonly frameCount: number;
@@ -52,6 +53,7 @@ export interface DecodeRuntime {
   push(window: SignalWindow, progress: number): Promise<void>;
   flush(progress: number): Promise<void>;
   reset(): void;
+  retain?(startSample: bigint): void;
   finish(progress: number): Promise<DecodeRuntimeResult>;
   queryAnnotations?(start: bigint, end: bigint, maxResults: number): Annotation[] | null;
   readFrames?(offset: number, count: number): DecodeFrame[] | null;

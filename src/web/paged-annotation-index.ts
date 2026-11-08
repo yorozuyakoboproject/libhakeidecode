@@ -9,6 +9,7 @@ export class PagedAnnotationIndex extends AnnotationIndex {
   private total = 0;
   private revision = 0;
   private cachedKey = '';
+  private cachedOffset = 0n;
   private queryPendingKey = '';
   private queryPending: Promise<void> | null = null;
   constructor(
@@ -47,14 +48,20 @@ export class PagedAnnotationIndex extends AnnotationIndex {
     this.onChange?.();
   }
   override query(startInput: SampleInput, endInput: SampleInput, maxResults = Number.MAX_SAFE_INTEGER): Annotation[] {
+    if (this.cachedOffset !== this.client.sampleOffset) return [];
     const start = samplePosition(startInput),
       end = samplePosition(endInput);
     return this.records.filter((item) => item.es >= start && item.ss <= end).slice(0, maxResults);
   }
   override prepareView(startInput: SampleInput, endInput: SampleInput, maxResults: number): Promise<void> {
+    if (!this.client.available) {
+      this.records = [];
+      return Promise.resolve();
+    }
     const start = samplePosition(startInput),
       end = samplePosition(endInput),
-      key = `${start}:${end}:${maxResults}:${this.revision}`;
+      offset = this.client.sampleOffset,
+      key = `${start}:${end}:${maxResults}:${this.revision}:${offset}`;
     if (key === this.cachedKey) return Promise.resolve();
     if (key === this.queryPendingKey && this.queryPending) return this.queryPending;
     const sequence = ++this.sequence;
@@ -62,11 +69,16 @@ export class PagedAnnotationIndex extends AnnotationIndex {
     const task = this.client
       .queryAnnotations(start, end, maxResults)
       .then((records) => {
-        if (sequence === this.sequence) {
+        if (sequence === this.sequence && offset === this.client.sampleOffset) {
           this.records = records;
           this.cachedKey = key;
+          this.cachedOffset = offset;
           this.onChange?.();
-        }
+        } else if (sequence === this.sequence) this.onChange?.();
+      })
+      .catch((error) => {
+        if (this.client.available) throw error;
+        if (sequence === this.sequence) this.records = [];
       })
       .finally(() => {
         if (this.queryPending === task) {

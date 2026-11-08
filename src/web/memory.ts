@@ -70,6 +70,18 @@ export class MemoryBudget {
     this.buffers.get(buffer)?.();
     this.buffers.delete(buffer);
   }
+  allocateShared(bytes: number, label: string): SharedArrayBuffer {
+    const release = this.reserve(bytes, label);
+    try {
+      const buffer = new SharedArrayBuffer(bytes);
+      this.buffers.set(buffer, release);
+      return buffer;
+    } catch (error) {
+      release();
+      if (error instanceof RangeError) throw new SampleAllocationError(label, error);
+      throw error;
+    }
+  }
   snapshot(): BudgetSnapshot {
     return { limitBytes: this.limitBytes, usedBytes: this.used, peakBytes: this.peak, allocations: this.count };
   }

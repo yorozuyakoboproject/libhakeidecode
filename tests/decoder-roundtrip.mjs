@@ -16,129 +16,153 @@ async function runProtocol(protocol) {
     import(new URL('encoder.js', directory)),
     import(new URL('worker.js', directory)),
   ]);
+  const { createEdgesWindow } = await import(new URL('dist/src/libhakeidecode/signal.js', root));
   let boundaries = 0,
     longCases = 0;
-  for (const testCase of cases()) {
-    const { generate, ...config } = testCase;
-    parentPort.postMessage({ type: 'case', config });
-    let pending = [],
-      compared = 0,
-      expectedCount = 0,
-      payloadBits = 0,
-      waveformBlocks = 0,
-      generatedBlocks = 0;
-    let nextSample = config.startSample;
-    let maximumPending = 0;
-    const runtime = worker.createRuntime({
-      sampleRate: config.sampleRate,
-      channels: Object.keys(config.channels),
-      options: { ...config.options },
-      paged: 'never',
-      host: {
-        async postBatch(batch) {
-          for (const actual of batch.frames) {
-            const expected = pending.shift();
-            if (!expected) throw new Error('frame[' + compared + ']: unexpected frame ' + describe(actual));
-            for (const [key, wanted] of Object.entries(expected)) {
-              const received = actual[key];
-              const matches =
-                wanted !== null && typeof wanted === 'object'
-                  ? typeof received === 'number' &&
-                    Number.isFinite(received) &&
-                    Math.abs(received - wanted.value) <= wanted.tolerance
-                  : received === wanted;
-              if (!matches)
-                throw new Error(
-                  'frame[' +
-                    compared +
-                    '].' +
-                    key +
-                    ': expected ' +
-                    describe(wanted) +
-                    ', received ' +
-                    describe(received) +
-                    '; frame=' +
-                    describe(actual),
-                );
+  for (const inputFormat of ['native', 'edges']) {
+    for (const testCase of cases()) {
+      const { generate, ...config } = testCase;
+      parentPort.postMessage({ type: 'case', config: { ...config, inputFormat } });
+      let pending = [],
+        compared = 0,
+        expectedCount = 0,
+        payloadBits = 0,
+        waveformBlocks = 0,
+        generatedBlocks = 0;
+      let nextSample = config.startSample;
+      let maximumPending = 0;
+      const runtime = worker.createRuntime({
+        sampleRate: config.sampleRate,
+        channels: Object.keys(config.channels),
+        options: { ...config.options },
+        paged: 'never',
+        host: {
+          async postBatch(batch) {
+            for (const actual of batch.frames) {
+              const expected = pending.shift();
+              if (!expected) throw new Error('frame[' + compared + ']: unexpected frame ' + describe(actual));
+              for (const [key, wanted] of Object.entries(expected)) {
+                const received = actual[key];
+                const matches =
+                  wanted !== null && typeof wanted === 'object'
+                    ? typeof received === 'number' &&
+                      Number.isFinite(received) &&
+                      Math.abs(received - wanted.value) <= wanted.tolerance
+                    : received === wanted;
+                if (!matches)
+                  throw new Error(
+                    'frame[' +
+                      compared +
+                      '].' +
+                      key +
+                      ': expected ' +
+                      describe(wanted) +
+                      ', received ' +
+                      describe(received) +
+                      '; frame=' +
+                      describe(actual),
+                  );
+              }
+              compared++;
             }
-            compared++;
+          },
+          postPaged() {
+            throw new Error('Runtime unexpectedly switched to paged output');
+          },
+        },
+      });
+      const encoder = createEncoder(testCase);
+      const previousLevels = new Map();
+      async function push(windows) {
+        for (const window of windows) {
+          if (window.startSample !== nextSample || window.length < 1 || window.sampleRate !== config.sampleRate)
+            throw new Error('Noncontiguous or invalid waveform block at ' + nextSample);
+          nextSample = window.endSample;
+          waveformBlocks++;
+          let input = window;
+          if (inputFormat === 'edges') {
+            const channels = {};
+            for (const id of window.channelIds) {
+              const view = window.channel(id),
+                initial = view.at(0),
+                edges = [];
+              if (previousLevels.has(id) && previousLevels.get(id) !== initial) edges.push(window.startSample);
+              for (let cursor = 1; cursor < window.length;) {
+                const edge = view.nextEdge(cursor);
+                if (edge >= window.length) break;
+                edges.push(window.startSample + BigInt(edge));
+                cursor = edge + 1;
+              }
+              previousLevels.set(id, view.at(window.length - 1));
+              channels[id] = { initial, edges };
+            }
+            input = createEdgesWindow(window.startSample, window.endSample, window.sampleRate, channels);
           }
-        },
-        postPaged() {
-          throw new Error('Runtime unexpectedly switched to paged output');
-        },
-      },
-    });
-    const encoder = createEncoder(testCase);
-    async function push(windows) {
-      for (const window of windows) {
-        if (window.startSample !== nextSample || window.length < 1 || window.sampleRate !== config.sampleRate)
-          throw new Error('Noncontiguous or invalid waveform block at ' + nextSample);
-        nextSample = window.endSample;
-        waveformBlocks++;
-        await runtime.push(window, 0);
-        await runtime.flush(0);
+          await runtime.push(input, 0);
+          await runtime.flush(0);
+        }
       }
-    }
-    for (const block of generate()) {
+      for (const block of generate()) {
+        if (
+          !Number.isSafeInteger(block.payloadBits) ||
+          block.payloadBits <= 0 ||
+          !block.data.length ||
+          !block.expected.length
+        )
+          throw new Error('Generator produced an empty block or invalid payload bit count');
+        pending.push(...block.expected);
+        expectedCount += block.expected.length;
+        payloadBits += block.payloadBits;
+        maximumPending = Math.max(maximumPending, pending.length);
+        if (maximumPending > 4096)
+          throw new Error('Expected frames are accumulating without bounded streaming progress');
+        generatedBlocks++;
+        await push(encoder.push(block.data));
+      }
+      await push(encoder.finish());
+      const result = await runtime.finish(1);
+      if (pending.length) throw new Error('frame[' + compared + ']: missing frame; expected ' + describe(pending[0]));
       if (
-        !Number.isSafeInteger(block.payloadBits) ||
-        block.payloadBits <= 0 ||
-        !block.data.length ||
-        !block.expected.length
-      )
-        throw new Error('Generator produced an empty block or invalid payload bit count');
-      pending.push(...block.expected);
-      expectedCount += block.expected.length;
-      payloadBits += block.payloadBits;
-      maximumPending = Math.max(maximumPending, pending.length);
-      if (maximumPending > 4096) throw new Error('Expected frames are accumulating without bounded streaming progress');
-      generatedBlocks++;
-      await push(encoder.push(block.data));
-    }
-    await push(encoder.finish());
-    const result = await runtime.finish(1);
-    if (pending.length) throw new Error('frame[' + compared + ']: missing frame; expected ' + describe(pending[0]));
-    if (
-      !expectedCount ||
-      result.frames !== expectedCount ||
-      compared !== expectedCount ||
-      result.truncated ||
-      result.binaryTruncated
-    )
-      throw new Error(
-        'Frame count or completeness differs: expected=' +
-          expectedCount +
-          ', compared=' +
-          compared +
-          ', result=' +
-          describe({ frames: result.frames, truncated: result.truncated, binaryTruncated: result.binaryTruncated }),
-      );
-    if (config.kind === 'long') {
-      if (
-        payloadBits < MIN_PAYLOAD_BITS ||
-        payloadBits < config.minimumPayloadBits ||
-        waveformBlocks < 2 ||
-        generatedBlocks < 2
+        !expectedCount ||
+        result.frames !== expectedCount ||
+        compared !== expectedCount ||
+        result.truncated ||
+        result.binaryTruncated
       )
         throw new Error(
-          'Long case requires at least ' +
-            Math.max(MIN_PAYLOAD_BITS, config.minimumPayloadBits) +
-            ' payload bits across multiple data and waveform blocks',
+          'Frame count or completeness differs: expected=' +
+            expectedCount +
+            ', compared=' +
+            compared +
+            ', result=' +
+            describe({ frames: result.frames, truncated: result.truncated, binaryTruncated: result.binaryTruncated }),
         );
-      longCases++;
-    } else if (config.kind === 'boundary') boundaries++;
-    else throw new Error('Unknown roundtrip case kind: ' + config.kind);
-    parentPort.postMessage({
-      type: 'pass',
-      name: config.name,
-      payloadBits,
-      frames: compared,
-      generatedBlocks,
-      waveformBlocks,
-      maximumPending,
-    });
-    pending = [];
+      if (config.kind === 'long') {
+        if (
+          payloadBits < MIN_PAYLOAD_BITS ||
+          payloadBits < config.minimumPayloadBits ||
+          waveformBlocks < 2 ||
+          generatedBlocks < 2
+        )
+          throw new Error(
+            'Long case requires at least ' +
+              Math.max(MIN_PAYLOAD_BITS, config.minimumPayloadBits) +
+              ' payload bits across multiple data and waveform blocks',
+          );
+        longCases++;
+      } else if (config.kind === 'boundary') boundaries++;
+      else throw new Error('Unknown roundtrip case kind: ' + config.kind);
+      parentPort.postMessage({
+        type: 'pass',
+        name: config.name + '/' + inputFormat,
+        payloadBits,
+        frames: compared,
+        generatedBlocks,
+        waveformBlocks,
+        maximumPending,
+      });
+      pending = [];
+    }
   }
   if (!boundaries || !longCases) throw new Error('Protocol requires both fixed boundary and seeded long cases');
   parentPort.postMessage({ type: 'done' });

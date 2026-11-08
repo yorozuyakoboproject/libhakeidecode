@@ -377,6 +377,7 @@ export class WaveformRenderer {
 
   updateCapture(capture: Capture): void {
     this.capture = capture;
+    if (capture.acquisition?.mode === 'continuous') this.hoverResult = null;
     if (this.end > this.viewLength(capture)) this.applyViewport(this.start, this.end);
     else this.schedule();
   }

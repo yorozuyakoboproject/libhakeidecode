@@ -23,6 +23,7 @@ class PWMRuntime implements DecodeRuntime {
   private readonly pagedAutomatic: boolean;
   private paged = false;
   private progress = 0;
+  private retained = false;
   private readonly binaries = new BinaryStore();
   constructor(context: DecodeRuntimeContext) {
     this.host = context.host;
@@ -58,12 +59,17 @@ class PWMRuntime implements DecodeRuntime {
   reset(): void {
     this.engine.reset();
   }
+  retain(startSample: bigint): void {
+    this.retained = true;
+    const removed = this.store.discardBefore(startSample);
+    if (removed) this.binaries.discardPrefix('raw', removed);
+  }
   async finish(progress: number): Promise<DecodeRuntimeResult> {
     this.progress = progress;
     await this.engine.flush();
     const binaries = this.binaries.finish(),
-      averageDutyCycle = this.engine.averageDuty,
-      frames = this.engine.frames,
+      averageDutyCycle = this.retained ? this.store.averageDuty : this.engine.averageDuty,
+      frames = this.retained ? this.store.length : this.engine.frames,
       annotations = frames * 3;
     binaries.raw ??= new Uint8Array(0);
     if (!this.paged) this.store.clear();

@@ -25,6 +25,7 @@ const emptyPage = (base: bigint): AnnotationPage => ({
 export class AnnotationIndex {
   private pages: AnnotationPage[] = [];
   private count = 0;
+  private head = 0;
   private pending: Annotation[] = [];
   private ordered = true;
   private lastSs = -1n;
@@ -32,7 +33,9 @@ export class AnnotationIndex {
   private maximumEnd = -1n;
   private pendingBytes = 0;
   private textBytes = 0;
-  private readonly textPool: (readonly string[])[] = [];
+  private readonly textPool: (readonly string[] | undefined)[] = [];
+  private readonly textUses: number[] = [];
+  private readonly freeTextIds: number[] = [];
   private readonly textIds = new Map<string, number>();
 
   get reservedBytes(): number {
@@ -54,7 +57,7 @@ export class AnnotationIndex {
     );
   }
   get length(): number {
-    return this.count + this.pending.length;
+    return this.count - this.head + this.pending.length;
   }
 
   append(records: Annotation[]): void {
@@ -74,7 +77,7 @@ export class AnnotationIndex {
 
   clear(): void {
     this.pages = [];
-    this.count = 0;
+    this.count = this.head = 0;
     this.pending = [];
     this.ordered = true;
     this.lastSs = -1n;
@@ -84,8 +87,31 @@ export class AnnotationIndex {
     this.textBytes = 0;
     this.textPool.length = 0;
     this.textIds.clear();
+    this.textUses.length = this.freeTextIds.length = 0;
   }
 
+  discardBefore(start: bigint): void {
+    this.finalize();
+    const after = this.lowerBoundEnd(start + 1n);
+    for (let index = this.head; index < after; index++) {
+      const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
+        id = page.textIds[index % PAGE_SIZE]!;
+      if (--this.textUses[id]! === 0) {
+        const texts = this.textPool[id]!,
+          key = JSON.stringify(texts);
+        this.textIds.delete(key);
+        this.textBytes -= key.length * 2 + texts.length * 8 + texts.reduce((bytes, text) => bytes + text.length * 2, 0);
+        this.textPool[id] = undefined;
+        this.freeTextIds.push(id);
+      }
+    }
+    this.head = after;
+    while (this.head >= PAGE_SIZE) {
+      this.pages.shift();
+      this.head -= PAGE_SIZE;
+      this.count -= PAGE_SIZE;
+    }
+  }
   async prepareView(_start: SampleInput, _end: SampleInput, _maxResults: number): Promise<void> {}
 
   query(startInput: SampleInput, endInput: SampleInput, maxResults = Number.MAX_SAFE_INTEGER): Annotation[] {
@@ -145,9 +171,13 @@ export class AnnotationIndex {
   private textId(texts: readonly string[]): number {
     const key = JSON.stringify(texts),
       existing = this.textIds.get(key);
-    if (existing !== undefined) return existing;
-    const id = this.textPool.length;
-    this.textPool.push(texts);
+    if (existing !== undefined) {
+      this.textUses[existing] = this.textUses[existing]! + 1;
+      return existing;
+    }
+    const id = this.freeTextIds.pop() ?? this.textPool.length;
+    this.textPool[id] = texts;
+    this.textUses[id] = 1;
     this.textIds.set(key, id);
     this.textBytes += key.length * 2 + texts.length * 8 + texts.reduce((bytes, text) => bytes + text.length * 2, 0);
     return id;
@@ -173,7 +203,7 @@ export class AnnotationIndex {
   }
 
   private lowerBoundEnd(value: bigint): number {
-    let low = 0,
+    let low = this.head,
       high = this.count;
     while (low < high) {
       const mid = Math.floor((low + high) / 2);
@@ -184,7 +214,7 @@ export class AnnotationIndex {
   }
 
   private upperBoundStart(value: bigint): number {
-    let low = 0,
+    let low = this.head,
       high = this.count;
     while (low < high) {
       const mid = Math.floor((low + high) / 2);
@@ -196,10 +226,13 @@ export class AnnotationIndex {
 
   private rebuildOrdered(): void {
     const records: Annotation[] = [];
-    for (let index = 0; index < this.count; index++) records.push(this.recordAt(index));
+    for (let index = this.head; index < this.count; index++) records.push(this.recordAt(index));
     records.sort((a, b) => compareSamples(a.ss, b.ss) || compareSamples(a.es, b.es));
     this.pages = [];
-    this.count = 0;
+    this.count = this.head = 0;
+    this.textPool.length = this.textUses.length = this.freeTextIds.length = 0;
+    this.textIds.clear();
+    this.textBytes = 0;
     this.maximumEnd = -1n;
     this.ordered = true;
     this.lastSs = -1n;

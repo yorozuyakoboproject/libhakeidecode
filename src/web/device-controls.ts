@@ -4,6 +4,7 @@ import {
   type DeviceCapabilities,
   type DeviceConfiguration,
   type NumericCapability,
+  type CaptureMode,
 } from '../libhakei/device.js';
 import type { DeviceControl } from './device-protocol.js';
 import { formatDuration, formatRate, formatSampleCount } from '../libhakei/units.js';
@@ -24,6 +25,7 @@ export class DeviceControls {
   private logicSelection: number[] = [];
   private analogSelection: number[] = [];
   private connecting = false;
+  private updatingTransport = false;
   private configuring = false;
   private configurationSequence = 0;
   private configurationKey = '';
@@ -37,6 +39,10 @@ export class DeviceControls {
     readonly devices: readonly DeviceControl[],
   ) {
     const select = this.control<HTMLSelectElement>('device-select');
+    const mode = this.control<HTMLSelectElement>('capture-mode');
+    try {
+      if (localStorage.getItem('hakei.captureMode') === 'continuous') mode.value = 'continuous';
+    } catch {}
     for (const device of devices) {
       const option = document.createElement('option');
       option.value = device.descriptor.id;
@@ -75,6 +81,12 @@ export class DeviceControls {
       void this.restoreAuthorizedDevices();
     });
     form.addEventListener('change', (event) => {
+      if (event.target === mode) {
+        try {
+          localStorage.setItem('hakei.captureMode', mode.value);
+        } catch {}
+        return;
+      }
       if (event.target === select || (event.target as HTMLElement).id === 'device-transport' || this.busy) return;
       if ((event.target as HTMLElement).id.startsWith('device-option-')) this.rememberOptions();
       if ((event.target as HTMLElement).id === 'capture-duration')
@@ -109,6 +121,9 @@ export class DeviceControls {
       !this.configurationError &&
       this.device.connected !== false
     );
+  }
+  get captureMode(): CaptureMode {
+    return this.control('capture-mode').value === 'continuous' ? 'continuous' : 'single';
   }
   channelCapacity(kind: 'logic' | 'analog'): number {
     const inputs = kind === 'analog' ? this.device.descriptor.analogInputs : this.device.descriptor.logicInputs;
@@ -392,6 +407,7 @@ export class DeviceControls {
       disconnected || !device.descriptor.options.some((option) => !option.hidden);
     row.hidden = device.connected === undefined && !this.configuring && !this.configurationError;
     this.control<HTMLSelectElement>('device-select').disabled = this.busy || this.connecting;
+    this.control<HTMLSelectElement>('capture-mode').disabled = this.busy || this.connecting;
     const connect = row.querySelector<HTMLButtonElement>('#connect-device')!,
       disconnect = row.querySelector<HTMLButtonElement>('#disconnect-device')!;
     connect.hidden = disconnect.hidden = device.connected === undefined;
@@ -421,7 +437,7 @@ export class DeviceControls {
   }
   private async updateTransport(mode?: string): Promise<void> {
     if (this.busy || this.configuring) return;
-    if (this.connecting) {
+    if (this.connecting || this.updatingTransport) {
       if (mode !== undefined) this.pendingTransport = mode;
       return;
     }
@@ -438,11 +454,15 @@ export class DeviceControls {
       );
     const previousSettings = settingsKey();
     const connected = device.connected;
-    this.connecting = true;
-    this.refreshConnection();
-    this.onConnectionChange?.();
+    this.updatingTransport = true;
+    if (mode !== undefined) {
+      this.connecting = true;
+      this.refreshConnection();
+      this.onConnectionChange?.();
+    }
     try {
       await device.setTransport(mode);
+      if (device !== this.device) return;
       this.connectionError = null;
       if (connected && device.connected && previousSettings === settingsKey()) return;
       if (device === this.device) {
@@ -453,7 +473,8 @@ export class DeviceControls {
     } catch (error) {
       if (device === this.device) this.connectionError = error;
     } finally {
-      this.connecting = false;
+      this.updatingTransport = false;
+      if (mode !== undefined) this.connecting = false;
       this.refreshConnection();
       this.onConnectionChange?.();
       const pending = this.pendingTransport;

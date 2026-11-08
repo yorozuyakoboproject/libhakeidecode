@@ -21,6 +21,7 @@ export function parseAcquisitionResult(value: unknown, length: bigint): Acquisit
   };
   if (
     !result ||
+    (result.mode !== undefined && !['single', 'continuous'].includes(result.mode)) ||
     result.targetSamples < length ||
     result.actualSamples !== length ||
     !['complete', 'stopped', 'budget', 'allocation-failed', 'store-limit', 'error'].includes(result.stopReason) ||
@@ -42,6 +43,7 @@ export function parseAcquisitionResult(value: unknown, length: bigint): Acquisit
   )
     throw new Error('Invalid acquisition metadata');
   return {
+    ...(result.mode === undefined ? {} : { mode: result.mode }),
     targetSamples: result.targetSamples,
     actualSamples: result.actualSamples,
     stopReason: result.stopReason,

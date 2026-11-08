@@ -124,7 +124,6 @@ export class AnalyzerApp {
   state: 'ready' | 'loading' | 'decoding' | 'done' | 'cancelled' | 'error' = 'ready';
   readonly renderer = new WaveformRenderer(element('waveform'), element('overview'), element('time-axis'));
   private version = 0;
-  private decodeVersion = 0;
   private nextId = 0;
   private mappingChannels: readonly number[] = [];
   private mappingDevice = '';
@@ -135,12 +134,12 @@ export class AnalyzerApp {
   );
   readonly signalControls = new SignalControls(this.deviceControls);
   private captureAbort: AbortController | null = null;
+  private decodeTimer: ReturnType<typeof setTimeout> | null = null;
   private captureStop: AbortController | null = null;
   private acquisitionMemory: BudgetSnapshot | null = null;
   private transferProgress: TransferProgress | null = null;
   private importAbort: AbortController | null = null;
   private saveAbort: AbortController | null = null;
-  private decodeTimer: ReturnType<typeof setTimeout> | null = null;
   private firstRunCapturePending = false;
   private statusMessage: { key: MessageKey; params: MessageParams } = { key: 'status.ready', params: {} };
   private displayedMessage: string | UIError | { key: MessageKey; params?: MessageParams } = '';
@@ -626,6 +625,9 @@ export class AnalyzerApp {
   stopCapture(): void {
     if (!this.captureStop || this.captureStop.signal.aborted) return;
     this.captureStop.abort();
+    if (this.capture?.acquisition?.mode === 'continuous') {
+      this.cancelDecodeOnly(true);
+    }
     this.setStatus('loading', 'device.stopping');
   }
   async startCapture(): Promise<void> {
@@ -662,6 +664,7 @@ export class AnalyzerApp {
     };
     const device = this.deviceControls.device,
       configuration = this.deviceControls.configuration(),
+      mode = this.deviceControls.captureMode,
       deviceNameKey = `driver.${device.descriptor.id}.name`,
       nameKey = hasMessage(deviceNameKey) ? (deviceNameKey as MessageKey) : undefined;
     this.clearCaptureForAcquisition();
@@ -680,6 +683,7 @@ export class AnalyzerApp {
     this.updateMemoryUsage();
     try {
       const capture = await deviceCapture(device, configuration, abort.signal, {
+        mode,
         stopSignal: stop.signal,
         onTransferProgress: (progress) => {
           if (token !== this.version) return;
@@ -691,7 +695,7 @@ export class AnalyzerApp {
           this.acquisitionMemory = memory;
           this.updateMemoryUsage();
           if (!stop.signal.aborted && this.state !== 'decoding')
-            this.setStatus('loading', 'capture.progress', {
+            this.setStatus('loading', mode === 'continuous' ? 'capture.continuousProgress' : 'capture.progress', {
               duration: formatDuration(Number(samples) / configuration.sampleRate),
               target: formatDuration(Number(configuration.sampleCount) / configuration.sampleRate),
               memory: (memory.usedBytes / 1048576).toFixed(2),
@@ -1048,6 +1052,12 @@ export class AnalyzerApp {
       return;
     this.commitForm();
     if (this.captureAbort) {
+      if (this.selectedProtocol.liveSession) {
+        this.selectedProtocol.client.cancel();
+        this.selectedProtocol.liveSession = undefined;
+        this.selectedProtocol.state = 'ready';
+      }
+      if (this.selectedProtocol.state === 'error') this.selectedProtocol.state = 'ready';
       this.scheduleLiveDecode();
       return;
     }
@@ -1064,10 +1074,17 @@ export class AnalyzerApp {
   }
   private scheduleLiveDecode(): void {
     const capture = this.capture;
-    if (!this.captureAbort || !capture || (!capture.store.length && !capture.sharedSource?.publishedSamples)) return;
+    if (
+      !this.captureAbort ||
+      this.captureStop?.signal.aborted ||
+      !capture ||
+      (!capture.store.length && !capture.sharedSource?.publishedSamples)
+    )
+      return;
     let started = false;
     for (const protocol of this.protocols) {
       if (!this.hasInput(protocol)) continue;
+      if (capture.acquisition?.mode === 'continuous' && protocol.state === 'error') continue;
       if (!protocol.liveSession) {
         this.clearProtocol(protocol);
         protocol.state = 'decoding';
@@ -1209,19 +1226,19 @@ export class AnalyzerApp {
       this.showMessage(error instanceof UIError ? error : errorLabel(error), true);
     }
   }
-  private cancelDecodeOnly(): void {
-    ++this.decodeVersion;
+  private cancelDecodeOnly(preserveLive = false): void {
+    if (this.decodeTimer) clearTimeout(this.decodeTimer);
+    this.decodeTimer = null;
     for (const protocol of this.protocols) {
+      if (preserveLive && protocol.liveSession) continue;
       protocol.client.cancel();
       protocol.liveSession = undefined;
       if (protocol.state === 'decoding') protocol.state = 'cancelled';
     }
   }
   private cancelDecodes(target?: ProtocolInstance): void {
-    if (this.decodeTimer) {
-      clearTimeout(this.decodeTimer);
-      this.decodeTimer = null;
-    }
+    if (this.decodeTimer) clearTimeout(this.decodeTimer);
+    this.decodeTimer = null;
     ++this.version;
     for (const protocol of this.protocols) {
       if (protocol !== target && protocol.state !== 'decoding' && !protocol.liveSession) continue;
@@ -1230,15 +1247,10 @@ export class AnalyzerApp {
       if (protocol.state === 'decoding') protocol.state = 'cancelled';
     }
   }
-  private async runProtocols(
-    protocols: readonly ProtocolInstance[],
-    live = false,
-    sampleLimit?: bigint,
-  ): Promise<void> {
-    if (!this.capture || (!live && this.state === 'loading')) return;
-    if (live) this.cancelDecodeOnly();
-    else this.cancelDecodes();
-    const token = live ? ++this.decodeVersion : this.version,
+  private async runProtocols(protocols: readonly ProtocolInstance[]): Promise<void> {
+    if (!this.capture || this.state === 'loading') return;
+    this.cancelDecodes();
+    const token = this.version,
       capture = this.capture;
     this.showMessage('');
     const pending = [
@@ -1254,7 +1266,7 @@ export class AnalyzerApp {
     this.setStatus('decoding', 'status.decoding');
     let failed = false;
     for (const protocol of pending) {
-      if (token !== (live ? this.decodeVersion : this.version)) return;
+      if (token !== this.version) return;
       this.clearProtocol(protocol);
       protocol.state = 'decoding';
       this.updateDecodeSummary();
@@ -1265,7 +1277,7 @@ export class AnalyzerApp {
           this.readOptions(protocol),
           mapping,
           protocol.decoder,
-          live ? sampleLimit : undefined,
+          undefined,
           (progress, frames, annotations, resultBytes) => {
             protocol.progress = progress;
             protocol.frameCount = frames;
@@ -1277,7 +1289,7 @@ export class AnalyzerApp {
             if (protocol === this.selectedProtocol) this.renderer.schedule();
           },
         );
-        if (token !== (live ? this.decodeVersion : this.version)) return;
+        if (token !== this.version) return;
         protocol.result = result;
         protocol.frameCount = result.stats.frames;
         protocol.annotationCount = result.stats.annotations;
@@ -1286,7 +1298,7 @@ export class AnalyzerApp {
         protocol.progress = 1;
         if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
       } catch (error) {
-        if (token !== (live ? this.decodeVersion : this.version)) return;
+        if (token !== this.version) return;
         protocol.state = 'error';
         protocol.error = error instanceof UIError ? error : errorLabel(error);
         failed = true;
@@ -1295,8 +1307,7 @@ export class AnalyzerApp {
       this.updateDecodeSummary();
       this.renderer.schedule();
     }
-    if (token !== (live ? this.decodeVersion : this.version)) return;
-    if (live && this.captureAbort) return;
+    if (token !== this.version) return;
     const elapsed = pending.reduce((sum, p) => sum + (p.result?.stats.elapsedMs ?? 0), 0),
       samples = pending.reduce((sum, p) => sum + (p.result?.stats.samples ?? 0n), 0n);
     this.setStatus(failed ? 'error' : 'done', failed ? 'status.stopped' : 'status.done', {
@@ -1308,12 +1319,7 @@ export class AnalyzerApp {
   }
   cancelTask(update = true): void {
     const cancellingCapture = !!this.captureAbort;
-    if (this.decodeTimer) {
-      clearTimeout(this.decodeTimer);
-      this.decodeTimer = null;
-    }
     ++this.version;
-    ++this.decodeVersion;
     for (const protocol of this.protocols) {
       protocol.client.cancel();
       protocol.liveSession = undefined;
@@ -1459,7 +1465,7 @@ export class AnalyzerApp {
     this.signalControls.setBusy(!!this.captureAbort);
     for (const check of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
       check.disabled = !!this.captureAbort;
-    element<HTMLButtonElement>('save-capture').disabled = !this.capture || !!this.saveAbort;
+    element<HTMLButtonElement>('save-capture').disabled = !this.capture?.store.length || !!this.saveAbort;
     element<HTMLButtonElement>('cancel').disabled =
       this.state !== 'decoding' && this.state !== 'loading' && !this.saveAbort;
   }
@@ -1595,13 +1601,18 @@ export class AnalyzerApp {
       shared?.publishedSamples && shared.publishedSamples > storedSamples ? shared.publishedSamples : storedSamples;
     const target = this.capture?.acquisition?.targetSamples ?? samples;
     const progress = target > 0n ? Number((samples * 10000n) / target) / 100 : 0;
-    element('capture-memory-usage').textContent = t('capture.memoryUsage', {
-      used: (bytes / 1048576).toFixed(2),
-      duration: formatDuration(
-        Math.max(this.capturedDuration(), Number(samples) / (this.capture?.store.samplerate ?? 1)),
-      ),
-      progress: progress.toFixed(1),
-    });
+    element('capture-memory-usage').textContent = t(
+      this.captureAbort && this.capture?.acquisition?.mode === 'continuous'
+        ? 'capture.continuousMemory'
+        : 'capture.memoryUsage',
+      {
+        used: (bytes / 1048576).toFixed(2),
+        duration: formatDuration(
+          Math.max(this.capturedDuration(), Number(samples) / (this.capture?.store.samplerate ?? 1)),
+        ),
+        progress: progress.toFixed(1),
+      },
+    );
   }
   private showCaptureOutcome(): void {
     const outcome = this.capture?.acquisition;

@@ -1,5 +1,10 @@
 import { componentFailure } from '../components.js';
-import { createEdgeWindow, createPackedWindow, createValuesWindow } from '../libhakeidecode/signal.js';
+import {
+  createEdgeWindow,
+  createEdgesWindow,
+  createPackedWindow,
+  createValuesWindow,
+} from '../libhakeidecode/signal.js';
 import { compareSamples } from '../libhakei/sample-index.js';
 import { decoderWorkerDefinition } from '../decoders/workers.js';
 import { createDecodeRuntime } from './decode-runtime.js';
@@ -35,6 +40,8 @@ interface Session {
   decoder: DecoderId;
   sampleRate: number;
   length: bigint;
+  rolling: boolean;
+  retainedStart: bigint;
   processed: bigint;
   decodedSamples: bigint;
   started: number;
@@ -123,7 +130,7 @@ function post(s: Session, message: WorkerDecodeMessage, transfer?: Transferable[
 }
 function maybePostProgress(s: Session): void {
   const now = performance.now();
-  if (now - s.lastProgressPost < 100 && s.processed < s.length) return;
+  if (now - s.lastProgressPost < 100 && (s.rolling || s.processed < s.length)) return;
   s.lastProgressPost = now;
   post(s, {
     type: 'decode-progress',
@@ -132,6 +139,7 @@ function maybePostProgress(s: Session): void {
     annotations: s.runtime.annotationCount,
     samples: s.decodedSamples,
     memory: s.results.memory(s.runtime.memory()),
+    ...(s.rolling ? { processedSample: s.processed, availableEnd: s.length, availableStart: s.retainedStart } : {}),
   });
 }
 function start(request: DecodeStartRequest): void {
@@ -142,7 +150,9 @@ function start(request: DecodeStartRequest): void {
     decoder: request.decoder,
     sampleRate: request.sampleRate,
     length: request.length,
-    processed: 0n,
+    rolling: request.rolling ?? false,
+    retainedStart: request.startSample ?? 0n,
+    processed: request.startSample ?? 0n,
     decodedSamples: 0n,
     started: performance.now(),
     channels: request.channels,
@@ -180,7 +190,9 @@ function start(request: DecodeStartRequest): void {
       return Promise.resolve();
     },
     postPaged: () => {},
+    retain: (start) => s.results.discardBefore(start),
   });
+  if (s.rolling && !s.runtime.retain) throw new Error('Decoder does not support a rolling result window');
 }
 function queryAnnotations(request: DecodeQueryAnnotationsRequest): void {
   const s = session;
@@ -192,11 +204,17 @@ function queryAnnotations(request: DecodeQueryAnnotationsRequest): void {
 }
 function readFrames(request: DecodeReadFramesRequest): void {
   const s = session;
-  const frames =
-    s?.runtime.readFrames?.(request.offset, request.count) ??
-    s?.results.readFrames(request.offset, request.count) ??
-    [];
+  const frames = s ? readFrameRange(s, request.offset, request.count) : [];
   scope.postMessage({ type: 'decode-read-frames-result', requestId: request.requestId, frames });
+}
+function readFrameRange(s: Session, offset: number, count: number) {
+  if (s.rolling) {
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(count) || offset < 0 || count < 0)
+      throw new RangeError('Invalid frame range');
+    offset = Math.min(offset, s.runtime.frameCount);
+    count = Math.min(count, s.runtime.frameCount - offset);
+  }
+  return s.runtime.readFrames?.(offset, count) ?? s.results.readFrames(offset, count);
 }
 function readCsv(request: DecodeReadCsvRequest): void {
   const s = session;
@@ -205,9 +223,15 @@ function readCsv(request: DecodeReadCsvRequest): void {
     return;
   }
   const definition = decoderWorkerDefinition(s.decoder);
-  const frames =
-    s.runtime.readFrames?.(request.offset, request.count) ?? s.results.readFrames(request.offset, request.count);
-  const rows = frames.map((frame) => definition.csvRow(frame, request.sampleRate, request.triggerSample));
+  const frames = readFrameRange(s, request.offset, request.count);
+  const origin = request.sampleOffset ?? 0n;
+  const rows = frames.map((frame) =>
+    definition.csvRow(
+      { ...frame, ss: frame.ss - origin, es: frame.es - origin },
+      request.sampleRate,
+      request.triggerSample,
+    ),
+  );
   const csv = (request.includeHeader ? definition.csvHeader + '\r\n' : '') + rows.join('\r\n');
   scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv });
 }
@@ -353,22 +377,43 @@ function requestWorkerRead(
   });
 }
 async function consumeWorkerReader(s: Session, edgeInput: string | undefined, edgeLimit: number): Promise<void> {
-  let cursor = 0n;
+  let cursor = s.processed;
   while (true) {
-    const limit = s.finishRequested && s.finalLength < s.length ? s.finalLength : s.length;
-    if (cursor >= limit) {
+    const limit = s.finishRequested ? s.finalLength : s.length;
+    if (cursor >= limit && (!s.rolling || s.finishRequested)) {
       if (s.finishRequested) break;
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
       continue;
     }
-    const end = cursor + 1_048_576n < limit ? cursor + 1_048_576n : limit;
+    const end =
+      s.rolling && !s.finishRequested ? cursor + 1_048_576n : cursor + 1_048_576n < limit ? cursor + 1_048_576n : limit;
     const response = await requestWorkerRead(s, cursor, end, edgeInput, edgeLimit);
+    if (s.rolling) {
+      if (response.availableEnd !== undefined) s.length = response.availableEnd;
+      s.retainedStart = response.availableStart ?? 0n;
+      s.runtime.retain?.(s.retainedStart);
+    }
     if (response.kind === 'wait') {
       if (s.finishRequested && response.availableEnd <= cursor) break;
+      maybePostProgress(s);
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
       continue;
     }
-    if (response.kind === 'channels') {
+    if (s.rolling && s.decodedSamples === 0n) s.processed = response.startSample;
+    if (response.kind === 'edges') {
+      if (response.startSample !== s.processed || response.endSample > s.length)
+        throw new Error('Decode stream is not contiguous');
+      const started = performance.now(),
+        value = Number((response.endSample * 1000n) / (s.length || 1n)) / 1000;
+      await s.runtime.push(
+        createEdgesWindow(response.startSample, response.endSample, response.sampleRate, response.channels),
+        value,
+      );
+      await s.runtime.flush(value);
+      s.stages.decoderPushMs += performance.now() - started;
+      s.decodedSamples += response.endSample - response.startSample;
+      s.processed = response.endSample;
+    } else if (response.kind === 'channels') {
       await pushChunk(s, {
         type: 'decode-chunk',
         startSample: response.startSample,
@@ -388,6 +433,7 @@ async function consumeWorkerReader(s: Session, edgeInput: string | undefined, ed
       );
     }
     cursor = response.endSample;
+    if (s.rolling) s.runtime.retain?.(s.retainedStart);
     maybePostProgress(s);
   }
 }
@@ -508,11 +554,13 @@ async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest, edgeIn
       throw new Error('Invalid edge chunk part');
     if (part.startSample > cursor) resetAtGap(s);
     const value = Number((part.endSample * 1000n) / (s.length || 1n)) / 1000;
+    const started = performance.now();
     await s.runtime.push(
       createEdgeWindow(part.startSample, part.endSample, s.sampleRate, part.initial, part.edges, edgeInput),
       value,
     );
     await s.runtime.flush(value);
+    s.stages.decoderPushMs += performance.now() - started;
     s.decodedSamples += part.endSample - part.startSample;
     cursor = part.endSample;
   }
@@ -522,11 +570,17 @@ async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest, edgeIn
 }
 async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
   s.finishRequested = true;
-  s.finalLength = request.length !== undefined && request.length < s.length ? request.length : s.length;
+  s.finalLength = s.rolling
+    ? (request.length ?? s.length)
+    : request.length !== undefined && request.length < s.length
+      ? request.length
+      : s.length;
+  if (s.rolling && s.finalLength > s.length) s.length = s.finalLength;
   if (s.sharedTask) await s.sharedTask;
   const output: DecodeRuntimeResult = await s.runtime.finish(1);
   s.results.finish(output.binaries);
   const stages = { ...s.stages };
+  s.lastProgressPost = -Infinity;
   maybePostProgress(s);
   s.completed = true;
   const { binaries, ...details } = output;
@@ -544,6 +598,7 @@ async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
       binaryTruncated: output.binaryTruncated,
       memory: s.results.memory(s.runtime.memory()),
       stages,
+      ...(s.rolling ? { processedSample: s.processed, availableEnd: s.length, availableStart: s.retainedStart } : {}),
     },
     result: { ...details, binarySizes, previews },
   });

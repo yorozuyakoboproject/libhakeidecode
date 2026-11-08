@@ -6,7 +6,7 @@ export class PendingAnalogStore extends AnalogSampleStore {}
 
 export class TimedAnalogStore implements AnalogStore {
   constructor(
-    readonly native: AnalogSampleStore,
+    readonly native: AnalogStore,
     readonly timing: AnalogTiming,
     readonly samplerate: number,
     readonly limit: bigint,

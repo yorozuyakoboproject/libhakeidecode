@@ -3,7 +3,7 @@ import { generateComponents } from './scripts/generate-components.mjs';
 
 const server = {
   host: '127.0.0.1',
-  port: Number(process.env.PORT ?? 4233),
+  port: Number(process.env.PORT ?? 5233),
   strictPort: true,
   watch: { ignored: ['**/.cache/**'] },
   headers: {
