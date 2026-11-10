@@ -24,11 +24,11 @@ export const messages = {
     'driver.ch32h417.error.encoding': 'MCU encoding failed or exceeded its processing deadline; capture stopped.',
     'driver.ch32h417.error.inputSequence': 'Input sequence error; capture stopped.',
     'driver.ch32h417.error.dmaTransfer': 'Invalid DMA sample block length; capture stopped.',
+    'driver.ch32h417.error.resourceFull':
+      'The device resource registry is full. Update the firmware or disable unused peripherals before capture.',
 
     'driver.ch32h417.digitalRate': 'Digital sample rate',
     'driver.ch32h417.timebase': 'Timeline clock (Hz, not ADC rate)',
-    'driver.ch32h417.option.hsadcHz': 'HSADC sampling rate (Hz)',
-    'driver.ch32h417.option.adc1Hz': 'ADC1 rate per channel (Hz)',
     'driver.ch32h417.option.analogEncoding': 'Analog encoding',
     'driver.ch32h417.option.adc1Period': 'ADC1 hardware sample rate',
     'driver.ch32h417.option.hsadcPeriod': 'HSADC hardware sample rate',
@@ -71,11 +71,10 @@ export const messages = {
     'driver.ch32h417.error.encoding': 'MCU 编码失败或处理超时，已停止采集。',
     'driver.ch32h417.error.inputSequence': '采样输入顺序异常，已停止采集。',
     'driver.ch32h417.error.dmaTransfer': 'DMA 采样块长度异常，已停止采集。',
+    'driver.ch32h417.error.resourceFull': '设备资源登记表已满，无法启动采集；请升级固件或关闭未使用的外设。',
 
     'driver.ch32h417.digitalRate': '数字采样率',
     'driver.ch32h417.timebase': '时间轴时钟（Hz，非 ADC 采样率）',
-    'driver.ch32h417.option.hsadcHz': 'HSADC 采样率（Hz）',
-    'driver.ch32h417.option.adc1Hz': 'ADC1 每通道采样率（Hz）',
     'driver.ch32h417.option.analogEncoding': '模拟编码',
     'driver.ch32h417.option.adc1Period': 'ADC1 采样率',
     'driver.ch32h417.option.hsadcPeriod': 'HSADC 采样率',

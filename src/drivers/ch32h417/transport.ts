@@ -89,6 +89,7 @@ const errors = [
   'compression processing deadline exceeded',
   'input sequence error',
   'invalid DMA block length',
+  'capture resource registry is full',
 ];
 export function statusError(error: number, samples?: bigint): Error {
   const category =
@@ -102,7 +103,9 @@ export function statusError(error: number, samples?: bigint): Error {
             ? 'inputSequence'
             : error === 11
               ? 'dmaTransfer'
-              : undefined;
+              : error === 12
+                ? 'resourceFull'
+                : undefined;
   if (category) return new ComponentError(`driver.ch32h417.error.${category}`, { samples: samples?.toString() ?? '0' });
   const detail = samples === undefined ? '' : ` after ${samples.toString()} samples`;
   return new Error(`H417: ${errors[error] ?? `device error ${error}`}${detail}`);
@@ -144,6 +147,8 @@ export class H417Transport {
   private starting = false;
   sampleBytes = 1;
   private lastReadCompleted = 0;
+  private lastKeepalive = 0;
+  private heartbeatPending: Promise<void> | null = null;
   private first = 0n;
   private analogFirst = [0n, 0n];
   private sequence = 0;
@@ -278,7 +283,7 @@ export class H417Transport {
       if (frame.dataCore !== undefined) this.counters.dataCore = frame.dataCore;
     } else if (frame.type === ANALOG) {
       const a = frame.analog!;
-      const stream = a.pin ?? (a.timing.bits === 10 ? 1 : 0);
+      const stream = a.pin;
       const channels = (a.mask & 1 ? 1 : 0) + (a.mask & 2 ? 1 : 0);
       if (frame.firstSample !== this.analogFirst[stream] || frame.payload.length % (2 * channels))
         throw new Error('H417 analog stream discontinuity');
@@ -386,7 +391,11 @@ export class H417Transport {
           throw new Error('H417 bulk OUT failed or stalled');
         const frame = await deadline(reply, 2000, `H417 command ${type} reply timeout`);
         const status = readStatus(frame.payload);
-        if (status.error) throw statusError(status.error);
+        if (status.error) {
+          const error = statusError(status.error);
+          if (!(error instanceof ComponentError)) error.message += ` (command ${type})`;
+          throw error;
+        }
         return frame;
       } catch (error) {
         rejectReply(error);
@@ -399,6 +408,7 @@ export class H417Transport {
     return run;
   }
   keepalive(): Promise<void> {
+    if (this.heartbeatPending) return this.heartbeatPending;
     const run = this.serial.then(async () => {
       if (this.closed || this.error) throw this.error ?? new Error('H417 connection closed');
       this.requestId = (this.requestId + 1) >>> 0 || 1;
@@ -406,9 +416,14 @@ export class H417Transport {
       const sent = await deadline(this.device.transferOut(EP_OUT, bytes), 2000, 'H417 keepalive OUT timeout');
       if (sent.status !== 'ok' || sent.bytesWritten !== bytes.length)
         throw new Error('H417 bulk OUT failed or stalled');
+      this.lastKeepalive = performance.now();
     });
     this.serial = run.catch(() => {});
-    return run;
+    const pending = run.finally(() => {
+      this.heartbeatPending = null;
+    });
+    this.heartbeatPending = pending;
+    return pending;
   }
   async start(payload: Uint8Array, sampleBytes = 1): Promise<void> {
     if (![1, 2, 3, 4].includes(sampleBytes)) throw new Error('Invalid H417 digital sample width');
@@ -439,6 +454,8 @@ export class H417Transport {
     await this.command(Command.codec, new Uint8Array([0, transform, 0, 0]));
   }
   async next(): Promise<Frame | null> {
+    if (this.active && !this.ended && !this.heartbeatPending && performance.now() - this.lastKeepalive >= 500)
+      void this.keepalive().catch((error) => this.fail(error));
     while (!this.queue.length && !this.error && !this.closed && !this.ended)
       await new Promise<void>((resolve) => {
         this.wake = resolve;

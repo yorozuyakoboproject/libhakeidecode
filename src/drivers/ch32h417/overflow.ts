@@ -42,7 +42,6 @@ export async function captureError(
   const fallback = statusError(error, samples);
   if (error !== 3) return fallback;
   if (transport.metrics.receiveQueuePauses > 0) return new ComponentError('driver.ch32h417.error.hostOverflow');
-  if (caps.appProtocol < 22) return fallback;
   try {
     const until = performance.now() + 1000;
     while (readStatus((await transport.command(Command.status)).payload).state) {

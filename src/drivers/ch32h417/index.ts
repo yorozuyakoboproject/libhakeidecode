@@ -50,7 +50,7 @@ function analogSettings(caps: Capabilities, configuration: DeviceConfiguration) 
   );
   const bits = [0, 1].map((pin) => Number(configuration.options[`pc${pin + 1}Bits`] ?? (hsadc & (1 << pin) ? 10 : 12)));
   const conversions = [adc1, hsadc].map((streamMask) => {
-    if (!streamMask || caps.appProtocol < 21) return 0;
+    if (!streamMask) return 0;
     let period = 0;
     for (const pin of analog)
       if (streamMask & (1 << pin)) {
@@ -350,20 +350,19 @@ export class CH32H417Device implements MultiRateDevice {
         };
     if (!configuration.analogChannels) return result;
     const deviceCaps = this.identity?.capabilities;
-    const analogTiming =
-      deviceCaps && deviceCaps.appProtocol >= 21
-        ? (() => {
-            const { bits, conversions } = analogSettings(deviceCaps, configuration);
-            return deviceChannelIndices(configuration, 'analog').map((channel) => {
-              const conversion = conversions[deviceCaps.hsadcMask & (1 << channel) ? 1 : 0]!;
-              return {
-                channel,
-                sampleRate: 400000000 / conversion,
-                outputBits: bits[channel]!,
-              };
-            });
-          })()
-        : undefined;
+    const analogTiming = deviceCaps
+      ? (() => {
+          const { bits, conversions } = analogSettings(deviceCaps, configuration);
+          return deviceChannelIndices(configuration, 'analog').map((channel) => {
+            const conversion = conversions[deviceCaps.hsadcMask & (1 << channel) ? 1 : 0]!;
+            return {
+              channel,
+              sampleRate: 400000000 / conversion,
+              outputBits: bits[channel]!,
+            };
+          });
+        })()
+      : undefined;
     return {
       ...result,
       analogTiming,
@@ -410,10 +409,8 @@ export class CH32H417Device implements MultiRateDevice {
       if (mask !== (adc1 | hsadc))
         throw new Error('Initialize the selected PC1/PC2 ADC modes in the management page first');
       const { periods, bits, conversions } = analogSettings(caps, configuration);
-      const adc1Hz =
-          caps.appProtocol >= 21 && adc1 ? 400000000 / conversions[0]! : Number(configuration.options.adc1Hz ?? 0),
-        hsadcHz =
-          caps.appProtocol >= 21 && hsadc ? 400000000 / conversions[1]! : Number(configuration.options.hsadcHz ?? 0);
+      const adc1Hz = adc1 ? 400000000 / conversions[0]! : 0,
+        hsadcHz = hsadc ? 400000000 / conversions[1]! : 0;
       const adcCount = Number(!!(adc1 & 1)) + Number(!!(adc1 & 2));
       if (adc1 && Number(configuration.sampleCount) * adc1Hz <= configuration.sampleRate)
         throw new Error('Capture duration must exceed one ADC1 sample period');
@@ -452,7 +449,6 @@ export class CH32H417Device implements MultiRateDevice {
       const referenceMv = new Map<number, number>();
       const expected = new Map<number, bigint>(),
         received = new Map<number, bigint>();
-      const endTick = (BigInt(configuration.sampleCount) * 400000000n) / BigInt(configuration.sampleRate);
       while (true) {
         context.signal?.throwIfAborted();
         const frame = await transport.next();
@@ -527,11 +523,9 @@ export class CH32H417Device implements MultiRateDevice {
         if (
           info.adc1Mask !== adc1 ||
           info.hsadcMask !== hsadc ||
-          (info.pin === undefined
-            ? info.mask !== (info.timing.bits === 10 ? hsadc : adc1)
-            : !(mask & (1 << info.pin)) ||
-              info.timing.bits !== bits[info.pin] ||
-              info.timing.periodTicks !== BigInt(periods[info.pin]!))
+          !(mask & (1 << info.pin)) ||
+          info.timing.bits !== bits[info.pin] ||
+          info.timing.periodTicks !== BigInt(periods[info.pin]!)
         )
           throw new Error('Analog configuration changed');
         const pins = [0, 1].filter((i) => info.mask & (1 << i)),
@@ -539,13 +533,8 @@ export class CH32H417Device implements MultiRateDevice {
         const raw = new DataView(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
         for (let rank = 0; rank < pins.length; ++rank) {
           const pin = pins[rank]!;
-          const firstTick =
-            info.pin === undefined
-              ? info.timing.firstTick + BigInt(info.timing.bits === 12 ? rank * 640 : 0)
-              : info.timing.firstTick - frame.firstSample * info.timing.periodTicks;
-          const target =
-            info.targetSamples ??
-            (endTick > firstTick ? (endTick - firstTick + info.timing.periodTicks - 1n) / info.timing.periodTicks : 0n);
+          const firstTick = info.timing.firstTick - frame.firstSample * info.timing.periodTicks;
+          const target = info.targetSamples;
           if (!expected.has(pin)) expected.set(pin, target);
           if (frame.firstSample !== (received.get(pin) ?? 0n) || target !== expected.get(pin))
             throw new Error('Analog stream discontinuity');
@@ -561,8 +550,7 @@ export class CH32H417Device implements MultiRateDevice {
           }
           context.reportDiagnostics?.({
             [`PC${pin + 1}.outputHz`]: info.timing.clockHz / Number(info.timing.periodTicks),
-            [`PC${pin + 1}.conversionHz`]:
-              info.timing.clockHz / Number(info.timing.conversionTicks ?? info.timing.periodTicks),
+            [`PC${pin + 1}.conversionHz`]: info.timing.clockHz / Number(info.timing.conversionTicks),
             [`PC${pin + 1}.bits`]: info.timing.bits,
           });
           if (!referenceMv.has(pin)) referenceMv.set(pin, info.timing.referenceMv);

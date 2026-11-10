@@ -1,5 +1,5 @@
-const WINDOW_BYTES = 24 * 1024 * 1024;
-const MAX_MESSAGE_BYTES = 768 * 1024;
+const WINDOW_BYTES = 16 * 1024 * 1024;
+const MAX_MESSAGE_BYTES = 1024 * 1024;
 
 type Chunk = { data: ArrayBuffer; offset: number; consumed: number };
 type Read = { length: number; resolve(value: DataView): void; reject(error: Error): void };

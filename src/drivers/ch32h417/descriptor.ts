@@ -10,7 +10,7 @@ export const SS_RATES = [
 ] as const;
 export const MAX_LOGIC_BYTES_PER_SECOND = 400_000_000;
 export const defaultCaps: Capabilities = {
-  appProtocol: 31,
+  appProtocol: 32,
   channelRates: [],
   compressionMask: 0,
   hsadcBlockSamples: 4096,
@@ -21,7 +21,7 @@ export const defaultCaps: Capabilities = {
   adc1Budget: 562500,
   hsadcMax: 20000000,
   packetBytes: 1024,
-  blockBytes: 24480,
+  blockBytes: 64416,
   heartbeatMs: 5000,
   channels: 32,
   rates: [...SS_RATES],
@@ -87,74 +87,49 @@ export function descriptor(caps: Capabilities = defaultCaps): DeviceDescriptor {
             },
           ]
         : []),
-      ...(caps.appProtocol >= 21
-        ? [
-            ...[
-              { id: 'adc1Period', name: 'ADC1 hardware sample rate', mask: caps.adc1Mask, preferred: 4000 },
-              {
-                id: 'hsadcPeriod',
-                name: 'HSADC hardware sample rate',
-                mask: caps.hsadcMask,
-                preferred: caps.packetBytes === 512 ? 320 : 40,
-              },
-            ]
-              .filter((path) => path.mask)
-              .map((path) => {
-                const periods = [
-                  ...new Set(
-                    caps.channelRates
-                      .filter(
-                        (r) => path.mask & (1 << r.pin) && r.decimation === 1 && r.outputTicks === r.conversionTicks,
-                      )
-                      .map((r) => r.conversionTicks),
-                  ),
-                ].sort((a, b) => a - b);
-                return {
-                  id: path.id,
-                  name: path.name,
-                  kind: 'choice' as const,
-                  values: periods.map(String),
-                  default: String(periods.includes(path.preferred) ? path.preferred : periods[0]),
-                  labels: Object.fromEntries(periods.map((period) => [String(period), formatRate(400000000 / period)])),
-                  description:
-                    'Hardware sampling only. ADC1 pins share one rate; digital and HSADC rates are independent.',
-                };
-              }),
-            ...[0, 1]
-              .filter((pin) => caps.analogMask & (1 << pin))
-              .map((pin) => {
-                const native = caps.hsadcMask & (1 << pin) ? 10 : 12;
-                return {
-                  id: `pc${pin + 1}Bits`,
-                  name: `PC${pin + 1} output bits`,
-                  kind: 'choice' as const,
-                  values: Array.from({ length: native - 7 }, (_, i) => String(i + 8)),
-                  default: String(native),
-                  description:
-                    'Reducing output bits loses precision. Encoding preserves the quantized samples exactly.',
-                };
-              }),
-          ]
-        : [
-            {
-              id: 'hsadcHz',
-              name: 'HSADC sampling rate (Hz)',
-              kind: 'number' as const,
-              min: 1250000,
-              max: caps.hsadcMax,
-              step: 1,
-              default: caps.packetBytes === 512 ? 1250000 : 10000000,
-            },
-            {
-              id: 'adc1Hz',
-              name: 'ADC1 rate per channel (Hz)',
-              kind: 'number' as const,
-              min: 1,
-              max: caps.adc1Budget,
-              step: 1,
-              default: 100000,
-            },
-          ]),
+      ...[
+        ...[
+          { id: 'adc1Period', name: 'ADC1 hardware sample rate', mask: caps.adc1Mask, preferred: 4000 },
+          {
+            id: 'hsadcPeriod',
+            name: 'HSADC hardware sample rate',
+            mask: caps.hsadcMask,
+            preferred: caps.packetBytes === 512 ? 320 : 40,
+          },
+        ]
+          .filter((path) => path.mask)
+          .map((path) => {
+            const periods = [
+              ...new Set(
+                caps.channelRates
+                  .filter((r) => path.mask & (1 << r.pin) && r.decimation === 1 && r.outputTicks === r.conversionTicks)
+                  .map((r) => r.conversionTicks),
+              ),
+            ].sort((a, b) => a - b);
+            return {
+              id: path.id,
+              name: path.name,
+              kind: 'choice' as const,
+              values: periods.map(String),
+              default: String(periods.includes(path.preferred) ? path.preferred : periods[0]),
+              labels: Object.fromEntries(periods.map((period) => [String(period), formatRate(400000000 / period)])),
+              description: 'Hardware sampling only. ADC1 pins share one rate; digital and HSADC rates are independent.',
+            };
+          }),
+        ...[0, 1]
+          .filter((pin) => caps.analogMask & (1 << pin))
+          .map((pin) => {
+            const native = caps.hsadcMask & (1 << pin) ? 10 : 12;
+            return {
+              id: `pc${pin + 1}Bits`,
+              name: `PC${pin + 1} output bits`,
+              kind: 'choice' as const,
+              values: Array.from({ length: native - 7 }, (_, i) => String(i + 8)),
+              default: String(native),
+              description: 'Reducing output bits loses precision. Encoding preserves the quantized samples exactly.',
+            };
+          }),
+      ],
     ],
   };
 }

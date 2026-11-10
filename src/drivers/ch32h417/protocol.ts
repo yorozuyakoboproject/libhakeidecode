@@ -2,7 +2,7 @@ import { SS_RATES } from './descriptor.js';
 import { ComponentError } from '../../components.js';
 import { restoreBlock, type BlockEncoding } from './compression.js';
 export { USB_VID, USB_PID, SS_RATES } from './descriptor.js';
-export const APP_PROTOCOL = 31;
+export const APP_PROTOCOL = 32;
 export const INTERFACE = 1,
   ALTERNATE = 1,
   EP_OUT = 1,
@@ -11,7 +11,7 @@ export const MAGIC = 0x414c3448,
   VERSION = 2,
   HEADER_BYTES = 32,
   BLOCK_BYTES = 16_384;
-export const DIGITAL_FRAME_BYTES = 24_576,
+export const DIGITAL_FRAME_BYTES = 64_512,
   DIGITAL_HEADER_BYTES = 96,
   DIGITAL_BLOCK_BYTES = DIGITAL_FRAME_BYTES - DIGITAL_HEADER_BYTES;
 export const MAX_FRAME_BYTES = DIGITAL_FRAME_BYTES;
@@ -34,13 +34,13 @@ export interface Frame {
   dataCore?: number;
   codec?: BlockEncoding;
   analog?: {
-    pin?: number;
-    sampleCount?: number;
-    targetSamples?: bigint;
+    pin: number;
+    sampleCount: number;
+    targetSamples: bigint;
     mask: number;
     adc1Mask: number;
     hsadcMask: number;
-    timing: import('../../libhakei/device.js').AnalogTiming;
+    timing: import('../../libhakei/device.js').AnalogTiming & { conversionTicks: bigint };
   };
   type: number;
   requestId: number;
@@ -101,7 +101,7 @@ export function readStatus(payload: Uint8Array): DeviceStatus {
 }
 export function readCapabilities(frame: Frame): Capabilities {
   const status = readStatus(frame.payload);
-  if (status.error || ![88, 668].includes(frame.payload.length)) throw new Error('Invalid H417 capability response');
+  if (status.error || frame.payload.length !== 668) throw new Error('Invalid H417 capability response');
   const v = new DataView(frame.payload.buffer, frame.payload.byteOffset + 16, 56);
   const packet = v.getUint16(2, true),
     count = v.getUint8(13);
@@ -133,7 +133,6 @@ export function readCapabilities(frame: Frame): Capabilities {
   )
     throw new Error('Invalid analog capabilities');
   const channelRates: AnalogRate[] = [];
-  if (frame.payload.length !== 668) throw new Error('Truncated channel capabilities');
   const c = new DataView(frame.payload.buffer, frame.payload.byteOffset + 88, 580);
   if (c.getUint8(0) !== 2 || c.getUint8(1) !== 0 || c.getUint8(2) > 48 || c.getUint8(3))
     throw new Error('Invalid channel capabilities');
@@ -149,10 +148,8 @@ export function readCapabilities(frame: Frame): Capabilities {
       !(extra.getUint8(0) & (1 << pin)) ||
       nativeBits !== (extra.getUint8(2) & (1 << pin) ? 10 : 12) ||
       !conversionTicks ||
-      !decimation ||
-      decimation > 32 ||
-      decimation & (decimation - 1) ||
-      outputTicks !== conversionTicks * decimation
+      decimation !== 1 ||
+      outputTicks !== conversionTicks
     )
       throw new Error('Invalid analog rate table');
     channelRates.push({
@@ -202,7 +199,6 @@ export function encodeCommand(
 }
 
 export class FrameParser {
-  appProtocol = APP_PROTOCOL;
   private readonly bytes = new Uint8Array(MAX_FRAME_BYTES);
   private used = 0;
   private needed = HEADER_BYTES;
@@ -283,10 +279,11 @@ export class FrameParser {
     }
     let analog: Frame['analog'];
     if (type === ANALOG) {
-      const a = new DataView(payload.buffer, payload.byteOffset + HEADER_BYTES, this.appProtocol >= 21 ? 56 : 32);
+      const a = new DataView(payload.buffer, payload.byteOffset + HEADER_BYTES, 56);
       const bits = a.getUint8(3);
       if (
-        (this.appProtocol >= 21 ? bits < 8 || bits > 12 : bits !== 10 && bits !== 12) ||
+        bits < 8 ||
+        bits > 12 ||
         !a.getUint8(0) ||
         a.getUint8(0) & ~3 ||
         !a.getUint32(4, true) ||
@@ -296,41 +293,37 @@ export class FrameParser {
         (codec && codec.channels !== Number(!!(a.getUint8(0) & 1)) + Number(!!(a.getUint8(0) & 2)))
       )
         throw new Error('Invalid analog frame');
-      let independent: Pick<NonNullable<Frame['analog']>, 'pin' | 'sampleCount' | 'targetSamples'> = {};
-      let extraTiming = {};
-      if (this.appProtocol >= 21) {
-        const nativeBits = a.getUint8(46),
-          pin = a.getUint8(47),
-          conversionTicks = a.getBigUint64(32, true),
-          sampleCount = a.getUint32(40, true),
-          decimation = a.getUint16(44, true),
-          targetSamples = a.getBigUint64(48, true);
-        if (
-          pin > 1 ||
-          a.getUint8(0) !== 1 << pin ||
-          nativeBits !== (a.getUint8(2) & (1 << pin) ? 10 : 12) ||
-          bits > nativeBits ||
-          !conversionTicks ||
-          !decimation ||
-          decimation > 32 ||
-          decimation & (decimation - 1) ||
-          a.getBigUint64(8, true) !== conversionTicks * BigInt(decimation) ||
-          sampleCount * 2 !== samples.length ||
-          !targetSamples ||
-          view.getBigUint64(20, true) + BigInt(sampleCount) > targetSamples
-        )
-          throw new Error('Invalid independent analog stream');
-        independent = { pin, sampleCount, targetSamples };
-        extraTiming = { nativeBits, conversionTicks, decimation };
-      }
+      const nativeBits = a.getUint8(46),
+        pin = a.getUint8(47),
+        conversionTicks = a.getBigUint64(32, true),
+        sampleCount = a.getUint32(40, true),
+        decimation = a.getUint16(44, true),
+        targetSamples = a.getBigUint64(48, true);
+      if (
+        pin > 1 ||
+        a.getUint8(0) !== 1 << pin ||
+        nativeBits !== (a.getUint8(2) & (1 << pin) ? 10 : 12) ||
+        bits > nativeBits ||
+        !conversionTicks ||
+        decimation !== 1 ||
+        a.getBigUint64(8, true) !== conversionTicks ||
+        sampleCount * 2 !== samples.length ||
+        !targetSamples ||
+        view.getBigUint64(20, true) + BigInt(sampleCount) > targetSamples
+      )
+        throw new Error('Invalid independent analog stream');
       analog = {
-        ...independent,
+        pin,
+        sampleCount,
+        targetSamples,
         mask: a.getUint8(0),
         adc1Mask: a.getUint8(1),
         hsadcMask: a.getUint8(2),
         timing: {
           bits: bits as import('../../libhakei/device.js').AnalogTiming['bits'],
-          ...extraTiming,
+          nativeBits,
+          conversionTicks,
+          decimation,
           clockHz: a.getUint32(4, true),
           periodTicks: a.getBigUint64(8, true),
           firstTick: a.getBigUint64(16, true),
@@ -338,9 +331,6 @@ export class FrameParser {
           referenceMv: a.getUint32(28, true),
         },
       };
-    }
-    if (type === (RESPONSE | Command.caps) && samples.length >= 18) {
-      this.appProtocol = new DataView(samples.buffer, samples.byteOffset).getUint16(16, true);
     }
     this.onFrame({
       ...(type === DATA && header === DIGITAL_HEADER_BYTES ? { dataCore: payload[HEADER_BYTES]! } : {}),

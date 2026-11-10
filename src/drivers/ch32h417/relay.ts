@@ -78,9 +78,9 @@ export async function relayAvailable(): Promise<boolean> {
   } catch {
     return false;
   }
-  if (status.service !== 'h417-usb-relay') return false;
+  if (status.service !== 'h417-usb-bridge') return false;
   if (status.protocol !== 1 || !status.dataProtocols?.includes('ws-consumed-v1'))
-    throw new Error('USB relay data protocol is incompatible. Please update H417 USB Relay.');
+    throw new Error('USB bridge data protocol is incompatible. Please update H417 USB Bridge.');
   return true;
 }
 
@@ -355,6 +355,6 @@ export async function selectUsb<T>(
   webusb: T,
 ): Promise<{ api: RelayUsb | T; kind: TransportKind }> {
   if (mode !== 'webusb' && (await relayAvailable())) return { api: relayUsb, kind: 'native' };
-  if (mode === 'native') throw new Error('USB relay unavailable at 127.0.0.1:17641');
+  if (mode === 'native') throw new Error('USB bridge unavailable at 127.0.0.1:17641');
   return { api: webusb, kind: 'webusb' };
 }
