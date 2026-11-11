@@ -86,10 +86,28 @@ function unpackBits(input: Uint8Array, count: number, bits: number): Uint8Array 
   if (!Number.isInteger(count) || bits < 8 || bits > 12 || input.length !== Math.ceil((count * bits) / 8))
     throw new Error('Invalid bit-packed block');
   const out = new Uint8Array(count * 2);
+  const values = new Uint16Array(out.buffer);
   let pending = 0,
     have = 0,
-    p = 0;
-  for (let i = 0; i < count; ++i) {
+    p = 0,
+    sample = 0;
+  if (bits === 8) {
+    values.set(input);
+    return out;
+  }
+  if (bits === 10)
+    for (; sample + 4 <= count; sample += 4, p += 5) {
+      values[sample] = (input[p]! | (input[p + 1]! << 8)) & 1023;
+      values[sample + 1] = ((input[p + 1]! >>> 2) | (input[p + 2]! << 6)) & 1023;
+      values[sample + 2] = ((input[p + 2]! >>> 4) | (input[p + 3]! << 4)) & 1023;
+      values[sample + 3] = (input[p + 3]! >>> 6) | (input[p + 4]! << 2);
+    }
+  else if (bits === 12)
+    for (; sample + 2 <= count; sample += 2, p += 3) {
+      values[sample] = (input[p]! | (input[p + 1]! << 8)) & 4095;
+      values[sample + 1] = (input[p + 1]! >>> 4) | (input[p + 2]! << 4);
+    }
+  for (; sample < count; ++sample) {
     while (have < bits) {
       pending |= input[p++]! << have;
       have += 8;
@@ -97,8 +115,7 @@ function unpackBits(input: Uint8Array, count: number, bits: number): Uint8Array 
     const value = pending & ((1 << bits) - 1);
     pending >>>= bits;
     have -= bits;
-    out[i * 2] = value;
-    out[i * 2 + 1] = value >>> 8;
+    values[sample] = value;
   }
   if (pending) throw new Error('Nonzero bit-packed padding');
   return out;

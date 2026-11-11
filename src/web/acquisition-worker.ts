@@ -18,7 +18,7 @@ import { PlanarSampleStore, type PlanarStoreTimings } from './data/planarStore.j
 import { AnalogSampleStore } from './data/analogStore.js';
 import { channelWidthForProbes, widenPackedSamples } from './data/channel-count.js';
 import { DEFAULT_CAPTURE_BUDGET_BYTES, MemoryBudget, type BudgetSnapshot } from './memory.js';
-import { WorkerStoreServer } from './worker-store-server.js';
+import { WorkerStoreServer, type StoreCaptureSource } from './worker-store-server.js';
 import { yieldWorkerTask } from './worker-task.js';
 import type { StoreMetadata } from './worker-store.js';
 import { MultiRateCapture } from './multirate-capture.js';
@@ -115,9 +115,10 @@ scope.onmessage = ({ data }) => {
       padding: Uint8Array | null = null;
     const budget = data.store ? new MemoryBudget(data.store.budgetBytes ?? DEFAULT_CAPTURE_BUDGET_BYTES) : null;
     let lastProgressAt = -Infinity;
+    let packedDigital: StoreCaptureSource['packedDigital'];
     const storeServer = data.store
-      ? new WorkerStoreServer(
-          () =>
+      ? new WorkerStoreServer(() => {
+          const source =
             rolling?.source() ??
             multiRate ??
             (store
@@ -127,8 +128,9 @@ scope.onmessage = ({ data }) => {
                   logicChannelCount: logicIds.length,
                   analogChannels: analogIds.map((id, index) => ({ name: id, store: analogStores[index]! })),
                 }
-              : null),
-        )
+              : null);
+          return source && packedDigital ? { ...source, packedDigital } : source;
+        })
       : null;
     const appendChunk = (input: AcquisitionChunk): number => {
       if (rolling) {
@@ -270,10 +272,8 @@ scope.onmessage = ({ data }) => {
     };
     try {
       if (data.sharedSampleCount !== undefined) {
-        const [{ SharedChunkProducer }, { SharedChunkAllocator }] = await Promise.all([
-          import('./shared-chunks.js'),
-          import('./shared-chunk-allocator.js'),
-        ]);
+        const [{ SharedChunkProducer, SharedChunkReader, normalizePackedSamples }, { SharedChunkAllocator }] =
+          await Promise.all([import('./shared-chunks.js'), import('./shared-chunk-allocator.js')]);
         allocator = new SharedChunkAllocator();
         let lastProgressAt = -Infinity,
           lastReportedSamples = 0n;
@@ -310,6 +310,24 @@ scope.onmessage = ({ data }) => {
         });
         for (const port of pendingConsumers.splice(0)) producer.addConsumer(port);
         await producer.prepare();
+        if (data.store) {
+          const channel = new MessageChannel();
+          producer.addConsumer(channel.port1);
+          const reader = new SharedChunkReader(channel.port2, data.sharedSampleBytes ?? 1);
+          packedDigital = {
+            channelCount: data.configuration.logicChannels,
+            samplerate: data.configuration.sampleRate,
+            labels: deviceChannelIndices(data.configuration, 'logic').map((index) => `D${index}`),
+            get length() {
+              return producer!.length;
+            },
+            async readPackedRange(start, end, channels = data.configuration.logicChannels) {
+              const raw = reader.readRange(start, end);
+              if (!raw) throw new Error('Requested capture range is not committed');
+              return normalizePackedSamples(raw, data.sharedSampleBytes ?? 1, channels);
+            },
+          };
+        }
         reportSharedProgress(producer.allocatedBytes, producer.length, producer.publisherMetrics, true);
       }
       controller.signal.throwIfAborted();
@@ -326,7 +344,10 @@ scope.onmessage = ({ data }) => {
         validateDeviceConfiguration(device, configuration);
       }
       const description = device.getAcquisitionDescription(configuration);
-      if (!continuous && !!producer !== (description.layout === 'packed-logic'))
+      const sharedDigital =
+        configuration.logicChannels > 0 &&
+        (description.layout === 'packed-logic' || description.layout === 'multi-rate');
+      if (!continuous && !!producer !== sharedDigital)
         throw new Error('Driver acquisition layout does not match the capture pipeline');
       if (continuous) {
         if (!budget || !storeServer || !data.storePort)
@@ -349,7 +370,7 @@ scope.onmessage = ({ data }) => {
         signal: controller.signal,
         chunkSamples: data.chunkSamples,
         reportDiagnostics: (snapshot) => {
-          driverDiagnostics = { ...snapshot };
+          Object.assign((driverDiagnostics ??= {}), snapshot);
         },
         reportTransferProgress: (progress) => scope.postMessage({ type: 'transfer-progress', progress }),
         acquireBuffer: async () => {
@@ -387,8 +408,13 @@ scope.onmessage = ({ data }) => {
         if (!borrowed && !timeline) throw new Error('Worker driver must use the managed buffer contract');
         if (producer && 'format' in result.value && result.value.format === 'packed-logic') {
           const sampleBytes = packedLogicSampleBytes(result.value);
-          if (producer.bytesPerSample !== sampleBytes)
-            throw new Error('Device digital sample width changed during capture');
+          if (
+            producer.bytesPerSample !== sampleBytes ||
+            result.value.startSample !== producer.length ||
+            result.value.sampleRate !== configuration.sampleRate ||
+            result.value.channelCount !== configuration.logicChannels
+          )
+            throw new Error('Device digital layout or sample continuity changed during capture');
           const bytes = result.value.length * sampleBytes;
           await producer.append(result.value.data.subarray(0, bytes));
         } else if (data.store) {
@@ -464,12 +490,6 @@ scope.onmessage = ({ data }) => {
       if (finalPadding) budget?.release(finalPadding.buffer);
       const finalMultiRate = multiRate as MultiRateCapture | null;
       if (finalMultiRate && budget) {
-        try {
-          finalMultiRate.finalize();
-        } catch (error) {
-          terminal = 'error';
-          failure = componentFailure(error);
-        }
         storeServer!.publish();
         scope.postMessage({
           type: 'local-done',

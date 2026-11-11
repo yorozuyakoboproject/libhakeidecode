@@ -4,7 +4,8 @@ const MAX_MESSAGE_BYTES = 1024 * 1024;
 type Chunk = { data: ArrayBuffer; offset: number; consumed: number };
 type Read = { length: number; resolve(value: DataView): void; reject(error: Error): void };
 export class RelayData {
-  readonly socket: WebSocket;
+  private readonly worker: Worker;
+  private open = false;
   readonly ready: Promise<void>;
   private readonly chunks: Chunk[] = [];
   private readonly reads: Read[] = [];
@@ -34,9 +35,8 @@ export class RelayData {
     recentGaps: [] as { atUnixMs: number; ms: number }[],
   };
   constructor(url: string) {
-    const socket = new WebSocket(url);
-    this.socket = socket;
-    socket.binaryType = 'arraybuffer';
+    const worker = new Worker(new URL('./relay-socket-worker.ts', import.meta.url), { type: 'module' });
+    this.worker = worker;
     this.closed = new Promise<void>((resolve) => {
       this.closeResolve = resolve;
     });
@@ -46,53 +46,60 @@ export class RelayData {
         this.fail(error);
         reject(error);
       }, 5000);
-      socket.onopen = () => {
+      const failed = (message: string): void => {
         clearTimeout(timer);
-        resolve();
-      };
-      socket.onerror = () => {
-        clearTimeout(timer);
-        const error = new Error('USB relay data connection failed; check relay version and interface ownership');
+        const error = this.error ?? new Error(message);
         this.fail(error);
         reject(error);
       };
-      socket.onclose = () => {
-        clearTimeout(timer);
-        const error = this.error ?? new Error('USB relay data connection ended; capture stopped');
-        this.fail(error);
-        reject(error);
+      worker.onerror = (event) => {
+        failed(event.message || 'USB relay receive Worker failed');
         this.closeResolve?.();
+      };
+      worker.onmessage = ({ data: event }) => {
+        if (event.type === 'open') {
+          clearTimeout(timer);
+          this.open = true;
+          resolve();
+        } else if (event.type === 'error') {
+          failed(event.message);
+        } else if (event.type === 'closed') {
+          this.open = false;
+          failed('USB relay data connection ended; capture stopped');
+          this.closeResolve?.();
+        } else if (event.type === 'data') this.receive(event.data);
       };
     });
     void this.ready.catch(() => {});
-    socket.onmessage = ({ data }: MessageEvent<ArrayBuffer>) => {
-      if (this.error) return;
-      if (!(data instanceof ArrayBuffer) || !data.byteLength || data.byteLength > MAX_MESSAGE_BYTES) {
-        this.fail(new Error('Invalid USB relay data message'));
-        return;
+    worker.postMessage({ type: 'connect', url });
+  }
+  private receive(data: ArrayBuffer): void {
+    if (this.error) return;
+    if (!(data instanceof ArrayBuffer) || !data.byteLength || data.byteLength > MAX_MESSAGE_BYTES) {
+      this.fail(new Error('Invalid USB relay data message'));
+      return;
+    }
+    const at = performance.now();
+    if (this.lastMessageAt) {
+      const gap = at - this.lastMessageAt;
+      this.metrics.messageGapMaxMs = Math.max(this.metrics.messageGapMaxMs, gap);
+      if (gap >= 20) {
+        if (this.metrics.recentGaps.length === 16) this.metrics.recentGaps.shift();
+        this.metrics.recentGaps.push({ atUnixMs: performance.timeOrigin + this.lastMessageAt, ms: gap });
       }
-      const at = performance.now();
-      if (this.lastMessageAt) {
-        const gap = at - this.lastMessageAt;
-        this.metrics.messageGapMaxMs = Math.max(this.metrics.messageGapMaxMs, gap);
-        if (gap >= 20) {
-          if (this.metrics.recentGaps.length === 16) this.metrics.recentGaps.shift();
-          this.metrics.recentGaps.push({ atUnixMs: performance.timeOrigin + this.lastMessageAt, ms: gap });
-        }
-      }
-      this.lastMessageAt = at;
-      this.receivedBytes += data.byteLength;
-      this.metrics.receivedBytes = this.receivedBytes;
-      this.metrics.queuedBytes += data.byteLength;
-      this.metrics.queuePeakBytes = Math.max(this.metrics.queuePeakBytes, this.metrics.queuedBytes);
-      ++this.metrics.messages;
-      if (this.receivedBytes - this.consumedBytes > WINDOW_BYTES) {
-        this.fail(new Error('USB relay exceeded data receive window'));
-        return;
-      }
-      this.chunks.push({ data, offset: 0, consumed: 0 });
-      this.drain();
-    };
+    }
+    this.lastMessageAt = at;
+    this.receivedBytes += data.byteLength;
+    this.metrics.receivedBytes = this.receivedBytes;
+    this.metrics.queuedBytes += data.byteLength;
+    this.metrics.queuePeakBytes = Math.max(this.metrics.queuePeakBytes, this.metrics.queuedBytes);
+    ++this.metrics.messages;
+    if (this.receivedBytes - this.consumedBytes > WINDOW_BYTES) {
+      this.fail(new Error('USB relay exceeded data receive window'));
+      return;
+    }
+    this.chunks.push({ data, offset: 0, consumed: 0 });
+    this.drain();
   }
   private drain(): void {
     while (this.reads.length) {
@@ -136,8 +143,8 @@ export class RelayData {
   private ack(): void {
     clearTimeout(this.ackTimer);
     this.ackTimer = undefined;
-    if (!this.ackMessages || this.error || this.socket.readyState !== WebSocket.OPEN) return;
-    this.socket.send(JSON.stringify({ consumedBytes: this.consumedBytes }));
+    if (!this.ackMessages || this.error || !this.open) return;
+    this.worker.postMessage({ type: 'ack', consumedBytes: this.consumedBytes });
     this.metrics.acknowledgedBytes = this.consumedBytes;
     ++this.metrics.acks;
     this.ackMessages = 0;
@@ -153,11 +160,15 @@ export class RelayData {
     this.delivered.clear();
     this.metrics.queuedBytes = 0;
     this.metrics.deliveredBytes = 0;
-    this.socket.close();
+    this.worker.postMessage({ type: 'close' });
   }
   async stop(): Promise<void> {
     this.ack();
     this.fail(new Error('USB data reception stopped'));
-    await Promise.race([this.closed, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
+    try {
+      await Promise.race([this.closed, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
+    } finally {
+      this.worker.terminate();
+    }
   }
 }

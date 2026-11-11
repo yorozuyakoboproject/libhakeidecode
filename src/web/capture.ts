@@ -221,10 +221,11 @@ export async function deviceCapture(
     result = capture;
     return capture;
   } finally {
-    if (source && result?.store !== source.captureStore) await source.return();
+    const keepStorage = !!result && !!source?.captureStore;
+    if (source && !keepStorage) await source.return();
     releasePipeline();
     for (const free of release.reverse()) free();
-    if (result?.acquisition && result.store !== source?.captureStore) result.acquisition.memory = budget.snapshot();
+    if (result?.acquisition && !keepStorage) result.acquisition.memory = budget.snapshot();
   }
 }
 
@@ -237,6 +238,17 @@ async function captureSharedWorkerSource(
   budget: MemoryBudget,
 ): Promise<Capture> {
   const started = performance.now();
+  const memory = (): BudgetSnapshot => {
+    const shared = budget.snapshot();
+    if (!source.captureStore) return shared;
+    const local = source.localMemorySnapshot;
+    return {
+      ...shared,
+      usedBytes: shared.usedBytes + local.usedBytes,
+      peakBytes: shared.peakBytes + local.peakBytes,
+      allocations: shared.allocations + local.allocations,
+    };
+  };
   const labels = deviceChannelIndices(configuration, 'logic').map((index) => 'D' + index);
   const store = new SharedWorkerSampleStore(
     source,
@@ -244,6 +256,7 @@ async function captureSharedWorkerSource(
     configuration.sampleRate,
     labels,
     source.logicSampleBytes,
+    source.captureStore,
   );
   const diagnostics: CaptureDiagnostics = {
     mainThreadAppend: { calls: 0, totalMs: 0, maxMs: 0 },
@@ -268,14 +281,14 @@ async function captureSharedWorkerSource(
     triggerSample: 0n,
     loadedMs: 0,
     logicChannelCount: configuration.logicChannels,
-    analogChannels: [],
+    analogChannels: source.captureStore?.analogStores.map((store, index) => ({ name: `A${index}`, store })) ?? [],
     store,
     acquisition: {
       mode: options.mode ?? 'single',
       targetSamples,
       actualSamples: 0n,
       stopReason,
-      memory: budget.snapshot(),
+      memory: memory(),
       worker: true,
       buffers: 2,
       maxQueued: source.maxQueued,
@@ -283,6 +296,9 @@ async function captureSharedWorkerSource(
   };
   const publish = (notifyProgress: boolean): void => {
     const samples = source.publishedSamples;
+    const analogMetadata = source.captureStore?.analogMetadata;
+    for (const [index, analog] of (capture.analogChannels ?? []).entries())
+      analog.name = analogMetadata?.[index]?.name ?? analog.name;
     capture.loadedMs = performance.now() - started;
     capture.acquisition = {
       mode: options.mode ?? 'single',
@@ -290,27 +306,30 @@ async function captureSharedWorkerSource(
       actualSamples: samples,
       stopReason,
       ...(detail ? { error: detail } : {}),
-      memory: budget.snapshot(),
+      memory: memory(),
       worker: true,
       buffers: 2,
       maxQueued: source.maxQueued,
     };
     diagnostics.sharedPublisher = { ...source.publisherMetrics };
     diagnostics.driver = source.driverDiagnostics;
-    if (notifyProgress && samples > 0n) options.onProgress?.(samples, budget.snapshot());
+    if (notifyProgress && samples > 0n) options.onProgress?.(samples, memory());
     options.onCapture?.(capture);
   };
   source.onSharedProgress = () => publish(true);
+  if (source.captureStore) source.onLocalProgress = () => publish(true);
   store.onProgress = () => publish(false);
   publish(false);
   try {
     await source.waitForCompletion();
     const stored = await store.finishStorage();
+    const local = source.localResult;
+    if (source.captureStore && !local) throw new Error(source.errorMessage ?? 'Analog storage returned no result');
     diagnostics.sharedStorage = stored.metrics;
     if (signal?.aborted) signal.throwIfAborted();
     if (options.stopSignal?.aborted) stopReason = 'stopped';
-    else if (source.errorMessage || stored.state === 'error') {
-      detail = source.errorMessage ?? stored.error ?? 'Shared storage Worker failed';
+    else if (source.errorMessage || stored.state === 'error' || local?.stopReason === 'error') {
+      detail = source.errorMessage ?? stored.error ?? local?.error ?? 'Shared storage Worker failed';
       stopReason = /allocation|out of memory|shared chunk/i.test(detail) ? 'allocation-failed' : 'error';
     } else if (stored.state === 'stopped') stopReason = 'stopped';
     if (stored.length === 0n) {
@@ -328,14 +347,14 @@ async function captureSharedWorkerSource(
       actualSamples: stored.length,
       stopReason,
       ...(detail ? { error: detail } : {}),
-      memory: budget.snapshot(),
+      memory: memory(),
       worker: true,
       buffers: 2,
       maxQueued: source.maxQueued,
     };
     diagnostics.sharedPublisher = { ...source.publisherMetrics };
     diagnostics.driver = source.driverDiagnostics;
-    options.onProgress?.(source.publishedSamples, budget.snapshot());
+    options.onProgress?.(source.publishedSamples, memory());
     options.onCapture?.(capture);
     return capture;
   } catch (error) {
@@ -343,6 +362,7 @@ async function captureSharedWorkerSource(
     throw error;
   } finally {
     source.onSharedProgress = null;
+    source.onLocalProgress = null;
     store.onProgress = null;
   }
 }

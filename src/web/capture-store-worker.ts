@@ -149,17 +149,42 @@ function report(s: StorageSession, force = false): void {
 function processPart(s: StorageSession, data: Uint8Array): void {
   if (data.length % s.bytesPerSample) throw new Error('Shared block has a partial sample');
   const count = data.length / s.bytesPerSample;
-  for (let sample = 0; sample < count; sample++) {
+  const values =
+    s.bytesPerSample === 4 && data.byteOffset % 4 === 0
+      ? new Uint32Array(data.buffer, data.byteOffset, count)
+      : s.bytesPerSample === 2 && data.byteOffset % 2 === 0
+        ? new Uint16Array(data.buffer, data.byteOffset, count)
+        : s.bytesPerSample === 1
+          ? data
+          : null;
+  for (let sample = 0; sample < count;) {
+    const end = sample + Math.min(count - sample, SHARED_SUMMARY_GROUP_SAMPLES - s.groupCount);
     if (!s.groupCount) {
-      s.first = readPackedSample(data, sample, s.bytesPerSample);
+      s.first = values ? values[sample]! : readPackedSample(data, sample, s.bytesPerSample);
       s.ones = 0;
       s.zeros = 0;
     }
-    const value = readPackedSample(data, sample, s.bytesPerSample);
-    s.ones |= value;
-    s.zeros |= ~value;
-    s.last = value;
-    s.groupCount++;
+    let ones = s.ones,
+      zeros = s.zeros;
+    if (values) {
+      for (let at = sample; at < end; at++) {
+        const value = values[at]!;
+        ones |= value;
+        zeros |= ~value;
+      }
+      s.last = values[end - 1]!;
+    } else {
+      for (let at = sample; at < end; at++) {
+        const value = readPackedSample(data, at, s.bytesPerSample);
+        ones |= value;
+        zeros |= ~value;
+      }
+      s.last = readPackedSample(data, end - 1, s.bytesPerSample);
+    }
+    s.ones = ones;
+    s.zeros = zeros;
+    s.groupCount += end - sample;
+    sample = end;
     if (s.groupCount === SHARED_SUMMARY_GROUP_SAMPLES) {
       writeRecord(s, s.completeGroups++);
       s.groupCount = 0;

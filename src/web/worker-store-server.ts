@@ -25,6 +25,13 @@ export interface StoreCaptureSource {
   readonly labels: readonly string[];
   readonly logicChannelCount?: number;
   readonly analogChannels?: readonly { readonly name: string; readonly store: AnalogStore }[];
+  readonly packedDigital?: {
+    readonly channelCount: number;
+    readonly samplerate: number;
+    readonly length: bigint;
+    readonly labels: readonly string[];
+    readPackedRange(start: bigint, end: bigint, channels?: number): Promise<Uint8Array>;
+  };
 }
 
 const DECODE_EDGE_WINDOW_LIMIT = 100_000;
@@ -192,9 +199,10 @@ export class WorkerStoreServer {
     try {
       const { serializeSR } = await import('./sr.js');
       controller.signal.throwIfAborted();
-      const length = capture.store.length;
+      const digital = capture.packedDigital;
+      const length = digital?.length ?? capture.store.length;
       let workspace = request.workspace;
-      if (snapshot && workspace && length > 0n) {
+      if ((snapshot || digital) && workspace && length > 0n) {
         const end = minSample(length, maxSample(1n, workspace.viewport[1])),
           cursor = (value: bigint | null | undefined) => (value != null && value < length ? value : null);
         workspace = {
@@ -206,7 +214,7 @@ export class WorkerStoreServer {
         };
       }
       const acquisition =
-        request.acquisition && snapshot
+        request.acquisition && (snapshot || digital)
           ? {
               ...request.acquisition,
               actualSamples: length,
@@ -219,11 +227,17 @@ export class WorkerStoreServer {
       const blob = await serializeSR(
         {
           name: 'capture.sr',
-          store: capture.store,
-          labels: [...capture.labels],
+          store: digital
+            ? ({ ...digital, gaps: () => capture.store.gaps() } as unknown as PlanarSampleStore)
+            : capture.store,
+          labels: [...(digital?.labels ?? capture.labels)],
           triggerSample: request.triggerSample,
           loadedMs: 0,
-          ...(capture.logicChannelCount === undefined ? {} : { logicChannelCount: capture.logicChannelCount }),
+          ...(digital
+            ? { logicChannelCount: digital.channelCount }
+            : capture.logicChannelCount === undefined
+              ? {}
+              : { logicChannelCount: capture.logicChannelCount }),
           ...(capture.analogChannels
             ? {
                 analogChannels: capture.analogChannels.map((channel) => ({ name: channel.name, store: channel.store })),

@@ -13,7 +13,6 @@ export const defaultCaps: Capabilities = {
   appProtocol: 32,
   channelRates: [],
   compressionMask: 0,
-  hsadcBlockSamples: 4096,
   analogMask: 0,
   adc1Mask: 0,
   hsadcMask: 0,

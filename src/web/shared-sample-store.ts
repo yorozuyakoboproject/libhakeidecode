@@ -3,6 +3,7 @@ import type { ColumnView, GapSpan, MemoryReport, SampleStore } from './data/type
 import type { AcquisitionResult, SharedCaptureConsumerSource } from './capture.js';
 import type { SharedCaptureState } from './shared-chunks.js';
 import type { WorkspaceSettings } from './workspace.js';
+import type { WorkerCaptureStore } from './worker-store.js';
 
 type Request =
   | {
@@ -147,6 +148,7 @@ export class SharedWorkerSampleStore implements SampleStore {
   private failure: Error | null = null;
   private viewFailure: Error | null = null;
   private disposed = false;
+  readonly readAnalogProbe?: (sample: bigint) => Promise<readonly (number | null)[]>;
 
   constructor(
     source: SharedCaptureConsumerSource,
@@ -154,7 +156,9 @@ export class SharedWorkerSampleStore implements SampleStore {
     samplerate: number,
     labels: readonly string[] = Array.from({ length: channelCount }, (_, index) => 'D' + index),
     readonly bytesPerSample: 1 | 2 | 3 | 4 = 1,
+    private readonly analogStore?: WorkerCaptureStore,
   ) {
+    if (analogStore) this.readAnalogProbe = (sample) => analogStore.readAnalogProbe(sample);
     if (![1, 2, 3, 4].includes(bytesPerSample)) throw new Error('Invalid shared sample width');
     this.channelCount = channelCount;
     this.samplerate = samplerate;
@@ -463,6 +467,7 @@ export class SharedWorkerSampleStore implements SampleStore {
     signal?: AbortSignal,
     progress?: (fraction: number) => void,
   ): Promise<Blob> {
+    if (this.analogStore) return this.analogStore.exportSR(workspace, triggerSample, acquisition, signal, progress);
     if (this.failure) return Promise.reject(this.failure);
     if (this.disposed) return Promise.reject(new DOMException('Shared capture store disposed', 'AbortError'));
     const id = this.nextId++;
@@ -528,6 +533,7 @@ export class SharedWorkerSampleStore implements SampleStore {
     this.disposed = true;
     this.worker.terminate();
     this.viewWorker.terminate();
+    this.analogStore?.dispose();
     const error = new DOMException('Shared capture store disposed', 'AbortError');
     for (const item of this.pending.values()) item.reject(error);
     this.pending.clear();

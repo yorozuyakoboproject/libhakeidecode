@@ -417,12 +417,16 @@ export async function serializeSR(
   signal?: AbortSignal,
 ): Promise<Blob> {
   const { store } = capture,
+    length = store.length,
     analogChannels = capture.analogChannels ?? [],
+    analogLengths = analogChannels.map(({ store }) =>
+      store instanceof TimedAnalogStore ? store.native.length : store.length,
+    ),
     count = capture.logicChannelCount ?? store.channelCount,
     unit = Math.ceil(count / 8);
   if (!Number.isInteger(count) || count < 0 || count > store.channelCount || (count === 0 && !analogChannels.length))
     throw new Error('Invalid channel count');
-  if (store.length < 1) throw new Error('Invalid sample length');
+  if (length < 1) throw new Error('Invalid sample length');
   const multiRate = analogChannels.some(
     (channel) =>
       channel.store instanceof TimedAnalogStore ||
@@ -437,20 +441,13 @@ export async function serializeSR(
             channel.store instanceof PendingAnalogStore ||
             (Number.isSafeInteger(channel.store.samplerate) && channel.store.samplerate > 0)
           )
-        : channel.store.length !== store.length || channel.store.samplerate !== store.samplerate
+        : channel.store.length !== length || channel.store.samplerate !== store.samplerate
     )
       throw new Error('Inconsistent analog timeline');
-  if (workspace) parseWorkspace(workspace, count, store.length, analogChannels.length);
+  if (workspace) parseWorkspace(workspace, count, length, analogChannels.length);
   const names = workspace?.channelNames;
   if (names && names.analog.length !== analogChannels.length) throw new Error('Invalid analog channel names');
-  const totalBytes =
-      Number(store.length * BigInt(unit)) +
-      analogChannels.reduce(
-        (sum, channel) =>
-          sum +
-          Number(channel.store instanceof TimedAnalogStore ? channel.store.native.length : channel.store.length) * 4,
-        0,
-      ),
+  const totalBytes = Number(length * BigInt(unit)) + analogLengths.reduce((sum, length) => sum + Number(length) * 4, 0),
     chunkSamples = 1_048_576;
   async function* entries(): AsyncGenerator<ZipEntry> {
     yield { name: 'version', data: encoder.encode('2') };
@@ -487,7 +484,7 @@ export async function serializeSR(
           format: multiRate ? 'libhakei.session/v3' : 'libhakei.session/v2',
           ...(multiRate
             ? {
-                referenceLength: store.length,
+                referenceLength: length,
                 analogChannels: analogChannels.map((channel, channelIndex) => {
                   const timed = channel.store;
                   if (timed instanceof PendingAnalogStore)
@@ -497,14 +494,14 @@ export async function serializeSR(
                       nativeLength: 0n,
                       chunks: [],
                     };
-                  const native = timed instanceof TimedAnalogStore ? timed.native : timed;
+                  const nativeLength = analogLengths[channelIndex]!;
                   return timed instanceof TimedAnalogStore
                     ? {
                         name: names?.analog[channelIndex] ?? channel.name,
                         timing: timed.timing,
-                        nativeLength: native.length,
+                        nativeLength,
                         chunks: Array.from(
-                          { length: Number((native.length + 65535n) / 65536n) },
+                          { length: Number((nativeLength + 65535n) / 65536n) },
                           (_, i) => `hakei-analog-${analogChannels.indexOf(channel)}-${i + 1}.f32`,
                         ),
                       }
@@ -512,9 +509,9 @@ export async function serializeSR(
                         name: names?.analog[channelIndex] ?? channel.name,
                         direct: true,
                         samplerate: timed.samplerate,
-                        nativeLength: native.length,
+                        nativeLength,
                         chunks: Array.from(
-                          { length: Number((native.length + 65535n) / 65536n) },
+                          { length: Number((nativeLength + 65535n) / 65536n) },
                           (_, i) => `hakei-analog-${analogChannels.indexOf(channel)}-${i + 1}.f32`,
                         ),
                       };
@@ -535,9 +532,9 @@ export async function serializeSR(
       progress(Math.min(1, completed / totalBytes));
     };
     if (count)
-      for (let start = 0n; start < store.length; start += BigInt(chunkSamples)) {
+      for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
         signal?.throwIfAborted();
-        const end = minSample(store.length, start + BigInt(chunkSamples)),
+        const end = minSample(length, start + BigInt(chunkSamples)),
           packed = await packStoreRange(store, start, end, count);
         yield { name: `logic-1-${++chunk}`, data: packed, onWritten: () => report(packed.length) };
       }
@@ -545,9 +542,10 @@ export async function serializeSR(
       const view = analogChannels[channel]!.store;
       const analog = view instanceof TimedAnalogStore ? view.native : view;
       const block = multiRate ? 65536 : chunkSamples;
-      for (let start = 0n, index = 1; start < analog.length; start += BigInt(block), index++) {
+      const nativeLength = analogLengths[channel]!;
+      for (let start = 0n, index = 1; start < nativeLength; start += BigInt(block), index++) {
         signal?.throwIfAborted();
-        const end = minSample(analog.length, start + BigInt(block)),
+        const end = minSample(nativeLength, start + BigInt(block)),
           values = copyAnalogRange(analog, start, end);
         const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
         yield {

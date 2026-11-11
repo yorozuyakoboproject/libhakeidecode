@@ -80,7 +80,10 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
       logic: deviceChannelIndices(configuration, 'logic'),
       analog: deviceChannelIndices(configuration, 'analog'),
     };
-    this.shared = description.layout === 'packed-logic' && mode !== 'continuous';
+    this.shared =
+      mode !== 'continuous' &&
+      configuration.logicChannels > 0 &&
+      (description.layout === 'packed-logic' || description.layout === 'multi-rate');
     if (this.shared && typeof SharedArrayBuffer === 'undefined')
       throw new Error('Packed capture requires cross-origin isolation (COOP same-origin and COEP require-corp)');
     this.worker = new Worker(new URL('./acquisition-worker.js', import.meta.url), { type: 'module' });
@@ -130,6 +133,7 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
           ...(data.error ? { error: data.error } : {}),
           ...(data.timings ? { timings: data.timings } : {}),
         };
+        this.onLocalProgress?.();
       } else if (data.type === 'error') this.error = restoreComponentError(data);
       else if (data.type === 'closed') {
         this.closed = true;

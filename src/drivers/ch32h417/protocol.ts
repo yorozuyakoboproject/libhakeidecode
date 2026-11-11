@@ -60,7 +60,6 @@ export interface Capabilities {
   appProtocol: number;
   channelRates: AnalogRate[];
   compressionMask: number;
-  hsadcBlockSamples: number;
   analogMask: number;
   adc1Mask: number;
   hsadcMask: number;
@@ -164,7 +163,6 @@ export function readCapabilities(frame: Frame): Capabilities {
     appProtocol: actual,
     channelRates,
     compressionMask: v.getUint16(14, true) & 7,
-    hsadcBlockSamples: 4096,
     packetBytes: packet,
     blockBytes,
     heartbeatMs: 5000,

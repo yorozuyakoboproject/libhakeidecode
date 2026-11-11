@@ -457,7 +457,12 @@ export class CH32H417Device implements MultiRateDevice {
           throw new Error('H417 stream ended without END');
         }
         context.reportDiagnostics?.({
+          'transport.session': transport.session,
+          'transport.reads': transport.metrics.reads,
           'transport.receivedBytes': transport.metrics.receivedBytes,
+          'transport.parserMs': transport.metrics.parserMs,
+          'transport.queuePeak': transport.metrics.queuePeak,
+          'transport.dataFrames': transport.metrics.dataFrames,
           'transport.readMaxMs': transport.metrics.usbReadMaxMs,
           'transport.readGapMaxMs': transport.metrics.usbReadMaxGapMs,
           'transport.parserDelayMaxMs': transport.metrics.parserStartDelayMaxMs,

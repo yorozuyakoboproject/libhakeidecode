@@ -134,6 +134,9 @@ export class SharedChunkProducer {
   private prepared: { capacitySamples: number; buffer: SharedArrayBuffer } | null = null;
   private allocation: PendingAllocation | null = null;
   private published = 0n;
+  private notified = 0n;
+  private pendingCommit: Extract<SharedMessage, { type: 'commit' }> | null = null;
+  private commitTimer?: ReturnType<typeof setTimeout>;
   private terminalState: SharedCaptureState = 'open';
   private terminalError: string | undefined;
   private readonly publisher = { calls: 0, bytes: 0, totalMs: 0, maxMs: 0 };
@@ -222,13 +225,20 @@ export class SharedChunkProducer {
       Atomics.store(header, COMMITTED_SAMPLES, nextCommitted);
       this.published += BigInt(countSamples);
       sourceOffset += countBytes;
-      this.broadcast({
+      this.pendingCommit = {
         type: 'commit',
         sessionId: this.sessionId,
         chunkId: chunk.id,
         committedSamples: nextCommitted,
         publishedSamples: this.published,
-      });
+      };
+      if (
+        !this.notified ||
+        nextCommitted === chunk.capacitySamples ||
+        (this.published - this.notified) * BigInt(this.bytesPerSample) >= 1048576n
+      )
+        this.flushCommit();
+      else if (!this.commitTimer) this.commitTimer = setTimeout(() => this.flushCommit(), 2);
       const publishMs = performance.now() - publishStarted;
       this.publisher.calls++;
       this.publisher.bytes += countBytes;
@@ -244,6 +254,7 @@ export class SharedChunkProducer {
     if (this.terminalState !== 'open') return;
     if (state === 'complete' && this.published !== this.sampleCount)
       throw new Error('Cannot complete before the requested sample count is committed');
+    this.flushCommit();
     this.terminalState = state;
     this.terminalError = error;
     for (const chunk of this.directory) Atomics.store(sharedHeader(chunk), CHUNK_STATE, stateCode(state));
@@ -256,6 +267,15 @@ export class SharedChunkProducer {
     });
     this.prepared = null;
     this.reportProgress();
+  }
+
+  private flushCommit(): void {
+    clearTimeout(this.commitTimer);
+    this.commitTimer = undefined;
+    if (!this.pendingCommit) return;
+    this.broadcast(this.pendingCommit);
+    this.notified = this.pendingCommit.publishedSamples;
+    this.pendingCommit = null;
   }
 
   private capacityAt(startSample: bigint): number {

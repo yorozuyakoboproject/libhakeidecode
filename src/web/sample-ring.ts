@@ -82,26 +82,42 @@ export class SampleRing {
       if (ArrayBuffer.isView(values) && 'subarray' in values)
         page.values.set((values as Values).subarray(offset, offset + take), local);
       else for (let i = 0; i < take; i++) page.values[local + i] = values[offset + i]!;
-      for (let group = Math.floor(local / GROUP_SAMPLES); group < Math.ceil((local + take) / GROUP_SAMPLES); group++) {
-        let low = this.digital ? 0xffffffff : Infinity,
-          high = this.digital ? 0 : -Infinity,
-          sum = 0;
-        const end = Math.min(page.values.length, (group + 1) * GROUP_SAMPLES);
-        for (let i = group * GROUP_SAMPLES; i < end; i++) {
-          const value = page.values[i]!;
-          if (this.digital) {
+      const firstGroup = Math.floor(local / GROUP_SAMPLES),
+        afterGroup = Math.ceil((local + take) / GROUP_SAMPLES);
+      if (this.digital) {
+        const values = page.values as Uint32Array;
+        for (let group = firstGroup; group < afterGroup; group++) {
+          let low = -1,
+            high = 0;
+          const end = Math.min(values.length, (group + 1) * GROUP_SAMPLES);
+          for (let i = group * GROUP_SAMPLES; i < end; i++) {
+            const value = values[i]!;
             low &= value;
             high |= value;
-          } else {
+          }
+          const summaryOffset = group * 3;
+          page.summary[summaryOffset] = low >>> 0;
+          page.summary[summaryOffset + 1] = high >>> 0;
+          page.summary[summaryOffset + 2] = 0;
+        }
+      } else {
+        const values = page.values as Float32Array;
+        for (let group = firstGroup; group < afterGroup; group++) {
+          let low = Infinity,
+            high = -Infinity,
+            sum = 0;
+          const end = Math.min(values.length, (group + 1) * GROUP_SAMPLES);
+          for (let i = group * GROUP_SAMPLES; i < end; i++) {
+            const value = values[i]!;
             low = Math.min(low, value);
             high = Math.max(high, value);
             sum += value;
           }
+          const summaryOffset = group * 3;
+          page.summary[summaryOffset] = low;
+          page.summary[summaryOffset + 1] = high;
+          page.summary[summaryOffset + 2] = sum;
         }
-        const summaryOffset = group * 3;
-        page.summary[summaryOffset] = this.digital ? low >>> 0 : low;
-        page.summary[summaryOffset + 1] = this.digital ? high >>> 0 : high;
-        page.summary[summaryOffset + 2] = sum;
       }
       let first = Math.floor(local / GROUP_SAMPLES),
         after = Math.ceil((local + take) / GROUP_SAMPLES);
