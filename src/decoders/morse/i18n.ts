@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.morse.name': 'Morse *',
+    'decoder.morse.description': 'Demodulated morse code protocol.',
+    'decoder.morse.channel.data': 'Data',
+    'decoder.morse.option.timeunit': 'Time unit (guess)',
+    'decoder.morse.row.0': 'Times',
+    'decoder.morse.row.1': 'Units',
+    'decoder.morse.row.2': 'Symbols',
+    'decoder.morse.row.3': 'Letters',
+    'decoder.morse.row.4': 'Words',
+    'decoder.morse.annotation.0': 'Time',
+    'decoder.morse.annotation.1': 'Unit',
+    'decoder.morse.annotation.2': 'Symbol',
+    'decoder.morse.annotation.3': 'Letter',
+    'decoder.morse.annotation.4': 'Word',
+  },
+  'zh-CN': {
+    'decoder.morse.name': '摩尔斯电码 *',
+    'decoder.morse.description': '解调后的摩尔斯电码协议。',
+    'decoder.morse.channel.data': '数据线',
+    'decoder.morse.option.timeunit': '时间单位（估计）',
+    'decoder.morse.row.0': '时间',
+    'decoder.morse.row.1': '单位',
+    'decoder.morse.row.2': '符号',
+    'decoder.morse.row.3': '字母',
+    'decoder.morse.row.4': '单词',
+    'decoder.morse.annotation.0': '时间',
+    'decoder.morse.annotation.1': '单位',
+    'decoder.morse.annotation.2': '符号',
+    'decoder.morse.annotation.3': '字母',
+    'decoder.morse.annotation.4': '单词',
+  },
+} as const satisfies ComponentMessages;

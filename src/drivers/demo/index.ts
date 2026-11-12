@@ -1,5 +1,4 @@
 import { encoderIds, loadSignalEncoder } from '../../generated/encoders.js';
-import { createSampleChunk, type SampleChunk } from '../../libhakei/index.js';
 import {
   deviceChannelIndices,
   validateDeviceConfiguration,
@@ -46,7 +45,7 @@ export interface DemoDriverOptions {
   readonly signals: readonly DemoSignal[];
 }
 
-type DemoAcquisitionChunk = SampleChunk | AnalogStreamChunk | TimelineChunk;
+type DemoAcquisitionChunk = PackedLogicChunk | AnalogStreamChunk | TimelineChunk;
 
 const ANALOG_TIMING = {
   direct: true as const,
@@ -61,6 +60,12 @@ const ANALOG_TIMING = {
 function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive safe integer`);
   return value;
+}
+
+function logicSampleBytes(channelCount: number): 1 | 2 | 3 | 4 {
+  if (!Number.isSafeInteger(channelCount) || channelCount < 1 || channelCount > 32)
+    throw new RangeError('Demo logic channel count must be a positive integer up to 32');
+  return Math.ceil(channelCount / 8) as 1 | 2 | 3 | 4;
 }
 
 function uniqueChannels(values: readonly number[], maximum: number, name: string): readonly number[] {
@@ -178,10 +183,10 @@ export class DemoDevice implements MultiRateDevice {
   getCapabilities(_configuration: DeviceConfiguration) {
     return this.descriptor.capabilities;
   }
-  getAcquisitionDescription(_configuration: DeviceConfiguration) {
+  getAcquisitionDescription(configuration: DeviceConfiguration) {
     return {
-      layout: 'multi-rate' as const,
-      logicSampleBytes: 1 as const,
+      layout: configuration.analogChannels ? ('multi-rate' as const) : ('packed-logic' as const),
+      logicSampleBytes: configuration.logicChannels ? logicSampleBytes(configuration.logicChannels) : (1 as const),
       analogSampleBytes: 4 as const,
       chunkSamples: 65_536,
     };
@@ -215,22 +220,7 @@ export class DemoDevice implements MultiRateDevice {
   ): AsyncGenerator<PackedLogicChunk> {
     const channels = deviceChannelIndices(configuration, 'logic');
     for await (const chunk of this.createMultiRateSource(configuration, context)) {
-      if ('format' in chunk) continue;
-      const data = new Uint8Array(chunk.length);
-      channels.forEach((physical, index) => {
-        const values = chunk.channels[`D${physical}`];
-        if (!values) return;
-        for (let sample = 0; sample < data.length; sample++) data[sample] |= (values[sample] ? 1 : 0) << index;
-      });
-      yield {
-        format: 'packed-logic',
-        startSample: chunk.startSample,
-        sampleRate: chunk.sampleRate,
-        channelCount: channels.length,
-        length: chunk.length,
-        encoding: 'raw8',
-        data,
-      };
+      if (chunk.format === 'packed-logic' && chunk.channelCount === channels.length) yield chunk;
     }
   }
 }
@@ -290,28 +280,41 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
     const patterns = await this.digitalPatterns();
     const analogSignals = this.analogSignals();
     const analogLength = analogSampleCount(length, analogSampleRate, sampleRate);
+    const values = new Uint8Array(chunkSamples);
     if (logicChannels.length) {
+      const sampleBytes = logicSampleBytes(logicChannels.length),
+        encoding =
+          sampleBytes === 1
+            ? ('raw8' as const)
+            : sampleBytes === 2
+              ? ('raw16' as const)
+              : sampleBytes === 3
+                ? ('raw24' as const)
+                : ('raw32' as const);
       for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
         this.context.signal?.throwIfAborted();
         const count = Number(minSample(BigInt(chunkSamples), length - start));
         const buffer = await this.context.acquireBuffer();
-        const channels: Record<string, Uint8Array> = {};
-        let offset = 0;
-        for (const physical of logicChannels) {
-          const values = new Uint8Array(buffer, offset, count);
-          offset += count;
-          values.fill(0);
+        const data = new Uint8Array(buffer, 0, count * sampleBytes);
+        data.fill(0);
+        for (const [index, physical] of logicChannels.entries()) {
           const pattern = patterns.get(physical);
-          if (pattern) copyPattern(values, pattern, start);
-          channels[`D${physical}`] = values;
+          if (!pattern) continue;
+          const slice = values.subarray(0, count);
+          copyPattern(slice, pattern, start);
+          const byte = index >>> 3,
+            mask = 1 << (index & 7);
+          for (let sample = 0; sample < count; sample++) if (slice[sample]) data[sample * sampleBytes + byte] |= mask;
         }
-        yield createSampleChunk({
+        yield {
+          format: 'packed-logic',
           startSample: start,
           sampleRate,
-          channels,
-          isFinal: start + BigInt(count) === length,
-          metadata: { source: 'demo', signals: this.options.signals.length },
-        });
+          channelCount: logicChannels.length,
+          length: count,
+          encoding,
+          data,
+        };
         if (analogChannels.length && analogLength > 0n) {
           const end = start + BigInt(count),
             analogStart = analogSampleCount(start, analogSampleRate, sampleRate),

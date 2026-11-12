@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.spdif.name': 'S/PDIF *',
+    'decoder.spdif.description': 'Serial bus for connecting digital audio devices.',
+    'decoder.spdif.channel.data': 'Data',
+    'decoder.spdif.row.0': 'Bits',
+    'decoder.spdif.row.1': 'Info',
+    'decoder.spdif.row.2': 'Samples',
+    'decoder.spdif.annotation.0': 'Bitrate / baudrate',
+    'decoder.spdif.annotation.1': 'Preamble',
+    'decoder.spdif.annotation.2': 'Bit',
+    'decoder.spdif.annotation.3': 'Auxillary-audio-databit',
+    'decoder.spdif.annotation.4': 'Audio Sample',
+    'decoder.spdif.annotation.5': 'Data Valid',
+    'decoder.spdif.annotation.6': 'Subcode data',
+    'decoder.spdif.annotation.7': 'Channnel Status',
+    'decoder.spdif.annotation.8': 'Parity Bit',
+  },
+  'zh-CN': {
+    'decoder.spdif.name': 'S/PDIF 数字音频 *',
+    'decoder.spdif.description': '连接数字音频设备的串行总线。',
+    'decoder.spdif.channel.data': '数据',
+    'decoder.spdif.row.0': '位',
+    'decoder.spdif.row.1': '信息',
+    'decoder.spdif.row.2': '采样',
+    'decoder.spdif.annotation.0': '采样率/比特率',
+    'decoder.spdif.annotation.1': '前导码',
+    'decoder.spdif.annotation.2': '位',
+    'decoder.spdif.annotation.3': '辅助音频数据位',
+    'decoder.spdif.annotation.4': '音频采样值',
+    'decoder.spdif.annotation.5': '数据有效标志',
+    'decoder.spdif.annotation.6': '子码数据',
+    'decoder.spdif.annotation.7': '通道状态',
+    'decoder.spdif.annotation.8': '奇偶校验位',
+  },
+} as const satisfies ComponentMessages;

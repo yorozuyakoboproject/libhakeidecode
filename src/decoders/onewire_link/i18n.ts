@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.onewire_link.name': '1-Wire link layer *',
+    'decoder.onewire_link.description': 'Bidirectional, half-duplex, asynchronous serial bus.',
+    'decoder.onewire_link.channel.owr': 'OWR',
+    'decoder.onewire_link.option.overdrive': 'Start in overdrive speed',
+    'decoder.onewire_link.value.yes': 'Yes',
+    'decoder.onewire_link.value.no': 'No',
+    'decoder.onewire_link.row.0': 'Bits',
+    'decoder.onewire_link.row.1': 'Info',
+    'decoder.onewire_link.row.2': 'Warnings',
+    'decoder.onewire_link.annotation.0': 'Bit',
+    'decoder.onewire_link.annotation.1': 'Warning',
+    'decoder.onewire_link.annotation.2': 'Reset',
+    'decoder.onewire_link.annotation.3': 'Presence',
+    'decoder.onewire_link.annotation.4': 'Overdrive speed notification',
+  },
+  'zh-CN': {
+    'decoder.onewire_link.name': '1-Wire 链路层 *',
+    'decoder.onewire_link.description': '双向、半双工、异步串行总线。',
+    'decoder.onewire_link.channel.owr': '1-Wire 信号线',
+    'decoder.onewire_link.option.overdrive': '启动时使用高速模式',
+    'decoder.onewire_link.value.yes': '是',
+    'decoder.onewire_link.value.no': '否',
+    'decoder.onewire_link.row.0': '位',
+    'decoder.onewire_link.row.1': '信息',
+    'decoder.onewire_link.row.2': '警告',
+    'decoder.onewire_link.annotation.0': '位',
+    'decoder.onewire_link.annotation.1': '警告',
+    'decoder.onewire_link.annotation.2': '复位',
+    'decoder.onewire_link.annotation.3': '存在脉冲',
+    'decoder.onewire_link.annotation.4': '高速模式通知',
+  },
+} as const satisfies ComponentMessages;

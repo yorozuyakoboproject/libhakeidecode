@@ -6,6 +6,9 @@ import type { UARTFrame } from './runtime.js';
 const frame = (value: DecodeFrame): UARTFrame => value as UARTFrame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createUARTRuntime,
   csvHeader: 'direction,start_sample,end_sample,time_s,value_hex,value_dec,valid',
   csvRow(value, sampleRate, triggerSample): string {

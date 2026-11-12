@@ -6,6 +6,9 @@ import type { WS2812Frame } from './index.js';
 const frame = (value: DecodeFrame): WS2812Frame => value as WS2812Frame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createWS2812Runtime,
   csvHeader: 'start_sample,end_sample,time_s,index,r,g,b,w,text',
   csvRow(value, sampleRate, triggerSample): string {

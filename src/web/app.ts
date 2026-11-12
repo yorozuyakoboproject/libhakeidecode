@@ -9,14 +9,23 @@ import { DeviceControls } from './device-controls.js';
 import { SignalControls } from './signal-controls.js';
 import { driverDefinitions } from '../drivers/index.js';
 import { DeviceClient } from './device-client.js';
-import { DecodeClient, type DecodeResult, type LiveDecodeSession } from './decode-client.js';
+import {
+  DecodeClient,
+  type DecodeGraphResult,
+  type DecodeResult,
+  type LiveDecodeGraphSession,
+  type LiveDecodeSession,
+} from './decode-client.js';
 import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
 import { openAnalogSettings, openDigitalSettings } from './channel-controls.js';
 import { parseAnalogSettings, type AnalogSettings } from './analog-settings.js';
 import type { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
 import type { DecoderId } from './protocol.js';
-import type { ProtocolSettings, WorkspaceSettings } from './workspace.js';
+import type { ProtocolMappingValue, ProtocolSettings, WorkspaceSettings } from './workspace.js';
+import { validateProtocolGraph } from './workspace.js';
+import type { DecodeGraphNode, ProtocolBinding } from '../decoders/definition.js';
+import type { DecodeProgressMessage } from './protocol.js';
 import type { OptionDeclaration, OptionValue } from '../libhakeidecode/types.js';
 import './preferences.js';
 import {
@@ -77,6 +86,7 @@ function downloadBlob(name: string, blob: Blob): void {
 }
 export interface ProtocolInstance extends ProtocolSettings {
   client: DecodeClient;
+  ownClient: DecodeClient;
   annotations: AnnotationIndex;
   frameCount: number;
   annotationCount: number;
@@ -86,9 +96,14 @@ export interface ProtocolInstance extends ProtocolSettings {
   progress: number;
   error: string | UIError | null;
   savedOptions: Record<DecoderId, Record<string, OptionValue>>;
-  liveSession?: LiveDecodeSession;
+  liveSession?: LiveDecodeSession | LiveDecodeGraphSession;
 }
 const colors = ['#70d7a1', '#efbc6b', '#79adff', '#d091eb', '#72c9df', '#ec8291', '#b3ca78', '#aca6eb'];
+interface ProtocolGraphGroup {
+  protocols: ProtocolInstance[];
+  nodes: DecodeGraphNode[];
+  channels: Record<string, number>;
+}
 function addStageTiming(stage: StageTiming, elapsed: number): void {
   stage.calls++;
   stage.totalMs += elapsed;
@@ -200,14 +215,15 @@ export class AnalyzerApp {
       if ((this.state === 'loading' && !this.captureAbort) || !this.selectedProtocol) return;
       const protocol = this.selectedProtocol;
       this.commitForm();
+      const affected = [protocol, ...this.downstreamOf(protocol.id)];
       if (this.captureAbort) this.cancelDecodeOnly();
-      else this.cancelDecodes(protocol);
-      this.clearProtocol(protocol);
+      else this.cancelDecodes();
+      for (const item of affected) this.clearProtocol(item);
       this.setStatus('ready', 'status.updated');
       this.decodeTimer = setTimeout(() => {
         this.decodeTimer = null;
         if (this.captureAbort) this.scheduleLiveDecode();
-        else void this.runProtocols([protocol]);
+        else void this.runProtocols(affected);
       }, 180);
     });
     element('open-file').addEventListener('click', () => element<HTMLInputElement>('file-input').click());
@@ -348,7 +364,8 @@ export class AnalyzerApp {
       options: { ...defaults(settings.decoder), ...settings.options },
       mapping: { ...settings.mapping },
       client,
-      annotations: new PagedAnnotationIndex(client, () => this.updateMemoryUsage()),
+      ownClient: client,
+      annotations: new PagedAnnotationIndex(client, settings.id, () => this.updateMemoryUsage()),
       frameCount: 0,
       annotationCount: 0,
       resultBytes: 0,
@@ -363,10 +380,16 @@ export class AnalyzerApp {
     this.commitForm();
     const index = this.protocols.findIndex((p) => p.id === id);
     if (index < 0) return;
-    const protocol = this.protocols[index]!;
+    const downstream = this.downstreamOf(id);
     if (this.captureAbort) this.cancelDecodeOnly();
-    else this.cancelDecodes(protocol);
+    else this.cancelDecodes();
     this.protocols.splice(index, 1);
+    for (const item of downstream) {
+      for (const [key, value] of Object.entries(item.mapping))
+        if (value && typeof value === 'object' && !Array.isArray(value) && value.instanceId === id)
+          delete item.mapping[key];
+      this.clearProtocol(item);
+    }
     this.syncTraces();
     this.selectProtocol(this.protocols[Math.min(index, this.protocols.length - 1)]?.id ?? null, false);
     this.setStatus(
@@ -451,7 +474,11 @@ export class AnalyzerApp {
       } else {
         input = document.createElement('input');
         input.type = typeof option.default === 'number' ? 'number' : 'text';
-        input.step = option.step === 'any' ? 'any' : String(option.step ?? 1);
+        input.step =
+          option.step === 'any' ||
+          (option.step === undefined && typeof option.default === 'number' && !Number.isInteger(option.default))
+            ? 'any'
+            : String(option.step ?? 1);
         if (option.min !== undefined) input.min = String(option.min);
         if (option.max !== undefined) input.max = String(option.max);
         input.required = !!option.required;
@@ -481,6 +508,7 @@ export class AnalyzerApp {
       const select = document.getElementById('mapping-' + input.key) as HTMLSelectElement | null;
       if (select?.options.length) {
         if (select.value === '') delete protocol.mapping[input.key];
+        else if (input.kind === 'protocol') protocol.mapping[input.key] = JSON.parse(select.value);
         else protocol.mapping[input.key] = Number(select.value);
       }
     }
@@ -509,17 +537,35 @@ export class AnalyzerApp {
       none.dataset.i18n = 'channels.none';
       none.textContent = t('channels.none');
       select.append(none);
-      for (let i = 0; i < count; i++) {
-        const item = document.createElement('option'),
-          labelText = capture?.labels[i] ?? 'D' + this.deviceControls.selectedChannels('logic')[i];
-        item.value = String(i);
-        item.textContent = labelText;
-        select.append(item);
+      if (input.kind === 'protocol') {
+        const downstream = new Set(this.downstreamOf(protocol.id).map((item) => item.id));
+        for (const upstream of this.protocols) {
+          if (upstream.id === protocol.id || downstream.has(upstream.id)) continue;
+          const outputs = decoderDefinition(upstream.decoder).descriptor.outputs ?? [];
+          if (!outputs.includes(input.key)) continue;
+          const item = document.createElement('option');
+          item.value = JSON.stringify({ instanceId: upstream.id, protoId: input.key });
+          item.textContent = `${upstream.name} · ${input.key}`;
+          select.append(item);
+        }
+      } else {
+        for (let i = 0; i < count; i++) {
+          const item = document.createElement('option'),
+            labelText = capture?.labels[i] ?? 'D' + this.deviceControls.selectedChannels('logic')[i];
+          item.value = String(i);
+          item.textContent = labelText;
+          select.append(item);
+        }
       }
+      const value = protocol.mapping[input.key];
       select.value =
-        protocol.mapping[input.key] !== undefined && protocol.mapping[input.key]! < count
-          ? String(protocol.mapping[input.key])
-          : '';
+        input.kind === 'protocol'
+          ? value && typeof value === 'object' && !Array.isArray(value)
+            ? JSON.stringify(value)
+            : ''
+          : typeof value === 'number' && value < count
+            ? String(value)
+            : '';
       label.append(select);
       container.append(label);
     }
@@ -535,6 +581,7 @@ export class AnalyzerApp {
     for (const protocol of this.protocols) {
       const keys = new Set(decoderDefinition(protocol.decoder).ui.inputs.map((input) => input.key));
       for (const [key, value] of Object.entries(protocol.mapping)) {
+        if (typeof value !== 'number') continue;
         const physical = this.mappingChannels[value],
           next = physical === undefined ? -1 : channels.indexOf(physical);
         if (!keys.has(key) || device !== this.mappingDevice || next < 0) delete protocol.mapping[key];
@@ -554,23 +601,56 @@ export class AnalyzerApp {
     )
       return;
     this.commitForm();
+    const downstream = this.downstreamOf(protocol.id);
     if (this.captureAbort) this.cancelDecodeOnly();
-    else this.cancelDecodes(protocol);
+    else this.cancelDecodes();
     protocol.savedOptions[protocol.decoder] = { ...protocol.options };
     protocol.decoder = decoder;
     protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
     const previous = protocol.mapping,
-      next: Record<string, number> = {},
+      next: Record<string, ProtocolMappingValue> = {},
       inputs = decoderDefinition(decoder).ui.inputs;
-    for (const input of inputs) if (previous[input.key] !== undefined) next[input.key] = previous[input.key]!;
+    for (const input of inputs) {
+      const value = previous[input.key];
+      if (input.kind === 'protocol' ? value && typeof value === 'object' : typeof value === 'number')
+        next[input.key] = value!;
+    }
     if (!Object.keys(next).length && inputs.length) {
-      const first = Object.values(previous)[0];
-      if (first !== undefined) next[inputs[0]!.key] = first;
+      const first = Object.values(previous).find((value) => typeof value === 'number');
+      if (first !== undefined && inputs[0]?.kind !== 'protocol') next[inputs[0]!.key] = first;
     }
     protocol.mapping = next;
     this.clearProtocol(protocol);
+    for (const item of downstream) {
+      for (const [key, value] of Object.entries(item.mapping))
+        if (value && typeof value === 'object' && !Array.isArray(value) && value.instanceId === protocol.id)
+          delete item.mapping[key];
+      this.clearProtocol(item);
+    }
     this.selectProtocol(protocol.id, false);
     void this.startDecode();
+  }
+  private downstreamOf(id: string): ProtocolInstance[] {
+    const result: ProtocolInstance[] = [];
+    const seen = new Set<string>();
+    const visit = (upstreamId: string): void => {
+      for (const protocol of this.protocols) {
+        if (seen.has(protocol.id)) continue;
+        const dependent = Object.values(protocol.mapping).some(
+          (value) =>
+            value !== null &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            (value as ProtocolBinding).instanceId === upstreamId,
+        );
+        if (!dependent) continue;
+        seen.add(protocol.id);
+        result.push(protocol);
+        visit(protocol.id);
+      }
+    };
+    visit(id);
+    return result;
   }
   private refreshDecoderUI(): void {
     const definition = decoderDefinition(this.decoder),
@@ -615,12 +695,113 @@ export class AnalyzerApp {
       }),
     );
   }
-  private mappingFor(protocol: ProtocolSettings): Record<string, number> {
+  private physicalMappingFor(protocol: ProtocolSettings): Record<string, number | string> {
     return Object.fromEntries(
       decoderDefinition(protocol.decoder).ui.inputs.flatMap((input) =>
-        protocol.mapping[input.key] === undefined ? [] : [[input.key, protocol.mapping[input.key]!]],
+        typeof protocol.mapping[input.key] === 'number' ? [[input.key, protocol.mapping[input.key] as number]] : [],
       ),
     );
+  }
+  private mappingFor(protocol: ProtocolSettings): Record<string, ProtocolMappingValue> {
+    return { ...protocol.mapping };
+  }
+  private bindClient(protocol: ProtocolInstance, client: DecodeClient): void {
+    protocol.client = client;
+    if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.bind(client);
+  }
+  private protocolParents(protocol: ProtocolSettings): ProtocolInstance[] {
+    const parents = new Map<string, ProtocolInstance>();
+    for (const value of Object.values(protocol.mapping)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const parent = this.protocols.find((candidate) => candidate.id === value.instanceId);
+      if (parent) parents.set(parent.id, parent);
+    }
+    return [...parents.values()];
+  }
+  private graphGroups(requested: readonly ProtocolInstance[]): ProtocolGraphGroup[] {
+    const included = new Set(requested);
+    const queue = [...requested];
+    while (queue.length) {
+      const protocol = queue.pop()!;
+      for (const parent of this.protocolParents(protocol)) {
+        if (included.has(parent)) continue;
+        if (!this.hasInput(parent)) throw this.missingInputError(parent);
+        included.add(parent);
+        queue.push(parent);
+      }
+      for (const child of this.downstreamOf(protocol.id)) {
+        if (included.has(child)) continue;
+        included.add(child);
+        queue.push(child);
+      }
+    }
+    for (const protocol of included) if (!this.hasInput(protocol)) throw this.missingInputError(protocol);
+    validateProtocolGraph([...included], true);
+
+    const groups: ProtocolInstance[][] = [];
+    const seen = new Set<string>();
+    for (const start of included) {
+      if (seen.has(start.id)) continue;
+      const group: ProtocolInstance[] = [];
+      const members = [start];
+      seen.add(start.id);
+      while (members.length) {
+        const protocol = members.pop()!;
+        group.push(protocol);
+        const parents = new Set(this.protocolParents(protocol).map((item) => item.id));
+        for (const candidate of included) {
+          if (seen.has(candidate.id)) continue;
+          const linked =
+            parents.has(candidate.id) || this.protocolParents(candidate).some((parent) => parent.id === protocol.id);
+          if (!linked) continue;
+          seen.add(candidate.id);
+          members.push(candidate);
+        }
+      }
+      groups.push(group);
+    }
+
+    return groups.map((group) => {
+      const remaining = new Set(group);
+      const ordered: ProtocolInstance[] = [];
+      while (remaining.size) {
+        const next = [...remaining].find((protocol) =>
+          this.protocolParents(protocol).every((parent) => !remaining.has(parent)),
+        );
+        if (!next) throw new UIError('error.protocolCycle');
+        remaining.delete(next);
+        ordered.push(next);
+      }
+      const channels: Record<string, number> = {};
+      const nodes = ordered.map((protocol): DecodeGraphNode => {
+        const inputs = decoderDefinition(protocol.decoder).ui.inputs;
+        const bindings = Object.fromEntries(
+          inputs.flatMap((input) => {
+            const value = protocol.mapping[input.key];
+            return input.kind === 'protocol' && value && typeof value === 'object' && !Array.isArray(value)
+              ? [[input.key, { instanceId: value.instanceId, protoId: value.protoId }] as const]
+              : [];
+          }),
+        );
+        const mappedChannels: Record<string, string> = {};
+        if (!inputs.some((input) => input.kind === 'protocol')) {
+          for (const [key, value] of Object.entries(this.physicalMappingFor(protocol))) {
+            if (typeof value !== 'number') continue;
+            const source = `graph:${protocol.id}:${key}`;
+            mappedChannels[key] = source;
+            channels[source] = value;
+          }
+        }
+        return {
+          id: protocol.id,
+          decoder: protocol.decoder,
+          options: this.readOptions(protocol),
+          ...(Object.keys(mappedChannels).length ? { channels: mappedChannels } : {}),
+          ...(Object.keys(bindings).length ? { inputs: bindings } : {}),
+        };
+      });
+      return { protocols: ordered, nodes, channels };
+    });
   }
   stopCapture(): void {
     if (!this.captureStop || this.captureStop.signal.aborted) return;
@@ -1039,8 +1220,32 @@ export class AnalyzerApp {
     const definition = decoderDefinition(protocol.decoder),
       mapped = definition.ui.inputs.filter((input) => protocol.mapping[input.key] !== undefined);
     if (!mapped.length) return false;
-    if (definition.ui.inputRequirement === 'any') return true;
-    return definition.ui.inputs.every((input) => input.optional || protocol.mapping[input.key] !== undefined);
+    const usable = (input: (typeof definition.ui.inputs)[number]): boolean => {
+      const value = protocol.mapping[input.key];
+      return (
+        input.optional ||
+        (input.kind === 'protocol'
+          ? !!value &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            this.protocols.some((candidate) => candidate.id === value.instanceId)
+          : typeof value === 'number')
+      );
+    };
+    return definition.ui.inputRequirement === 'any' ? mapped.some(usable) : definition.ui.inputs.every(usable);
+  }
+  private missingInputError(protocol: ProtocolSettings): UIError {
+    const missingProtocol = decoderDefinition(protocol.decoder).ui.inputs.some((input) => {
+      if (input.kind !== 'protocol') return false;
+      const value = protocol.mapping[input.key];
+      return (
+        !value ||
+        typeof value !== 'object' ||
+        Array.isArray(value) ||
+        !this.protocols.some((candidate) => candidate.id === value.instanceId)
+      );
+    });
+    return new UIError(missingProtocol ? 'error.protocolMapping' : 'error.noMapping');
   }
   async startDecode(): Promise<void> {
     if (
@@ -1051,6 +1256,10 @@ export class AnalyzerApp {
     )
       return;
     this.commitForm();
+    if (!this.hasInput(this.selectedProtocol)) {
+      this.showMessage(this.missingInputError(this.selectedProtocol), true);
+      return;
+    }
     if (this.captureAbort) {
       if (this.selectedProtocol.liveSession) {
         this.selectedProtocol.client.cancel();
@@ -1082,85 +1291,144 @@ export class AnalyzerApp {
     )
       return;
     let started = false;
-    for (const protocol of this.protocols) {
-      if (!this.hasInput(protocol)) continue;
-      if (capture.acquisition?.mode === 'continuous' && protocol.state === 'error') continue;
-      if (!protocol.liveSession) {
-        this.clearProtocol(protocol);
-        protocol.state = 'decoding';
+    let groups: ProtocolGraphGroup[];
+    try {
+      groups = this.graphGroups(this.protocols);
+    } catch (error) {
+      this.showMessage(errorLabel(error), true);
+      return;
+    }
+    for (const group of groups) {
+      const protocols = group.protocols;
+      if (capture.acquisition?.mode === 'continuous' && protocols.every((protocol) => protocol.state === 'error'))
+        continue;
+      const sessions = new Set(protocols.map((protocol) => protocol.liveSession).filter(Boolean));
+      if (sessions.size !== 1 || protocols.some((protocol) => !protocol.liveSession)) {
+        for (const client of new Set(protocols.map((protocol) => protocol.client))) client.cancel();
+        for (const protocol of protocols) this.clearProtocol(protocol);
+        const leader = protocols[0]!;
+        for (const protocol of protocols) {
+          this.bindClient(protocol, leader.ownClient);
+          protocol.state = 'decoding';
+        }
         try {
-          const mapping = this.mappingFor(protocol);
-          const session = protocol.client.startLive(
+          const session = leader.ownClient.startLiveGraph(
             capture,
-            this.readOptions(protocol),
-            mapping,
-            protocol.decoder,
+            group.nodes,
+            group.channels,
             capture.sharedSource,
-            (progress, frames, annotations, resultBytes) => {
-              protocol.progress = progress;
-              protocol.frameCount = frames;
-              protocol.annotationCount = annotations;
-              protocol.resultBytes = resultBytes;
-              if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(annotations);
-              this.updateMemoryUsage();
-              this.updateDecodeSummary();
-              if (protocol === this.selectedProtocol) {
-                this.renderer.schedule();
-              }
-            },
+            (progress) => this.applyGraphProgress(protocols, progress),
           );
-          protocol.liveSession = session;
+          for (const protocol of protocols) protocol.liveSession = session;
           started = true;
         } catch (error) {
-          protocol.state = 'error';
-          protocol.error = error instanceof UIError ? error : errorLabel(error);
-          this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+          for (const protocol of protocols) {
+            protocol.state = 'error';
+            protocol.error = error instanceof UIError ? error : errorLabel(error);
+          }
+          this.showMessage(`${leader.name}: ${errorLabel(error)}`, true);
           continue;
         }
       }
-      const session = protocol.liveSession;
+      const session = protocols[0]!.liveSession;
       if (!session) continue;
       started = true;
-      protocol.state = 'decoding';
       void session.advance(capture).catch((error) => {
-        if (protocol.liveSession !== session) return;
-        protocol.liveSession = undefined;
-        protocol.state = 'error';
-        protocol.error = error instanceof UIError ? error : errorLabel(error);
-        this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+        const active = protocols.some((protocol) => protocol.liveSession === session);
+        if (!active) return;
+        for (const protocol of protocols) {
+          if (protocol.liveSession !== session) continue;
+          protocol.liveSession = undefined;
+          protocol.state = 'error';
+          protocol.error = error instanceof UIError ? error : errorLabel(error);
+          this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+        }
         this.updateDecodeSummary();
       });
     }
     if (started && this.state !== 'decoding') this.setStatus('decoding', 'status.decoding');
     else this.updateDecodeSummary();
   }
+  private applyGraphProgress(group: readonly ProtocolInstance[], progress: DecodeProgressMessage): void {
+    for (const protocol of group) {
+      const result = progress.instances?.[protocol.id];
+      protocol.progress = progress.progress;
+      if (!result) continue;
+      protocol.frameCount = result.frames;
+      protocol.annotationCount = result.annotations;
+      protocol.resultBytes = result.resultBytes;
+      if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(result.annotations);
+    }
+    this.updateMemoryUsage();
+    this.updateDecodeSummary();
+    if (group.includes(this.selectedProtocol!)) this.renderer.schedule();
+  }
+  private applyGraphResult(protocol: ProtocolInstance, result: DecodeGraphResult): DecodeResult {
+    const decoded: DecodeResult = {
+      type: 'done',
+      decoder: result.decoder,
+      stats: result.stats,
+      result: result.result,
+    };
+    protocol.result = decoded;
+    protocol.frameCount = result.stats.frames;
+    protocol.annotationCount = result.stats.annotations;
+    protocol.resultBytes = result.stats.memory.totalBytes;
+    protocol.state = 'done';
+    protocol.progress = 1;
+    protocol.error = null;
+    if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(protocol.annotationCount);
+    return decoded;
+  }
   private async finishLiveDecodes(capture: Capture): Promise<boolean> {
     const pending = this.protocols.filter((protocol) => protocol.liveSession);
     if (!pending.length) return false;
+    const sessions = new Map<LiveDecodeSession | LiveDecodeGraphSession, ProtocolInstance[]>();
+    for (const protocol of pending) {
+      const session = protocol.liveSession!;
+      const group = sessions.get(session) ?? [];
+      group.push(protocol);
+      sessions.set(session, group);
+    }
     this.setStatus('decoding', 'status.decoding');
     await Promise.all(
-      pending.map(async (protocol) => {
-        const session = protocol.liveSession!;
+      [...sessions].map(async ([session, group]) => {
         try {
           const result = await session.finish(capture);
-          if (protocol.liveSession !== session) return;
-          if (capture.diagnostics && result.stats.stages) capture.diagnostics.decodeWorker = { ...result.stats.stages };
-          protocol.liveSession = undefined;
-          protocol.result = result;
-          protocol.frameCount = result.stats.frames;
-          protocol.annotationCount = result.stats.annotations;
-          protocol.resultBytes = result.stats.memory.totalBytes;
-          if (protocol.annotations instanceof PagedAnnotationIndex)
-            protocol.annotations.setTotal(protocol.annotationCount);
-          protocol.state = 'done';
-          protocol.progress = 1;
-          if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
+          if (Array.isArray(result)) {
+            const byId = new Map(result.map((item) => [item.id, item]));
+            for (const protocol of group) {
+              const item = byId.get(protocol.id);
+              if (!item || protocol.liveSession !== session) continue;
+              const decoded = this.applyGraphResult(protocol, item);
+              if (capture.diagnostics && decoded.stats.stages)
+                capture.diagnostics.decodeWorker = { ...decoded.stats.stages };
+              if (decoded.stats.truncated || decoded.stats.binaryTruncated)
+                this.showMessage({ key: 'message.truncated' });
+            }
+          } else {
+            const protocol = group[0];
+            if (!protocol || protocol.liveSession !== session) return;
+            const decoded = this.applyGraphResult(protocol, {
+              id: protocol.id,
+              decoder: protocol.decoder,
+              stats: result.stats,
+              result: result.result,
+            });
+            if (capture.diagnostics && decoded.stats.stages)
+              capture.diagnostics.decodeWorker = { ...decoded.stats.stages };
+            if (decoded.stats.truncated || decoded.stats.binaryTruncated)
+              this.showMessage({ key: 'message.truncated' });
+          }
+          for (const protocol of group) if (protocol.liveSession === session) protocol.liveSession = undefined;
         } catch (error) {
-          if (protocol.liveSession !== session) return;
-          protocol.liveSession = undefined;
-          protocol.state = 'error';
-          protocol.error = error instanceof UIError ? error : errorLabel(error);
-          this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+          for (const protocol of group) {
+            if (protocol.liveSession !== session) continue;
+            protocol.liveSession = undefined;
+            protocol.state = 'error';
+            protocol.error = error instanceof UIError ? error : errorLabel(error);
+            this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+          }
         }
         this.updateDecodeSummary();
       }),
@@ -1211,6 +1479,7 @@ export class AnalyzerApp {
             capture.store.samplerate,
             capture.triggerSample,
             offset === 0,
+            protocol.id,
           );
           if (!csv) continue;
           if (writable) await writable.write(csv + '\r\n');
@@ -1253,63 +1522,73 @@ export class AnalyzerApp {
     const token = this.version,
       capture = this.capture;
     this.showMessage('');
-    const pending = [
+    const candidates = [
       ...protocols,
       ...this.protocols.filter((p) => !protocols.includes(p) && (p.state === 'ready' || p.state === 'cancelled')),
-    ].filter((p) => this.hasInput(p));
+    ];
+    const incomplete = candidates.find((protocol) => !this.hasInput(protocol));
+    if (incomplete) {
+      this.setStatus('ready', 'status.ready');
+      this.updateDecodeSummary();
+      this.showMessage(`${incomplete.name}: ${errorLabel(this.missingInputError(incomplete))}`, true);
+      return;
+    }
+    const pending = candidates;
     if (!pending.length) {
       this.setStatus('ready', 'status.ready');
       this.updateDecodeSummary();
       this.showCaptureOutcome();
       return;
     }
+    let groups: ProtocolGraphGroup[];
+    try {
+      groups = this.graphGroups(pending);
+    } catch (error) {
+      this.setStatus('ready', 'status.ready');
+      this.showMessage(errorLabel(error), true);
+      return;
+    }
     this.setStatus('decoding', 'status.decoding');
     let failed = false;
-    for (const protocol of pending) {
+    let elapsed = 0,
+      samples = 0n;
+    for (const group of groups) {
       if (token !== this.version) return;
-      this.clearProtocol(protocol);
-      protocol.state = 'decoding';
+      const protocols = group.protocols;
+      const leader = protocols[0]!;
+      for (const protocol of protocols) {
+        this.bindClient(protocol, leader.ownClient);
+        this.clearProtocol(protocol);
+        protocol.state = 'decoding';
+      }
       this.updateDecodeSummary();
       try {
-        const mapping = this.mappingFor(protocol);
-        const result = await protocol.client.run(
-          capture,
-          this.readOptions(protocol),
-          mapping,
-          protocol.decoder,
-          undefined,
-          (progress, frames, annotations, resultBytes) => {
-            protocol.progress = progress;
-            protocol.frameCount = frames;
-            protocol.annotationCount = annotations;
-            protocol.resultBytes = resultBytes;
-            if (protocol.annotations instanceof PagedAnnotationIndex) protocol.annotations.setTotal(annotations);
-            this.updateMemoryUsage();
-            this.updateDecodeSummary();
-            if (protocol === this.selectedProtocol) this.renderer.schedule();
-          },
+        const results = await leader.ownClient.runGraph(capture, group.nodes, group.channels, undefined, (progress) =>
+          this.applyGraphProgress(protocols, progress),
         );
         if (token !== this.version) return;
-        protocol.result = result;
-        protocol.frameCount = result.stats.frames;
-        protocol.annotationCount = result.stats.annotations;
-        protocol.resultBytes = result.stats.memory.totalBytes;
-        protocol.state = 'done';
-        protocol.progress = 1;
-        if (result.stats.truncated || result.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
+        const byId = new Map(results.map((result) => [result.id, result]));
+        for (const protocol of protocols) {
+          const result = byId.get(protocol.id);
+          if (!result) throw new Error('Protocol graph result is missing: ' + protocol.id);
+          const decoded = this.applyGraphResult(protocol, result);
+          if (decoded.stats.truncated || decoded.stats.binaryTruncated) this.showMessage({ key: 'message.truncated' });
+        }
+        elapsed += results[0]?.stats.elapsedMs ?? 0;
+        samples += results[0]?.stats.samples ?? 0n;
       } catch (error) {
         if (token !== this.version) return;
-        protocol.state = 'error';
-        protocol.error = error instanceof UIError ? error : errorLabel(error);
+        for (const protocol of protocols) {
+          protocol.state = 'error';
+          protocol.error = error instanceof UIError ? error : errorLabel(error);
+        }
         failed = true;
-        this.showMessage(`${protocol.name}: ${errorLabel(error)}`, true);
+        this.showMessage(`${leader.name}: ${errorLabel(error)}`, true);
       }
       this.updateDecodeSummary();
       this.renderer.schedule();
     }
     if (token !== this.version) return;
-    const elapsed = pending.reduce((sum, p) => sum + (p.result?.stats.elapsedMs ?? 0), 0),
-      samples = pending.reduce((sum, p) => sum + (p.result?.stats.samples ?? 0n), 0n);
     this.setStatus(failed ? 'error' : 'done', failed ? 'status.stopped' : 'status.done', {
       ms: elapsed.toFixed(0),
       throughput: (elapsed ? Number(samples) / elapsed / 1000 : 0).toFixed(2),
@@ -1434,7 +1713,7 @@ export class AnalyzerApp {
       key = element<HTMLSelectElement>('binary-output').value;
     if (!protocol?.result || protocol.result.result.binarySizes[key] === undefined) return;
     try {
-      const blob = await protocol.client.readBinary(key);
+      const blob = await protocol.client.readBinary(key, protocol.id);
       if (blob) downloadBlob('hakei-' + protocol.decoder + '-' + key + '.bin', blob);
     } catch (error) {
       this.showMessage(error instanceof UIError ? error : errorLabel(error), true);

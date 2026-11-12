@@ -1,0 +1,42 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'swim',
+  name: 'SWIM *',
+  longname: 'STM8 SWIM bus',
+  desc: 'STM8 Single Wire Interface Module (SWIM) protocol.',
+  inputs: ['logic'],
+  outputs: [],
+  tags: ['Debug/trace'],
+  channels: [{ id: 'swim', name: 'SWIM', desc: 'SWIM data line' }],
+  options: [{ id: 'debug', desc: 'Debug', default: 'no', values: ['yes', 'no'] }],
+  annotations: [
+    ['bit', 'Bit'],
+    ['enterseq', 'SWIM enter sequence'],
+    ['start-host', 'Start bit (host)'],
+    ['start-target', 'Start bit (target)'],
+    ['parity', 'Parity bit'],
+    ['ack', 'Acknowledgement'],
+    ['nack', 'Negative acknowledgement'],
+    ['byte-write', 'Byte write'],
+    ['byte-read', 'Byte read'],
+    ['cmd-unknown', 'Unknown SWIM command'],
+    ['cmd', 'SWIM command'],
+    ['bytes', 'Byte count'],
+    ['address', 'Address'],
+    ['data-write', 'Data write'],
+    ['data-read', 'Data read'],
+    ['debug-msg', 'Debug message'],
+  ],
+  annotationRows: [
+    ['bits', 'Bits', [0]],
+    ['framing', 'Framing', [2, 3, 4, 5, 6, 7, 8]],
+    ['protocol', 'Protocol', [1, 9, 10, 11, 12, 13, 14]],
+    ['debug', 'Debug', [15]],
+  ],
+  binary: [
+    ['tx', 'Dump of data written to target'],
+    ['rx', 'Dump of data read from target'],
+  ],
+};

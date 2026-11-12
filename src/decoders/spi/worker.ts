@@ -6,6 +6,9 @@ import type { SPIFrame } from './index.js';
 const frame = (value: DecodeFrame): SPIFrame => value as SPIFrame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createSPIRuntime,
   csvHeader: 'start_sample,end_sample,time_s,word_index,mosi,miso,cs',
   csvRow(value, sampleRate, triggerSample): string {

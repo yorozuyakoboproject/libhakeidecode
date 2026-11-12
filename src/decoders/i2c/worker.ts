@@ -6,6 +6,9 @@ import type { I2CFrame } from './index.js';
 const frame = (value: DecodeFrame): I2CFrame => value as I2CFrame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createI2CRuntime,
   csvHeader: 'start_sample,end_sample,time_s,kind,direction,address,value,ack',
   csvRow(value, sampleRate, triggerSample): string {

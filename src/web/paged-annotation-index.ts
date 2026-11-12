@@ -13,10 +13,20 @@ export class PagedAnnotationIndex extends AnnotationIndex {
   private queryPendingKey = '';
   private queryPending: Promise<void> | null = null;
   constructor(
-    private readonly client: DecodeClient,
+    private client: DecodeClient,
+    private readonly instanceId?: string,
     private readonly onChange?: () => void,
   ) {
     super();
+  }
+  bind(client: DecodeClient): void {
+    if (this.client === client) return;
+    this.client = client;
+    this.records = [];
+    this.sequence++;
+    this.invalidate();
+    this.queryPending = null;
+    this.queryPendingKey = '';
   }
   override get reservedBytes(): number {
     return this.records.reduce(
@@ -67,7 +77,7 @@ export class PagedAnnotationIndex extends AnnotationIndex {
     const sequence = ++this.sequence;
     this.queryPendingKey = key;
     const task = this.client
-      .queryAnnotations(start, end, maxResults)
+      .queryAnnotations(start, end, maxResults, this.instanceId)
       .then((records) => {
         if (sequence === this.sequence && offset === this.client.sampleOffset) {
           this.records = records;

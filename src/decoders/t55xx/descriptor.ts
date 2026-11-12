@@ -1,0 +1,42 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 't55xx',
+  name: 'T55xx *',
+  longname: 'RFID T55xx',
+  desc: 'T55xx 100-150kHz RFID protocol.',
+  inputs: ['logic'],
+  outputs: [],
+  tags: ['IC', 'RFID'],
+  channels: [{ id: 'data', name: 'Data', desc: 'Data line' }],
+  options: [
+    { id: 'coilfreq', desc: 'Coil frequency', default: 125000 },
+    { id: 'start_gap', desc: 'Start gap min', default: 20 },
+    { id: 'w_gap', desc: 'Write gap min', default: 20 },
+    { id: 'w_one_min', desc: 'Write one min', default: 48 },
+    { id: 'w_one_max', desc: 'Write one max', default: 63 },
+    { id: 'w_zero_min', desc: 'Write zero min', default: 16 },
+    { id: 'w_zero_max', desc: 'Write zero max', default: 31 },
+    { id: 'em4100_decode', desc: 'EM4100 decode', default: 'on', values: ['on', 'off'] },
+  ],
+  annotations: [
+    ['bit_value', 'Bit value'],
+    ['start_gap', 'Start gap'],
+    ['write_gap', 'Write gap'],
+    ['write_mode_exit', 'Write mode exit'],
+    ['bit', 'Bit'],
+    ['opcode', 'Opcode'],
+    ['lock', 'Lock'],
+    ['data', 'Data'],
+    ['password', 'Password'],
+    ['address', 'Address'],
+    ['bitrate', 'Bitrate'],
+  ],
+  annotationRows: [
+    ['bits', 'Bits', [0]],
+    ['structure', 'Structure', [1, 2, 3, 4]],
+    ['fields', 'Fields', [5, 6, 7, 8, 9]],
+    ['decode', 'Decode', [10]],
+  ],
+};

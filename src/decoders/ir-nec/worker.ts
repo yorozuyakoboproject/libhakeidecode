@@ -6,6 +6,9 @@ import type { IRNECFrame } from './index.js';
 const frame = (value: DecodeFrame): IRNECFrame => value as IRNECFrame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createIRNECRuntime,
   csvHeader: 'start_sample,end_sample,time_s,kind,address,command,address_inverse,command_inverse,valid',
   csvRow(value, sampleRate, triggerSample): string {

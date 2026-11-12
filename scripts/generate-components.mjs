@@ -88,7 +88,7 @@ export async function generateComponents() {
     if (entries.some((entry) => entry.isSymbolicLink()))
       throw new Error('Component directories cannot be symbolic links');
     for (const name of names) {
-      if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name)) throw new Error('Invalid component directory: ' + name);
+      if (!/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/.test(name)) throw new Error('Invalid component directory: ' + name);
       for (const entry of ['component.ts', 'worker.ts', 'index.ts']) {
         const path = resolve(root, 'src', group.directory, name, entry);
         if (!(await stat(path).catch(() => null))?.isFile())
@@ -164,7 +164,12 @@ export async function loadSignalEncoderPresets(decoder: string): Promise<readonl
   const encoder = await loadSignalEncoder(decoder);
   return [...encoder.cases({ minimumPayloadBits: 0 })]
     .filter((item) => item.kind === 'boundary')
-    .map((item) => ({ name: item.name, options: { ...item.options } }));
+    .map((item) => ({
+      name: item.name,
+      options: { ...item.options },
+      channels: Object.keys(item.channels),
+      chain: (item.chain ?? []).map((node) => ({ decoder: node.decoder, options: { ...node.options } })),
+    }));
 }
 `,
   );

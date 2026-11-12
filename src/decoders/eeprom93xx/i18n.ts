@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.eeprom93xx.name': '93xx EEPROM *',
+    'decoder.eeprom93xx.description': '93xx series Microwire EEPROM protocol.',
+    'decoder.eeprom93xx.option.addresssize': 'Address size',
+    'decoder.eeprom93xx.option.wordsize': 'Word size',
+    'decoder.eeprom93xx.option.format': 'Data format',
+    'decoder.eeprom93xx.value.ascii': 'Ascii',
+    'decoder.eeprom93xx.value.hex': 'Hex',
+    'decoder.eeprom93xx.row.0': 'Data',
+    'decoder.eeprom93xx.row.1': 'Warnings',
+    'decoder.eeprom93xx.annotation.0': 'SI data',
+    'decoder.eeprom93xx.annotation.1': 'SO data',
+    'decoder.eeprom93xx.annotation.2': 'Warning',
+    'decoder.eeprom93xx.binary.0': 'Address',
+    'decoder.eeprom93xx.binary.1': 'Data',
+  },
+  'zh-CN': {
+    'decoder.eeprom93xx.name': '93xx EEPROM *',
+    'decoder.eeprom93xx.description': '93xx 系列 Microwire EEPROM 协议。',
+    'decoder.eeprom93xx.option.addresssize': '地址位数',
+    'decoder.eeprom93xx.option.wordsize': '字长',
+    'decoder.eeprom93xx.option.format': '数据格式',
+    'decoder.eeprom93xx.value.ascii': 'ASCII',
+    'decoder.eeprom93xx.value.hex': '十六进制',
+    'decoder.eeprom93xx.row.0': '数据',
+    'decoder.eeprom93xx.row.1': '警告',
+    'decoder.eeprom93xx.annotation.0': 'SI 数据',
+    'decoder.eeprom93xx.annotation.1': 'SO 数据',
+    'decoder.eeprom93xx.annotation.2': '警告',
+    'decoder.eeprom93xx.binary.0': '地址',
+    'decoder.eeprom93xx.binary.1': '数据',
+  },
+} as const satisfies ComponentMessages;

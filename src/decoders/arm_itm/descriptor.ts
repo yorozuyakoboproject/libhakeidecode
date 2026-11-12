@@ -1,0 +1,42 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'arm_itm',
+  name: 'ARM ITM *',
+  longname: 'ARM Instrumentation Trace Macroblock',
+  desc: 'ARM Cortex-M / ARMv7m ITM trace protocol.',
+  inputs: ['uart'],
+  outputs: [],
+  tags: ['Debug/trace'],
+  options: [
+    { id: 'objdump', desc: 'objdump path', default: 'arm-none-eabi-objdump' },
+    { id: 'objdump_opts', desc: 'objdump options', default: '-lSC' },
+    { id: 'elffile', desc: '.elf path', default: '' },
+  ],
+  annotations: [
+    ['trace', 'Trace info'],
+    ['timestamp', 'Timestamp'],
+    ['software', 'Software message'],
+    ['dwt_event', 'DWT event'],
+    ['dwt_watchpoint', 'DWT watchpoint'],
+    ['dwt_exc', 'Exception trace'],
+    ['dwt_pc', 'Program counter'],
+    ['mode_thread', 'Current mode: thread'],
+    ['mode_irq', 'Current mode: IRQ'],
+    ['mode_exc', 'Current mode: Exception'],
+    ['location', 'Current location'],
+    ['function', 'Current function'],
+  ],
+  annotationRows: [
+    ['traces', 'Trace info', [0, 1]],
+    ['softwares', 'Software traces', [2]],
+    ['dwt_events', 'DWT events', [3]],
+    ['dwt_watchpoints', 'DWT watchpoints', [4]],
+    ['dwt_excs', 'Exception traces', [5]],
+    ['dwt_pcs', 'Program counters', [6]],
+    ['modes', 'Current modes', [7, 8, 9]],
+    ['locations', 'Current locations', [10]],
+    ['functions', 'Current functions', [11]],
+  ],
+};

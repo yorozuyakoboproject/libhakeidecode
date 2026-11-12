@@ -43,6 +43,7 @@
   "scripts": {
     "dev": "vite",
     "build": "npm run lint && npm run fmt && node scripts/build.mjs",
+    "build:roundtrip": "npm run lint && npm run fmt && node scripts/build.mjs --decoder-roundtrip",
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "npm run lint -- --fix",
     "fmt": "oxfmt --write .",

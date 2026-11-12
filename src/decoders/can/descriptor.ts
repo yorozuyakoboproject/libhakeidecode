@@ -1,0 +1,43 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'can',
+  name: 'CAN *',
+  longname: 'Controller Area Network',
+  desc: 'Field bus protocol for distributed realtime control.',
+  inputs: ['logic'],
+  outputs: ['can'],
+  tags: ['Automotive'],
+  channels: [{ id: 'can_rx', name: 'CAN RX', desc: 'CAN bus line' }],
+  options: [
+    { id: 'nominal_bitrate', desc: 'Nominal bitrate (bits/s)', default: 1000000 },
+    { id: 'fast_bitrate', desc: 'Fast bitrate (bits/s)', default: 2000000 },
+    { id: 'sample_point', desc: 'Sample point (%)', default: 70.0 },
+  ],
+  annotations: [
+    ['data', 'Payload data'],
+    ['sof', 'Start of frame'],
+    ['eof', 'End of frame'],
+    ['id', 'Identifier'],
+    ['ext-id', 'Extended identifier'],
+    ['full-id', 'Full identifier'],
+    ['ide', 'Identifier extension bit'],
+    ['reserved-bit', 'Reserved bit 0 and 1'],
+    ['rtr', 'Remote transmission request'],
+    ['srr', 'Substitute remote request'],
+    ['dlc', 'Data length count'],
+    ['crc-sequence', 'CRC sequence'],
+    ['crc-delimiter', 'CRC delimiter'],
+    ['ack-slot', 'ACK slot'],
+    ['ack-delimiter', 'ACK delimiter'],
+    ['stuff-bit', 'Stuff bit'],
+    ['warning', 'Warning'],
+    ['bit', 'Bit'],
+  ],
+  annotationRows: [
+    ['bits', 'Bits', [15, 17]],
+    ['fields', 'Fields', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]],
+    ['warnings', 'Warnings', [16]],
+  ],
+};

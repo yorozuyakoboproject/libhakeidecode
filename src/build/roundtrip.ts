@@ -3,12 +3,21 @@ import type { OptionValue, SignalWindow } from '../libhakeidecode/types.js';
 
 export const MIN_PAYLOAD_BITS = 1_048_576;
 
-export type ExpectedValue = string | number | bigint | boolean | null | { value: number; tolerance: number };
+export type ExpectedValue =
+  | string
+  | number
+  | bigint
+  | boolean
+  | null
+  | readonly unknown[]
+  | { value: number; tolerance: number };
 export type ExpectedFrame = Readonly<Record<string, ExpectedValue>>;
 
 export interface GeneratedBlock<T> {
   readonly data: readonly T[];
   readonly expected: readonly ExpectedFrame[];
+  readonly expectedAnnotations?: readonly ExpectedFrame[];
+  readonly annotationCount?: number;
   readonly payloadBits: number;
 }
 
@@ -22,6 +31,12 @@ export interface RoundtripConfig {
   readonly startSample: bigint;
   readonly chunkSamples: readonly number[];
   readonly minimumPayloadBits: number;
+  readonly chain?: readonly RoundtripChainNode[];
+}
+
+export interface RoundtripChainNode {
+  readonly decoder: string;
+  readonly options: Record<string, OptionValue>;
 }
 
 export interface RoundtripCase<T> extends RoundtripConfig {

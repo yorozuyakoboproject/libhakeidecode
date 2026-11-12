@@ -6,6 +6,9 @@ import type { RF433Frame } from './index.js';
 const frame = (value: DecodeFrame): RF433Frame => value as RF433Frame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createRF433Runtime,
   csvHeader: 'start_sample,end_sample,time_s,encoding,address,button,code,valid',
   csvRow(value, sampleRate, triggerSample): string {

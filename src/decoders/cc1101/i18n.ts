@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.cc1101.name': 'CC1101 *',
+    'decoder.cc1101.description': 'Low-power sub-1GHz RF transceiver chip.',
+    'decoder.cc1101.row.0': 'Commands',
+    'decoder.cc1101.row.1': 'Data',
+    'decoder.cc1101.row.2': 'Status register',
+    'decoder.cc1101.row.3': 'Warnings',
+    'decoder.cc1101.annotation.0': 'Command strobe',
+    'decoder.cc1101.annotation.1': 'Single register read',
+    'decoder.cc1101.annotation.2': 'Single register write',
+    'decoder.cc1101.annotation.3': 'Burst register read',
+    'decoder.cc1101.annotation.4': 'Burst register write',
+    'decoder.cc1101.annotation.5': 'Status read',
+    'decoder.cc1101.annotation.6': 'Status register',
+    'decoder.cc1101.annotation.7': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.cc1101.name': 'CC1101 *',
+    'decoder.cc1101.description': '低功耗 sub-1GHz 射频收发器芯片。',
+    'decoder.cc1101.row.0': '命令',
+    'decoder.cc1101.row.1': '数据',
+    'decoder.cc1101.row.2': '状态寄存器',
+    'decoder.cc1101.row.3': '警告',
+    'decoder.cc1101.annotation.0': '命令选通',
+    'decoder.cc1101.annotation.1': '单寄存器读取',
+    'decoder.cc1101.annotation.2': '单寄存器写入',
+    'decoder.cc1101.annotation.3': '突发寄存器读取',
+    'decoder.cc1101.annotation.4': '突发寄存器写入',
+    'decoder.cc1101.annotation.5': '状态读取',
+    'decoder.cc1101.annotation.6': '状态寄存器',
+    'decoder.cc1101.annotation.7': '警告',
+  },
+} as const satisfies ComponentMessages;

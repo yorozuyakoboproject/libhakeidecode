@@ -2,6 +2,7 @@ import type { ComponentFailure } from '../components.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
 import type {
   Annotation,
+  DecodeGraphNode,
   DecodeFrame,
   DecodeRuntimeResult,
   DecodeResultSummary,
@@ -35,6 +36,16 @@ export interface DecodeStats {
 export type DecodeMessage =
   | { type: 'done'; decoder: DecoderId; stats: DecodeStats; result: DecodeResultSummary }
   | ({ type: 'error' } & ComponentFailure);
+export interface DecodeGraphInstanceResult {
+  id: string;
+  decoder: DecoderId;
+  stats: DecodeStats;
+  result: DecodeResultSummary;
+}
+export type DecodeGraphDoneMessage = {
+  type: 'graph-done';
+  results: DecodeGraphInstanceResult[];
+};
 export interface DecodeProgressMessage {
   type: 'decode-progress';
   progress: number;
@@ -42,6 +53,14 @@ export interface DecodeProgressMessage {
   annotations: number;
   samples: bigint;
   memory: DecodeResultMemory;
+  instances?: Record<
+    string,
+    {
+      frames: number;
+      annotations: number;
+      resultBytes: number;
+    }
+  >;
   processedSample?: bigint;
   availableEnd?: bigint;
   availableStart?: bigint;
@@ -49,6 +68,7 @@ export interface DecodeProgressMessage {
 export interface DecodeQueryAnnotationsRequest {
   type: 'decode-query-annotations';
   requestId: number;
+  instanceId?: string;
   start: bigint;
   end: bigint;
   maxResults: number;
@@ -61,6 +81,7 @@ export interface DecodeQueryAnnotationsResult {
 export interface DecodeReadFramesRequest {
   type: 'decode-read-frames';
   requestId: number;
+  instanceId?: string;
   offset: number;
   count: number;
 }
@@ -72,6 +93,7 @@ export interface DecodeReadFramesResult {
 export interface DecodeReadCsvRequest {
   type: 'decode-read-csv';
   requestId: number;
+  instanceId?: string;
   offset: number;
   count: number;
   sampleRate: number;
@@ -87,6 +109,7 @@ export interface DecodeReadCsvResult {
 export interface DecodeReadBinaryRequest {
   type: 'decode-read-binary';
   requestId: number;
+  instanceId?: string;
   key: string;
 }
 export interface DecodeReadBinaryResult {
@@ -98,6 +121,7 @@ export interface DecodeReadBinaryResult {
 export type PWMPosition = number | bigint;
 export type WorkerDecodeMessage =
   | DecodeMessage
+  | DecodeGraphDoneMessage
   | DecodeProgressMessage
   | DecodeQueryAnnotationsResult
   | DecodeReadFramesResult
@@ -112,6 +136,17 @@ export interface DecodeStartRequest {
   channels: string[];
   gaps: GapSpan[];
   options: Record<string, OptionValue>;
+  paged?: 'always' | 'auto' | 'never';
+  rolling?: boolean;
+  startSample?: bigint;
+}
+export interface DecodeGraphStartRequest {
+  type: 'decode-graph-start';
+  nodes: DecodeGraphNode[];
+  sampleRate: number;
+  length: bigint;
+  channels: string[];
+  gaps: GapSpan[];
   paged?: 'always' | 'auto' | 'never';
   rolling?: boolean;
   startSample?: bigint;
@@ -165,6 +200,7 @@ export interface DecodeFinishRequest {
 }
 export type DecodeStreamRequest =
   | DecodeStartRequest
+  | DecodeGraphStartRequest
   | DecodeSharedStartRequest
   | DecodePackedReaderStartRequest
   | DecodeWorkerReaderStartRequest

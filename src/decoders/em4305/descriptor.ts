@@ -1,0 +1,41 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'em4305',
+  name: 'EM4305 *',
+  longname: 'RFID EM4205/EM4305',
+  desc: 'EM4205/EM4305 100-150kHz RFID protocol.',
+  inputs: ['logic'],
+  outputs: [],
+  tags: ['IC', 'RFID'],
+  channels: [{ id: 'data', name: 'Data', desc: 'Data line' }],
+  options: [
+    { id: 'coilfreq', desc: 'Coil frequency', default: 125000 },
+    { id: 'first_field_stop', desc: 'First field stop min', default: 40 },
+    { id: 'w_gap', desc: 'Write gap min', default: 12 },
+    { id: 'w_one_max', desc: 'Write one max', default: 32 },
+    { id: 'w_zero_on_min', desc: 'Write zero on min', default: 15 },
+    { id: 'w_zero_off_max', desc: 'Write zero off max', default: 27 },
+    { id: 'em4100_decode', desc: 'EM4100 decode', default: 'on', values: ['on', 'off'] },
+  ],
+  annotations: [
+    ['bit_value', 'Bit value'],
+    ['first_field_stop', 'First field stop'],
+    ['write_gap', 'Write gap'],
+    ['write_mode_exit', 'Write mode exit'],
+    ['bit', 'Bit'],
+    ['opcode', 'Opcode'],
+    ['lock', 'Lock'],
+    ['data', 'Data'],
+    ['password', 'Password'],
+    ['address', 'Address'],
+    ['bitrate', 'Bitrate'],
+  ],
+  annotationRows: [
+    ['bits', 'Bits', [0]],
+    ['structure', 'Structure', [1, 2, 3, 4]],
+    ['fields', 'Fields', [5, 6, 7, 8, 9]],
+    ['decode', 'Decode', [10]],
+  ],
+};

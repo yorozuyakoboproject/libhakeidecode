@@ -1,0 +1,35 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'rtc8564',
+  name: 'RTC-8564 *',
+  longname: 'Epson RTC-8564 JE/NB',
+  desc: 'Realtime clock module protocol.',
+  inputs: ['i2c'],
+  outputs: [],
+  tags: ['Clock/timing'],
+  annotations: [
+    ['reg-0x00', 'Register 0x00'],
+    ['reg-0x01', 'Register 0x01'],
+    ['reg-0x02', 'Register 0x02'],
+    ['reg-0x03', 'Register 0x03'],
+    ['reg-0x04', 'Register 0x04'],
+    ['reg-0x05', 'Register 0x05'],
+    ['reg-0x06', 'Register 0x06'],
+    ['reg-0x07', 'Register 0x07'],
+    ['reg-0x08', 'Register 0x08'],
+    ['read', 'Read date/time'],
+    ['write', 'Write date/time'],
+    ['bit-reserved', 'Reserved bit'],
+    ['bit-vl', 'VL bit'],
+    ['bit-century', 'Century bit'],
+    ['reg-read', 'Register read'],
+    ['reg-write', 'Register write'],
+  ],
+  annotationRows: [
+    ['bits', 'Bits', [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13]],
+    ['regs', 'Register accesses', [14, 15]],
+    ['date-time', 'Date/time', [9, 10]],
+  ],
+};

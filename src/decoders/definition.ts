@@ -1,4 +1,4 @@
-import type { DecoderDescriptor, OptionValue, SignalWindow } from '../libhakeidecode/types.js';
+import type { DecoderDescriptor, OptionValue, OutputEvent, SignalWindow } from '../libhakeidecode/types.js';
 import type { ComponentMessages } from '../components.js';
 
 export interface Annotation {
@@ -54,22 +54,48 @@ export interface DecodeRuntime {
   flush(progress: number): Promise<void>;
   reset(): void;
   retain?(startSample: bigint): void;
+  decodeProtocol?(ss: bigint, es: bigint, data: unknown): void;
+  observeRange?(ss: bigint, es: bigint): void;
   finish(progress: number): Promise<DecodeRuntimeResult>;
   queryAnnotations?(start: bigint, end: bigint, maxResults: number): Annotation[] | null;
   readFrames?(offset: number, count: number): DecodeFrame[] | null;
 }
 export interface DecodeRuntimeContext {
+  readonly instanceId?: string;
   readonly sampleRate: number;
   readonly channels: readonly string[];
   readonly options: Record<string, OptionValue>;
   readonly paged: 'always' | 'auto' | 'never';
   readonly host: DecodeRuntimeHost;
+  readonly publish?: (event: OutputEvent) => void;
+}
+export interface ProtocolBinding {
+  readonly instanceId: string;
+  readonly protoId: string;
+}
+export interface DecodeGraphNode {
+  readonly id: string;
+  readonly decoder: string;
+  readonly options: Record<string, OptionValue>;
+  readonly channels?: Readonly<Record<string, number | string>>;
+  readonly inputs?: Readonly<Record<string, ProtocolBinding>>;
+}
+export interface DecodeGraphHost {
+  postBatch(instanceId: string, batch: DecodeBatch): Promise<void>;
+  postPaged(instanceId: string, frames: number, annotations: number, resultBytes: number): void;
+  retain?(instanceId: string, startSample: bigint): { frames: number; annotations: number };
+}
+export interface DecodeGraphResult {
+  readonly id: string;
+  readonly decoder: string;
+  readonly result: DecodeRuntimeResult;
 }
 export interface DecoderInputDefinition {
   readonly key: string;
   readonly label: string;
   readonly labelKey?: string;
   readonly optional?: boolean;
+  readonly kind?: 'channel' | 'protocol';
 }
 export interface DecoderRowDefinition {
   readonly label: string;
@@ -107,6 +133,9 @@ export interface DecoderDefinition {
 }
 export interface DecoderWorkerDefinition {
   readonly id: string;
+  readonly mode?: 'logic' | 'protocol';
+  readonly inputs?: readonly string[];
+  readonly outputs?: readonly string[];
   createRuntime(context: DecodeRuntimeContext): DecodeRuntime;
   readonly csvHeader: string;
   csvRow(frame: DecodeFrame, sampleRate: number, triggerSample: bigint): string;

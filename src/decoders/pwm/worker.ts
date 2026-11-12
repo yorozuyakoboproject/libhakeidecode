@@ -6,6 +6,9 @@ import type { PWMFrame } from './frame-store.js';
 const frame = (value: DecodeFrame): PWMFrame => value as PWMFrame;
 export const worker: DecoderWorkerDefinition = {
   id: descriptor.id,
+  mode: 'logic',
+  inputs: descriptor.inputs,
+  outputs: descriptor.outputs,
   createRuntime: createPWMRuntime,
   csvHeader:
     'start_sample,end_sample,time_s,active_samples,period_samples,duty_percent,period_s,frequency_hz,average_duty_percent',

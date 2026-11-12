@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.nrf905.name': 'nRF905 *',
+    'decoder.nrf905.description': '433/868/933MHz transceiver chip.',
+    'decoder.nrf905.row.0': 'Commands',
+    'decoder.nrf905.row.1': 'Responses',
+    'decoder.nrf905.row.2': 'Registers',
+    'decoder.nrf905.row.3': 'Transmitted data',
+    'decoder.nrf905.row.4': 'Received data',
+    'decoder.nrf905.row.5': 'Warnings',
+    'decoder.nrf905.annotation.0': 'Command sent to the device',
+    'decoder.nrf905.annotation.1': 'Config register written to the device',
+    'decoder.nrf905.annotation.2': 'Config register read from the device',
+    'decoder.nrf905.annotation.3': 'Payload sent to the device',
+    'decoder.nrf905.annotation.4': 'Payload read from the device',
+    'decoder.nrf905.annotation.5': 'Response to commands received from the device',
+    'decoder.nrf905.annotation.6': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.nrf905.name': 'nRF905 *',
+    'decoder.nrf905.description': '433/868/933MHz 射频收发器芯片。',
+    'decoder.nrf905.row.0': '命令',
+    'decoder.nrf905.row.1': '响应',
+    'decoder.nrf905.row.2': '寄存器',
+    'decoder.nrf905.row.3': '发送数据',
+    'decoder.nrf905.row.4': '接收数据',
+    'decoder.nrf905.row.5': '警告',
+    'decoder.nrf905.annotation.0': '发送到设备的命令',
+    'decoder.nrf905.annotation.1': '写入设备的配置寄存器',
+    'decoder.nrf905.annotation.2': '从设备读取的配置寄存器',
+    'decoder.nrf905.annotation.3': '发送到设备的负载',
+    'decoder.nrf905.annotation.4': '从设备读取的负载',
+    'decoder.nrf905.annotation.5': '设备返回的命令响应',
+    'decoder.nrf905.annotation.6': '警告',
+  },
+} as const satisfies ComponentMessages;

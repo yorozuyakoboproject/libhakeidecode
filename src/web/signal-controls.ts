@@ -193,7 +193,7 @@ export class SignalControls {
       usedAnalog = new Set<number>();
     for (const signal of this.signals) {
       if (signal.kind === 'encoder') {
-        const keys = new Set(decoderDefinition(signal.decoder).ui.inputs.map((item) => item.key));
+        const keys = new Set(this.preset(signal)?.channels ?? this.defaultInputs(signal.decoder));
         signal.mapping = Object.fromEntries(
           Object.entries(signal.mapping).filter(([key, channel]) => {
             if (!keys.has(key) || !logic.includes(channel) || usedLogic.has(channel)) return false;
@@ -203,7 +203,6 @@ export class SignalControls {
         );
         for (const key of keys) {
           if (signal.mapping[key] !== undefined) continue;
-          if (decoderDefinition(signal.decoder).ui.inputs.find((input) => input.key === key)?.optional) continue;
           const channel = logic.find((value) => !usedLogic.has(value));
           if (channel === undefined) continue;
           signal.mapping[key] = channel;
@@ -218,6 +217,29 @@ export class SignalControls {
         }
       }
     }
+  }
+  private defaultInputs(decoder: string): readonly string[] {
+    return decoderDefinition(decoder).ui.inputs.map((item) => item.key);
+  }
+  private preset(signal: DemoEncoderSignal): SignalEncoderPreset | undefined {
+    return this.presets.get(signal.decoder)?.find((item) => item.name === signal.caseName);
+  }
+  private inputDeclarations(signal: DemoEncoderSignal): readonly { key: string; label: string; labelKey?: string }[] {
+    const preset = this.preset(signal);
+    if (!preset) return decoderDefinition(signal.decoder).ui.inputs;
+    const root = preset.chain[0]?.decoder ?? signal.decoder,
+      definition = decoderDefinition(root).descriptor,
+      labels = new Map(
+        [...(definition.channels ?? []), ...(definition.optionalChannels ?? [])].map((channel) => [
+          channel.id,
+          {
+            key: channel.id,
+            label: channel.name ?? channel.id,
+            labelKey: `decoder.${root}.channel.${channel.id}`,
+          },
+        ]),
+      );
+    return preset.channels.map((key) => labels.get(key) ?? { key, label: key });
   }
   private render(): void {
     const list = document.getElementById('signal-list')!;
@@ -289,7 +311,7 @@ export class SignalControls {
     const mapping = document.getElementById('signal-mapping')!;
     mapping.replaceChildren();
     const used = this.usedChannels(signal.id, 'logic');
-    for (const item of decoderDefinition(signal.decoder).ui.inputs) {
+    for (const item of this.inputDeclarations(signal)) {
       const label = document.createElement('label');
       label.className = 'field';
       const caption = document.createElement('span');
@@ -434,10 +456,10 @@ export class SignalControls {
     const mapping: Record<string, number> = {},
       used = this.usedChannels('', 'logic'),
       available = this.devices.selectedChannels('logic').filter((channel) => !used.has(channel));
-    for (const item of decoderDefinition(type as DecoderId).ui.inputs) {
+    for (const key of preset.channels) {
       const channel = available.shift();
       if (channel === undefined) continue;
-      mapping[item.key] = channel;
+      mapping[key] = channel;
     }
     if (!Object.keys(mapping).length) {
       this.setError(t('signal.no-channel'));
@@ -475,7 +497,7 @@ export class SignalControls {
     signal.decoder = decoder;
     signal.caseName = preset.name;
     signal.options = { ...preset.options };
-    const keys = new Set(decoderDefinition(decoder as DecoderId).ui.inputs.map((item) => item.key));
+    const keys = new Set(preset.channels);
     signal.mapping = Object.fromEntries(Object.entries(signal.mapping).filter(([key]) => keys.has(key)));
     this.reconcile();
     this.commit();
@@ -488,6 +510,9 @@ export class SignalControls {
     if (!preset) return;
     signal.caseName = preset.name;
     signal.options = { ...preset.options };
+    const keys = new Set(preset.channels);
+    signal.mapping = Object.fromEntries(Object.entries(signal.mapping).filter(([key]) => keys.has(key)));
+    this.reconcile();
     this.commit(false);
   }
   private changeAnalog(): void {
@@ -527,5 +552,7 @@ export class SignalControls {
     if (!presets?.length || presets.some((preset) => preset.name === signal.caseName)) return;
     signal.caseName = presets[0]!.name;
     signal.options = { ...presets[0]!.options, ...signal.options };
+    const keys = new Set(presets[0]!.channels);
+    signal.mapping = Object.fromEntries(Object.entries(signal.mapping).filter(([key]) => keys.has(key)));
   }
 }

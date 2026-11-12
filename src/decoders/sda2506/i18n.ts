@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.sda2506.name': 'SDA2506 *',
+    'decoder.sda2506.description': 'Serial nonvolatile 1-Kbit EEPROM.',
+    'decoder.sda2506.channel.clk': 'CLK',
+    'decoder.sda2506.channel.d': 'DATA',
+    'decoder.sda2506.channel.ce': 'CE#',
+    'decoder.sda2506.row.0': 'Bits',
+    'decoder.sda2506.row.1': 'Data',
+    'decoder.sda2506.row.2': 'Commands',
+    'decoder.sda2506.row.3': 'Warnings',
+    'decoder.sda2506.annotation.0': 'Command bit',
+    'decoder.sda2506.annotation.1': 'Data bit',
+    'decoder.sda2506.annotation.2': 'Command',
+    'decoder.sda2506.annotation.3': 'Data byte',
+    'decoder.sda2506.annotation.4': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.sda2506.name': 'SDA2506 *',
+    'decoder.sda2506.description': '串行非易失 1 Kbit EEPROM。',
+    'decoder.sda2506.channel.clk': 'CLK',
+    'decoder.sda2506.channel.d': 'DATA',
+    'decoder.sda2506.channel.ce': 'CE#',
+    'decoder.sda2506.row.0': '位',
+    'decoder.sda2506.row.1': '数据',
+    'decoder.sda2506.row.2': '命令',
+    'decoder.sda2506.row.3': '警告',
+    'decoder.sda2506.annotation.0': '命令位',
+    'decoder.sda2506.annotation.1': '数据位',
+    'decoder.sda2506.annotation.2': '命令',
+    'decoder.sda2506.annotation.3': '数据字节',
+    'decoder.sda2506.annotation.4': '警告',
+  },
+} as const satisfies ComponentMessages;

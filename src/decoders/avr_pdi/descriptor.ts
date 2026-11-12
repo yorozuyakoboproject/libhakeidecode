@@ -1,0 +1,40 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'avr_pdi',
+  name: 'AVR PDI *',
+  longname: 'Atmel Program and Debug Interface',
+  desc: 'Atmel ATxmega Program and Debug Interface (PDI) protocol.',
+  inputs: ['logic'],
+  outputs: [],
+  tags: ['Debug/trace'],
+  channels: [
+    { id: 'reset', name: 'RESET', desc: 'RESET / PDI_CLK' },
+    { id: 'data', name: 'DATA', desc: 'PDI_DATA' },
+  ],
+  annotations: [
+    ['uart-bit', 'UART bit'],
+    ['start-bit', 'Start bit'],
+    ['data-bit', 'Data bit'],
+    ['parity-ok', 'Parity OK bit'],
+    ['parity-err', 'Parity error bit'],
+    ['stop-ok', 'Stop OK bit'],
+    ['stop-err', 'Stop error bit'],
+    ['break', 'BREAK condition'],
+    ['opcode', 'Instruction opcode'],
+    ['data-prog', 'Programmer data'],
+    ['data-dev', 'Device data'],
+    ['pdi-break', 'BREAK at PDI level'],
+    ['enable', 'Enable PDI'],
+    ['disable', 'Disable PDI'],
+    ['cmd-data', 'PDI command with data'],
+  ],
+  annotationRows: [
+    ['uart_bits', 'UART bits', [0]],
+    ['uart_fields', 'UART fields', [1, 2, 3, 4, 5, 6, 7]],
+    ['pdi_fields', 'PDI fields', [8, 9, 10, 11]],
+    ['pdi_cmds', 'PDI commands', [12, 13, 14]],
+  ],
+  binary: [['bytes', 'PDI protocol bytes']],
+};

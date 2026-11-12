@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.qi.name': 'Qi *',
+    'decoder.qi.description': 'Protocol used by Qi receiver.',
+    'decoder.qi.channel.qi': 'Qi',
+    'decoder.qi.row.0': 'Bits',
+    'decoder.qi.row.1': 'Bytes',
+    'decoder.qi.row.2': 'Packets',
+    'decoder.qi.annotation.0': 'Bit',
+    'decoder.qi.annotation.1': 'Bit error',
+    'decoder.qi.annotation.2': 'Start bit',
+    'decoder.qi.annotation.3': 'Info bit',
+    'decoder.qi.annotation.4': 'Data byte',
+    'decoder.qi.annotation.5': 'Packet data',
+    'decoder.qi.annotation.6': 'Packet checksum OK',
+    'decoder.qi.annotation.7': 'Packet checksum error',
+  },
+  'zh-CN': {
+    'decoder.qi.name': 'Qi *',
+    'decoder.qi.description': 'Qi 接收器使用的无线充电通信协议。',
+    'decoder.qi.channel.qi': 'Qi 解调数据线',
+    'decoder.qi.row.0': '位',
+    'decoder.qi.row.1': '字节',
+    'decoder.qi.row.2': '数据包',
+    'decoder.qi.annotation.0': '位',
+    'decoder.qi.annotation.1': '位错误',
+    'decoder.qi.annotation.2': '起始位',
+    'decoder.qi.annotation.3': '信息位',
+    'decoder.qi.annotation.4': '数据字节',
+    'decoder.qi.annotation.5': '数据包内容',
+    'decoder.qi.annotation.6': '数据包校验正确',
+    'decoder.qi.annotation.7': '数据包校验错误',
+  },
+} as const satisfies ComponentMessages;

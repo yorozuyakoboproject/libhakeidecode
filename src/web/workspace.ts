@@ -1,8 +1,10 @@
 import { sampleIndex, type SampleInput } from '../libhakei/sample-index.js';
 import { decoderDefinition } from '../decoders/index.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
+import type { ProtocolBinding } from '../decoders/definition.js';
 import { rowKey, type TimelineRow } from './timeline.js';
 import { parseAnalogSettings, type AnalogSettings } from './analog-settings.js';
+export type ProtocolMappingValue = number | ProtocolBinding;
 export interface ProtocolSettings {
   id: string;
   decoder: string;
@@ -10,7 +12,7 @@ export interface ProtocolSettings {
   color: string;
   options: Record<string, OptionValue>;
   decimalPlaces?: number;
-  mapping: Record<string, number>;
+  mapping: Record<string, ProtocolMappingValue>;
 }
 export interface WorkspaceSettings {
   protocols: ProtocolSettings[];
@@ -45,13 +47,11 @@ export function parseWorkspace(
   } as WorkspaceSettings;
   const index = (n: unknown): n is number => Number.isInteger(n) && Number(n) >= 0 && Number(n) < channelCount;
   if (!Array.isArray(obj.protocols) || obj.protocols.length > 100) throw new Error('Invalid protocol list');
-  const ids = new Set<string>();
-  const protocols = obj.protocols.map((p) => {
+  const parsed = obj.protocols.map((p) => {
     if (
       !p ||
       typeof p.id !== 'string' ||
       !p.id ||
-      ids.has(p.id) ||
       typeof p.decoder !== 'string' ||
       !p.decoder ||
       typeof p.name !== 'string' ||
@@ -73,17 +73,44 @@ export function parseWorkspace(
       Array.isArray(p.mapping)
     )
       throw new Error('Invalid protocol settings');
-    let inputs: Set<string>;
     try {
-      inputs = new Set(decoderDefinition(p.decoder).ui.inputs.map((input) => input.key));
+      decoderDefinition(p.decoder);
     } catch {
       throw new Error('Invalid protocol settings');
     }
-    if (Object.entries(p.mapping).some(([key, v]) => !inputs.has(key) || !index(v)))
-      throw new Error('Invalid protocol settings');
-    ids.add(p.id);
-    return { ...p, options: { ...p.options }, mapping: { ...p.mapping } };
+    return p;
   });
+  const ids = new Set<string>();
+  for (const protocol of parsed) {
+    if (ids.has(protocol.id)) throw new Error('Invalid protocol settings');
+    ids.add(protocol.id);
+  }
+  const protocols = parsed.map((p) => {
+    const inputs = new Map(decoderDefinition(p.decoder).ui.inputs.map((input) => [input.key, input]));
+    const mapping = Object.fromEntries(
+      Object.entries(p.mapping).map(([key, value]) => {
+        const input = inputs.get(key);
+        if (!input) throw new Error('Invalid protocol settings');
+        if (input.kind === 'protocol') {
+          if (
+            !value ||
+            typeof value !== 'object' ||
+            Array.isArray(value) ||
+            typeof value.instanceId !== 'string' ||
+            !value.instanceId ||
+            typeof value.protoId !== 'string' ||
+            !value.protoId
+          )
+            throw new Error('Invalid protocol connection');
+          return [key, { instanceId: value.instanceId, protoId: value.protoId }];
+        }
+        if (!index(value)) throw new Error('Invalid protocol settings');
+        return [key, Number(value)];
+      }),
+    );
+    return { ...p, options: { ...p.options }, mapping };
+  });
+  validateProtocolGraph(protocols, false);
   if (obj.selectedId !== null && !ids.has(obj.selectedId)) throw new Error('Invalid selected protocol');
   const validCursor = (value: unknown): value is bigint | null =>
     value === null || (typeof value === 'bigint' && value >= 0n && value < length);
@@ -172,4 +199,39 @@ export function parseWorkspace(
     result.channelNames = { digital: [...names.digital], analog: [...names.analog] };
   }
   return result;
+}
+
+export function validateProtocolGraph(protocols: readonly ProtocolSettings[], requireComplete = true): void {
+  const byId = new Map(protocols.map((protocol) => [protocol.id, protocol]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (protocol: ProtocolSettings): void => {
+    if (visited.has(protocol.id)) return;
+    if (visiting.has(protocol.id)) throw new Error('Protocol graph cannot contain cycles');
+    visiting.add(protocol.id);
+    const inputs = decoderDefinition(protocol.decoder).ui.inputs;
+    const seen = new Set<string>();
+    for (const input of inputs) {
+      if (input.kind !== 'protocol') continue;
+      const value = protocol.mapping[input.key];
+      if (value === undefined) {
+        if (requireComplete) throw new Error('Protocol input is not connected');
+        continue;
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value) || !('instanceId' in value))
+        throw new Error('Invalid protocol connection');
+      const parent = byId.get(value.instanceId);
+      if (!parent) throw new Error('Protocol input references a missing upstream');
+      if (parent.id === protocol.id) throw new Error('Protocol graph cannot contain self-loops');
+      const outputs = decoderDefinition(parent.decoder).descriptor.outputs ?? [];
+      if (!outputs.includes(value.protoId)) throw new Error('Protocol input type does not match upstream output');
+      const key = parent.id + '\0' + value.protoId;
+      if (seen.has(key)) throw new Error('Duplicate protocol connection');
+      seen.add(key);
+      visit(parent);
+    }
+    visiting.delete(protocol.id);
+    visited.add(protocol.id);
+  };
+  for (const protocol of protocols) visit(protocol);
 }

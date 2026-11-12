@@ -9,4 +9,9 @@ export interface SignalEncoderModule {
 export interface SignalEncoderPreset {
   readonly name: string;
   readonly options: Readonly<Record<string, OptionValue>>;
+  readonly channels: readonly string[];
+  readonly chain: readonly {
+    readonly decoder: string;
+    readonly options: Readonly<Record<string, OptionValue>>;
+  }[];
 }

@@ -138,7 +138,7 @@ export function parseDemoSignals(
         !options ||
         typeof options !== 'object' ||
         Array.isArray(options) ||
-        Object.entries(options).some(([key, option]) => !/^[a-z_]+$/.test(key) || !optionValue(option))
+        Object.entries(options).some(([key, option]) => !/^[a-z][a-z0-9_]*$/.test(key) || !optionValue(option))
       )
         throw new Error('Invalid demo encoder options');
       return {

@@ -1,0 +1,31 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'mcs48',
+  name: 'MCS-48 *',
+  longname: 'Intel MCS-48',
+  desc: 'Intel MCS-48 external memory access protocol.',
+  inputs: ['logic'],
+  outputs: [],
+  tags: ['Retro computing'],
+  channels: [
+    { id: 'ale', name: 'ALE', desc: 'Address latch enable' },
+    { id: 'psen', name: '/PSEN', desc: 'Program store enable' },
+    { id: 'd0', name: 'D0', desc: 'CPU data line 0' },
+    { id: 'd1', name: 'D1', desc: 'CPU data line 1' },
+    { id: 'd2', name: 'D2', desc: 'CPU data line 2' },
+    { id: 'd3', name: 'D3', desc: 'CPU data line 3' },
+    { id: 'd4', name: 'D4', desc: 'CPU data line 4' },
+    { id: 'd5', name: 'D5', desc: 'CPU data line 5' },
+    { id: 'd6', name: 'D6', desc: 'CPU data line 6' },
+    { id: 'd7', name: 'D7', desc: 'CPU data line 7' },
+    { id: 'a8', name: 'A8', desc: 'CPU address line 8' },
+    { id: 'a9', name: 'A9', desc: 'CPU address line 9' },
+    { id: 'a10', name: 'A10', desc: 'CPU address line 10' },
+    { id: 'a11', name: 'A11', desc: 'CPU address line 11' },
+  ],
+  optionalChannels: [{ id: 'a12', name: 'A12', desc: 'CPU address line 12' }],
+  annotations: [['romdata', 'Address:Data']],
+  binary: [['romdata', 'AAAA:DD']],
+};

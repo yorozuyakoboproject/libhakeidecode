@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.enc28j60.name': 'ENC28J60 *',
+    'decoder.enc28j60.description': 'Microchip ENC28J60 10Base-T Ethernet controller protocol.',
+    'decoder.enc28j60.row.0': 'Fields',
+    'decoder.enc28j60.row.1': 'Commands',
+    'decoder.enc28j60.row.2': 'Warnings',
+    'decoder.enc28j60.annotation.0': 'Read Control Register',
+    'decoder.enc28j60.annotation.1': 'Read Buffer Memory',
+    'decoder.enc28j60.annotation.2': 'Write Control Register',
+    'decoder.enc28j60.annotation.3': 'Write Buffer Memory',
+    'decoder.enc28j60.annotation.4': 'Bit Field Set',
+    'decoder.enc28j60.annotation.5': 'Bit Field Clear',
+    'decoder.enc28j60.annotation.6': 'System Reset Command',
+    'decoder.enc28j60.annotation.7': 'Data',
+    'decoder.enc28j60.annotation.8': 'Register Address',
+    'decoder.enc28j60.annotation.9': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.enc28j60.name': 'ENC28J60 *',
+    'decoder.enc28j60.description': 'Microchip ENC28J60 10Base-T 以太网控制器协议。',
+    'decoder.enc28j60.row.0': '字段',
+    'decoder.enc28j60.row.1': '命令',
+    'decoder.enc28j60.row.2': '警告',
+    'decoder.enc28j60.annotation.0': '读取控制寄存器',
+    'decoder.enc28j60.annotation.1': '读取缓冲区内存',
+    'decoder.enc28j60.annotation.2': '写入控制寄存器',
+    'decoder.enc28j60.annotation.3': '写入缓冲区内存',
+    'decoder.enc28j60.annotation.4': '位域置位',
+    'decoder.enc28j60.annotation.5': '位域清零',
+    'decoder.enc28j60.annotation.6': '系统复位命令',
+    'decoder.enc28j60.annotation.7': '数据',
+    'decoder.enc28j60.annotation.8': '寄存器地址',
+    'decoder.enc28j60.annotation.9': '警告',
+  },
+} as const satisfies ComponentMessages;

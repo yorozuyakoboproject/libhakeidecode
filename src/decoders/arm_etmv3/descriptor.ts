@@ -1,0 +1,41 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'arm_etmv3',
+  name: 'ARM ETMv3 *',
+  longname: 'ARM Embedded Trace Macroblock v3',
+  desc: 'ARM ETM v3 instruction trace protocol.',
+  inputs: ['uart'],
+  outputs: [],
+  tags: ['Debug/trace'],
+  options: [
+    { id: 'objdump', desc: 'objdump path', default: 'arm-none-eabi-objdump' },
+    { id: 'objdump_opts', desc: 'objdump options', default: '-lSC' },
+    { id: 'elffile', desc: '.elf path', default: '' },
+    { id: 'branch_enc', desc: 'Branch encoding', default: 'alternative', values: ['alternative', 'original'] },
+  ],
+  annotations: [
+    ['trace', 'Trace info'],
+    ['branch', 'Branch'],
+    ['exception', 'Exception'],
+    ['execution', 'Instruction execution'],
+    ['data', 'Data access'],
+    ['pc', 'Program counter'],
+    ['instr_e', 'Executed instruction'],
+    ['instr_n', 'Not executed instruction'],
+    ['source', 'Source code'],
+    ['location', 'Current location'],
+    ['function', 'Current function'],
+  ],
+  annotationRows: [
+    ['traces', 'Trace info', [0]],
+    ['flow', 'Code flow', [1, 2, 3]],
+    ['data-vals', 'Data access', [4]],
+    ['pc-vals', 'Program counters', [5]],
+    ['instructions', 'Instructions', [6, 7]],
+    ['sources', 'Source code', [8]],
+    ['locations', 'Current locations', [9]],
+    ['functions', 'Current functions', [10]],
+  ],
+};

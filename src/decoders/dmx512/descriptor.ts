@@ -1,0 +1,41 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'dmx512',
+  name: 'DMX512 *',
+  longname: 'Digital MultipleX 512',
+  desc: 'Digital MultipleX 512 (DMX512) lighting protocol.',
+  inputs: ['uart'],
+  outputs: ['dmx512'],
+  tags: ['Embedded/industrial', 'Lighting'],
+  options: [
+    { id: 'min_break', desc: 'Minimum BREAK length (us)', default: 88 },
+    { id: 'max_mark', desc: 'Maximum MARK length (us)', default: 1000000 },
+    { id: 'min_break_break', desc: 'Minimum BREAK to BREAK interval (us)', default: 1196 },
+    { id: 'max_reset_reset', desc: 'Maximum RESET to RESET interval (us)', default: 1250000 },
+    { id: 'show_zero', desc: 'Display all-zero set-point values', default: 'no', values: ['yes', 'no'] },
+    { id: 'format', desc: 'Data format', default: 'dec', values: ['dec', 'hex', 'bin'] },
+  ],
+  annotations: [
+    ['break', 'Break'],
+    ['mab', 'Mark after break'],
+    ['interframe', 'Interframe'],
+    ['interpacket', 'Interpacket'],
+    ['startcode', 'Start code'],
+    ['databyte', 'Data byte'],
+    ['chan_data', 'Channel data'],
+    ['slot_data', 'Slot data'],
+    ['reset', 'Reset sequence'],
+    ['warning', 'Warning'],
+    ['error', 'Error'],
+  ],
+  annotationRows: [
+    ['dmx_fields', 'Fields', [0, 1, 4, 2, 5, 3]],
+    ['chans_data', 'Channels data', [6]],
+    ['slots_data', 'Slots data', [7]],
+    ['resets', 'Reset sequences', [8]],
+    ['warnings', 'Warnings', [9]],
+    ['errors', 'Errors', [10]],
+  ],
+};

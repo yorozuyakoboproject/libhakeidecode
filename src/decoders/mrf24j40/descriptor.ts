@@ -1,0 +1,38 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'mrf24j40',
+  name: 'MRF24J40 *',
+  longname: 'Microchip MRF24J40',
+  desc: 'IEEE 802.15.4 2.4 GHz RF tranceiver chip.',
+  inputs: ['spi'],
+  outputs: [],
+  tags: ['IC', 'Wireless/RF'],
+  annotations: [
+    ['sread', 'Short register read'],
+    ['swrite', 'Short register write'],
+    ['lread', 'Long register read'],
+    ['lwrite', 'Long register write'],
+    ['warning', 'Warning'],
+    ['tx-frame', 'TX frame'],
+    ['rx-frame', 'RX frame'],
+    ['tx-retry-1', '1x TX retry'],
+    ['tx-retry-2', '2x TX retry'],
+    ['tx-retry-3', '3x TX retry'],
+    ['tx-fail', 'TX fail (too many retries)'],
+    ['ccafail', 'CCAFAIL (channel busy)'],
+  ],
+  annotationRows: [
+    ['reads', 'Reads', [0, 2]],
+    ['writes', 'Writes', [1, 3]],
+    ['warnings', 'Warnings', [4]],
+    ['tx-frames', 'TX frames', [5]],
+    ['rx-frames', 'RX frames', [6]],
+    ['tx-retries-1', '1x TX retries', [7]],
+    ['tx-retries-2', '2x TX retries', [8]],
+    ['tx-retries-3', '3x TX retries', [9]],
+    ['tx-fails', 'TX fails', [10]],
+    ['ccafails', 'CCAFAILs', [11]],
+  ],
+};

@@ -24,6 +24,7 @@ export interface EventRuntimeHandler<F extends DecodeFrame> {
 export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements DecodeRuntime, EventRuntimeApi<F> {
   private readonly engine: DecoderEngine<readonly OutputEvent[]>;
   private readonly host: DecodeRuntimeContext['host'];
+  private readonly publish: DecodeRuntimeContext['publish'];
   private readonly handler: EventRuntimeHandler<F>;
   private annotations: Annotation[] = [];
   private frames: F[] = [];
@@ -37,6 +38,7 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
 
   constructor(plugin: DecoderPlugin<any, any>, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
     this.host = context.host;
+    this.publish = context.publish;
     this.handler = handler;
     const channels = Object.fromEntries(context.channels.map((channel) => [channel, channel]));
     this.engine = plugin.createEngine({
@@ -107,6 +109,7 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   }
   private consume(events: readonly OutputEvent[]): void {
     for (const event of events) {
+      this.publish?.(event);
       this.eventEnd = event.es;
       if (event.type === OUTPUT_ANN) {
         if (this.retained && event.es <= this.retainedStart) continue;

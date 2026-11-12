@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.sbus_futaba.name': 'SBUS (Futaba) *',
+    'decoder.sbus_futaba.description': 'Serial bus for hobby remote control by Futaba',
+    'decoder.sbus_futaba.option.prop_val_min': 'Proportional value lower boundary',
+    'decoder.sbus_futaba.option.prop_val_max': 'Proportional value upper boundary',
+    'decoder.sbus_futaba.row.0': 'Framing',
+    'decoder.sbus_futaba.row.1': 'Channels',
+    'decoder.sbus_futaba.row.2': 'Warnings',
+    'decoder.sbus_futaba.annotation.0': 'Header',
+    'decoder.sbus_futaba.annotation.1': 'Proportional',
+    'decoder.sbus_futaba.annotation.2': 'Digital',
+    'decoder.sbus_futaba.annotation.3': 'Frame Lost',
+    'decoder.sbus_futaba.annotation.4': 'Failsafe',
+    'decoder.sbus_futaba.annotation.5': 'Footer',
+    'decoder.sbus_futaba.annotation.6': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.sbus_futaba.name': 'SBUS (Futaba) *',
+    'decoder.sbus_futaba.description': 'Futaba 遥控比例与数字通道串行总线。',
+    'decoder.sbus_futaba.option.prop_val_min': '比例值下限',
+    'decoder.sbus_futaba.option.prop_val_max': '比例值上限',
+    'decoder.sbus_futaba.row.0': '帧结构',
+    'decoder.sbus_futaba.row.1': '通道',
+    'decoder.sbus_futaba.row.2': '警告',
+    'decoder.sbus_futaba.annotation.0': '报头',
+    'decoder.sbus_futaba.annotation.1': '比例通道',
+    'decoder.sbus_futaba.annotation.2': '数字通道',
+    'decoder.sbus_futaba.annotation.3': '帧丢失',
+    'decoder.sbus_futaba.annotation.4': '失控保护',
+    'decoder.sbus_futaba.annotation.5': '帧尾',
+    'decoder.sbus_futaba.annotation.6': '警告',
+  },
+} as const satisfies ComponentMessages;

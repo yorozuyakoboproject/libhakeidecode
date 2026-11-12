@@ -1,0 +1,46 @@
+import type { DecoderDescriptor } from '../../libhakeidecode/types.js';
+
+export const descriptor: DecoderDescriptor = {
+  apiVersion: 3,
+  id: 'maple_bus',
+  name: 'Maple bus *',
+  longname: 'SEGA Maple bus',
+  desc: 'Maple bus peripheral protocol for SEGA Dreamcast.',
+  inputs: ['logic'],
+  outputs: [],
+  tags: ['Retro computing'],
+  channels: [
+    { id: 'sdcka', name: 'SDCKA', desc: 'Data/clock line A' },
+    { id: 'sdckb', name: 'SDCKB', desc: 'Data/clock line B' },
+  ],
+  annotations: [
+    ['start', 'Start pattern'],
+    ['end', 'End pattern'],
+    ['start-with-crc', 'Start pattern with CRC'],
+    ['occupancy', 'SDCKB occupancy pattern'],
+    ['reset', 'RESET pattern'],
+    ['bit', 'Bit'],
+    ['size', 'Data size'],
+    ['source', 'Source AP'],
+    ['dest', 'Destination AP'],
+    ['command', 'Command'],
+    ['data', 'Data'],
+    ['checksum', 'Checksum'],
+    ['frame-error', 'Frame error'],
+    ['checksum-error', 'Checksum error'],
+    ['size-error', 'Size error'],
+  ],
+  annotationRows: [
+    ['bits', 'Bits', [0, 1, 2, 3, 4, 5]],
+    ['fields', 'Fields', [6, 7, 8, 9, 10, 11]],
+    ['warnings', 'Warnings', [12, 13, 14]],
+  ],
+  binary: [
+    ['size', 'Data size'],
+    ['source', 'Source AP'],
+    ['dest', 'Destination AP'],
+    ['command', 'Command code'],
+    ['data', 'Data'],
+    ['checksum', 'Checksum'],
+  ],
+};

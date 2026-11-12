@@ -175,12 +175,14 @@ export const en = {
   'error.binaryLength': 'Binary size must be a nonzero multiple of {stride} bytes',
   'error.binaryLimit': 'Binary imports are limited to 256 MiB',
   'error.noMapping': 'Map the required input channels',
+  'error.protocolMapping': 'Connect the required upstream protocol',
+  'error.protocolCycle': 'Protocol connections cannot contain a cycle',
   'error.worker': 'Could not start the decoder Worker',
   'error.cancelled': 'Decoding cancelled',
   'error.capture': 'Acquisition error: {detail}',
   'error.decoder': 'Decoder error: {detail}',
 } as const;
-export type MessageKey = keyof typeof en | DecoderMessageKey | DriverMessageKey;
+export type MessageKey = Extract<keyof typeof en | DecoderMessageKey | DriverMessageKey, string>;
 export type Locale = ComponentLocale;
 export type MessageValue = string | number | { key: MessageKey; params?: MessageParams };
 export type MessageParams = Record<string, MessageValue>;
@@ -352,6 +354,8 @@ export const zh: Record<keyof typeof en, string> = {
   'error.binaryLength': '二进制长度必须是 {stride} 字节的非零整数倍',
   'error.binaryLimit': '当前二进制导入上限为 256 MiB',
   'error.noMapping': '请映射所需的输入通道',
+  'error.protocolMapping': '请连接所需的上游协议',
+  'error.protocolCycle': '协议连接不能形成循环依赖',
   'error.worker': '解码 Worker 启动失败',
   'error.cancelled': '解码已取消',
   'error.capture': '采集错误：{detail}',

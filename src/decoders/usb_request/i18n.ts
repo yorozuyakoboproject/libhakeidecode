@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.usb_request.name': 'USB request *',
+    'decoder.usb_request.description': 'USB (low-speed/full-speed) transaction/request protocol.',
+    'decoder.usb_request.option.in_request_start': 'Start IN requests on',
+    'decoder.usb_request.value.submit': 'Submit',
+    'decoder.usb_request.value.first-ack': 'First Ack',
+    'decoder.usb_request.row.0': 'USB SETUP',
+    'decoder.usb_request.row.1': 'USB BULK IN',
+    'decoder.usb_request.row.2': 'USB BULK OUT',
+    'decoder.usb_request.row.3': 'Errors',
+    'decoder.usb_request.annotation.0': 'Setup: Device-to-host',
+    'decoder.usb_request.annotation.1': 'Setup: Host-to-device',
+    'decoder.usb_request.annotation.2': 'Bulk: Device-to-host',
+    'decoder.usb_request.annotation.3': 'Bulk: Host-to-device',
+    'decoder.usb_request.annotation.4': 'Unexpected packet',
+    'decoder.usb_request.binary.0': 'PCAP format',
+  },
+  'zh-CN': {
+    'decoder.usb_request.name': 'USB 请求 *',
+    'decoder.usb_request.description': 'USB（低速/全速）事务与请求协议。',
+    'decoder.usb_request.option.in_request_start': 'IN 请求起始时机',
+    'decoder.usb_request.value.submit': '提交时',
+    'decoder.usb_request.value.first-ack': '首次 ACK 时',
+    'decoder.usb_request.row.0': 'USB 控制请求',
+    'decoder.usb_request.row.1': 'USB 批量 IN',
+    'decoder.usb_request.row.2': 'USB 批量 OUT',
+    'decoder.usb_request.row.3': '错误',
+    'decoder.usb_request.annotation.0': '控制请求：设备到主机',
+    'decoder.usb_request.annotation.1': '控制请求：主机到设备',
+    'decoder.usb_request.annotation.2': '批量传输：设备到主机',
+    'decoder.usb_request.annotation.3': '批量传输：主机到设备',
+    'decoder.usb_request.annotation.4': '异常数据包',
+    'decoder.usb_request.binary.0': 'PCAP 格式',
+  },
+} as const satisfies ComponentMessages;

@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.ltc26x7.name': 'LTC26x7 *',
+    'decoder.ltc26x7.description': 'Linear Technology LTC26x7 16-/14-/12-bit rail-to-rail DACs.',
+    'decoder.ltc26x7.option.chip': 'Chip',
+    'decoder.ltc26x7.value.ltc2607': 'Ltc2607',
+    'decoder.ltc26x7.value.ltc2617': 'Ltc2617',
+    'decoder.ltc26x7.value.ltc2627': 'Ltc2627',
+    'decoder.ltc26x7.option.vref': 'Reference voltage (V)',
+    'decoder.ltc26x7.row.0': 'Address/command',
+    'decoder.ltc26x7.row.1': 'DAC A voltages',
+    'decoder.ltc26x7.row.2': 'DAC B voltages',
+    'decoder.ltc26x7.annotation.0': 'Slave address',
+    'decoder.ltc26x7.annotation.1': 'Command',
+    'decoder.ltc26x7.annotation.2': 'Address',
+    'decoder.ltc26x7.annotation.3': 'DAC A voltage',
+    'decoder.ltc26x7.annotation.4': 'DAC B voltage',
+  },
+  'zh-CN': {
+    'decoder.ltc26x7.name': 'LTC26x7 *',
+    'decoder.ltc26x7.description': 'Linear Technology LTC26x7 16/14/12 位轨到轨 DAC。',
+    'decoder.ltc26x7.option.chip': '芯片型号',
+    'decoder.ltc26x7.value.ltc2607': 'LTC2607',
+    'decoder.ltc26x7.value.ltc2617': 'LTC2617',
+    'decoder.ltc26x7.value.ltc2627': 'LTC2627',
+    'decoder.ltc26x7.option.vref': '参考电压（V）',
+    'decoder.ltc26x7.row.0': '地址/命令',
+    'decoder.ltc26x7.row.1': 'DAC A 电压',
+    'decoder.ltc26x7.row.2': 'DAC B 电压',
+    'decoder.ltc26x7.annotation.0': '从机地址',
+    'decoder.ltc26x7.annotation.1': '命令',
+    'decoder.ltc26x7.annotation.2': '通道地址',
+    'decoder.ltc26x7.annotation.3': 'DAC A 电压',
+    'decoder.ltc26x7.annotation.4': 'DAC B 电压',
+  },
+} as const satisfies ComponentMessages;

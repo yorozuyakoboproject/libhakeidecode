@@ -1,0 +1,36 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.atsha204a.name': 'ATSHA204A *',
+    'decoder.atsha204a.description': 'Microchip ATSHA204A family crypto authentication protocol.',
+    'decoder.atsha204a.row.0': 'Frames',
+    'decoder.atsha204a.row.1': 'Status',
+    'decoder.atsha204a.row.2': 'Warnings',
+    'decoder.atsha204a.annotation.0': 'Word address',
+    'decoder.atsha204a.annotation.1': 'Count',
+    'decoder.atsha204a.annotation.2': 'Opcode',
+    'decoder.atsha204a.annotation.3': 'Param1',
+    'decoder.atsha204a.annotation.4': 'Param2',
+    'decoder.atsha204a.annotation.5': 'Data',
+    'decoder.atsha204a.annotation.6': 'CRC',
+    'decoder.atsha204a.annotation.7': 'Status',
+    'decoder.atsha204a.annotation.8': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.atsha204a.name': 'ATSHA204A *',
+    'decoder.atsha204a.description': 'Microchip ATSHA204A 系列加密认证协议。',
+    'decoder.atsha204a.row.0': '帧',
+    'decoder.atsha204a.row.1': '状态',
+    'decoder.atsha204a.row.2': '警告',
+    'decoder.atsha204a.annotation.0': '字地址',
+    'decoder.atsha204a.annotation.1': '长度',
+    'decoder.atsha204a.annotation.2': '操作码',
+    'decoder.atsha204a.annotation.3': '参数 1',
+    'decoder.atsha204a.annotation.4': '参数 2',
+    'decoder.atsha204a.annotation.5': '数据',
+    'decoder.atsha204a.annotation.6': 'CRC',
+    'decoder.atsha204a.annotation.7': '状态',
+    'decoder.atsha204a.annotation.8': '警告',
+  },
+} as const satisfies ComponentMessages;

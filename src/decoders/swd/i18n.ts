@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.swd.name': 'SWD *',
+    'decoder.swd.description': 'Two-wire protocol for debug access to ARM CPUs.',
+    'decoder.swd.channel.swclk': 'SWCLK',
+    'decoder.swd.channel.swdio': 'SWDIO',
+    'decoder.swd.option.strict_start': 'Wait for a line reset before starting to decode',
+    'decoder.swd.value.yes': 'Yes',
+    'decoder.swd.value.no': 'No',
+    'decoder.swd.row.default': 'Annotations',
+    'decoder.swd.annotation.0': 'RESET',
+    'decoder.swd.annotation.1': 'ENABLE',
+    'decoder.swd.annotation.2': 'READ',
+    'decoder.swd.annotation.3': 'WRITE',
+    'decoder.swd.annotation.4': 'ACK',
+    'decoder.swd.annotation.5': 'DATA',
+    'decoder.swd.annotation.6': 'PARITY',
+  },
+  'zh-CN': {
+    'decoder.swd.name': 'SWD *',
+    'decoder.swd.description': '用于访问 ARM CPU 调试功能的双线协议。',
+    'decoder.swd.channel.swclk': 'SWCLK',
+    'decoder.swd.channel.swdio': 'SWDIO',
+    'decoder.swd.option.strict_start': '等待线路复位后再开始解码',
+    'decoder.swd.value.yes': '是',
+    'decoder.swd.value.no': '否',
+    'decoder.swd.row.default': '标注',
+    'decoder.swd.annotation.0': 'RESET',
+    'decoder.swd.annotation.1': 'ENABLE',
+    'decoder.swd.annotation.2': 'READ',
+    'decoder.swd.annotation.3': 'WRITE',
+    'decoder.swd.annotation.4': 'ACK',
+    'decoder.swd.annotation.5': 'DATA',
+    'decoder.swd.annotation.6': 'PARITY',
+  },
+} as const satisfies ComponentMessages;

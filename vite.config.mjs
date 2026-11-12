@@ -29,6 +29,19 @@ export default defineConfig({
     target: 'es2022',
     emptyOutDir: false,
     sourcemap: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'decoder-metadata',
+              test: /src[\\/]decoders[\\/][^\\/]+[\\/](?:component|descriptor|i18n)\.ts$/,
+              maxSize: 200_000,
+            },
+          ],
+        },
+      },
+    },
   },
   worker: { format: 'es' },
 });

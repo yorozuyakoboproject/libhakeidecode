@@ -1,0 +1,38 @@
+import type { ComponentMessages } from '../../components.js';
+
+export const messages = {
+  en: {
+    'decoder.lfast.name': 'LFAST *',
+    'decoder.lfast.description': 'Differential high-speed P2P interface',
+    'decoder.lfast.channel.data': 'Data',
+    'decoder.lfast.row.0': 'Bits',
+    'decoder.lfast.row.1': 'Fields',
+    'decoder.lfast.row.2': 'Warnings',
+    'decoder.lfast.annotation.0': 'Bits',
+    'decoder.lfast.annotation.1': 'Sync Pattern',
+    'decoder.lfast.annotation.2': 'Payload Size',
+    'decoder.lfast.annotation.3': 'Logical Channel Type',
+    'decoder.lfast.annotation.4': 'Clear To Send',
+    'decoder.lfast.annotation.5': 'Payload',
+    'decoder.lfast.annotation.6': 'Control Data',
+    'decoder.lfast.annotation.7': 'Sleep Bit',
+    'decoder.lfast.annotation.8': 'Warning',
+  },
+  'zh-CN': {
+    'decoder.lfast.name': 'LFAST 高速点对点接口 *',
+    'decoder.lfast.description': 'NXP 差分高速点对点串行接口。',
+    'decoder.lfast.channel.data': '数据',
+    'decoder.lfast.row.0': '位',
+    'decoder.lfast.row.1': '字段',
+    'decoder.lfast.row.2': '警告',
+    'decoder.lfast.annotation.0': '位',
+    'decoder.lfast.annotation.1': '同步码',
+    'decoder.lfast.annotation.2': '负载长度',
+    'decoder.lfast.annotation.3': '逻辑通道类型',
+    'decoder.lfast.annotation.4': '允许发送',
+    'decoder.lfast.annotation.5': '负载',
+    'decoder.lfast.annotation.6': '控制数据',
+    'decoder.lfast.annotation.7': '睡眠位',
+    'decoder.lfast.annotation.8': '警告',
+  },
+} as const satisfies ComponentMessages;
