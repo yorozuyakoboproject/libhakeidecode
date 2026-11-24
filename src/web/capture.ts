@@ -18,6 +18,7 @@ export interface SharedCaptureConsumerSource {
   readonly allocatedBytes: number;
   readonly bytesPerSample: 1 | 2 | 3 | 4;
   readonly publishedSamples: bigint;
+  readonly acceptingConsumers?: boolean;
   readonly publisherMetrics?: { calls: number; bytes: number; totalMs: number; maxMs: number };
   readonly driverDiagnostics?: DriverDiagnostics;
   connectConsumer(port: MessagePort): void;

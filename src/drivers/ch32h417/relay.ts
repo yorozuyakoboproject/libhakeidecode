@@ -2,7 +2,18 @@ import { RelayData } from './relay-data.js';
 
 export type TransportMode = 'auto' | 'native' | 'webusb';
 export type TransportKind = Exclude<TransportMode, 'auto'>;
-export const RELAY_URL = 'http://127.0.0.1:17641';
+export const DEFAULT_RELAY_PORT = 17641;
+export function parseRelayPort(port: unknown): number | null {
+  const value = typeof port === 'number' ? port : typeof port === 'string' && port.trim() ? Number(port) : NaN;
+  return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null;
+}
+export function normalizeRelayPort(port: unknown): number {
+  return parseRelayPort(port) ?? DEFAULT_RELAY_PORT;
+}
+export function relayUrl(port = DEFAULT_RELAY_PORT): string {
+  return `http://127.0.0.1:${normalizeRelayPort(port)}`;
+}
+export const RELAY_URL = relayUrl();
 
 type Endpoint = { endpointNumber: number; direction: 'in' | 'out'; type: string; packetSize: number };
 type Alternate = { alternateSetting: number; interfaceClass: number; endpoints: Endpoint[] };
@@ -60,21 +71,21 @@ class RelayDiagnostics {
   websocket?: RelayData['metrics'];
 }
 
-async function relayFetch(path: string): Promise<Response> {
+async function relayFetch(path: string, port = DEFAULT_RELAY_PORT): Promise<Response> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 1000);
   try {
-    const response = await fetch(RELAY_URL + path, { signal: abort.signal, cache: 'no-store' });
+    const response = await fetch(relayUrl(port) + path, { signal: abort.signal, cache: 'no-store' });
     if (!response.ok) throw new Error(`USB relay HTTP ${response.status}`);
     return response;
   } finally {
     clearTimeout(timer);
   }
 }
-export async function relayAvailable(): Promise<boolean> {
+export async function relayAvailable(port = DEFAULT_RELAY_PORT): Promise<boolean> {
   let status;
   try {
-    status = await (await relayFetch('/api/status')).json();
+    status = await (await relayFetch('/api/status', port)).json();
   } catch {
     return false;
   }
@@ -112,6 +123,7 @@ export class RelayDevice implements Identity {
   constructor(
     identity: Identity,
     private readonly lost: (device: RelayDevice) => void,
+    private readonly port = DEFAULT_RELAY_PORT,
   ) {
     Object.assign(this, identity);
   }
@@ -128,7 +140,7 @@ export class RelayDevice implements Identity {
   }
   async open(): Promise<void> {
     if (this.opened) return;
-    const socket = new WebSocket(RELAY_URL.replace('http:', 'ws:') + '/usb');
+    const socket = new WebSocket(relayUrl(this.port).replace('http:', 'ws:') + '/usb');
     this.socket = socket;
     socket.binaryType = 'arraybuffer';
     socket.onmessage = ({ data }: MessageEvent<string | ArrayBuffer>) => {
@@ -211,7 +223,7 @@ export class RelayDevice implements Identity {
   private reportDiagnostics(): Promise<void> {
     if (this.reporting) return this.reporting;
     if (!this.sessionId || !this.diagnostics) return Promise.resolve();
-    this.reporting = fetch(`${RELAY_URL}/api/diagnostics/${this.sessionId}`, {
+    this.reporting = fetch(`${relayUrl(this.port)}/api/diagnostics/${this.sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...this.diagnostics, atUnixMs: Date.now() }),
@@ -295,7 +307,7 @@ export class RelayDevice implements Identity {
     if (!this.data) {
       const diagnostics = new RelayDiagnostics();
       this.diagnostics = diagnostics;
-      this.data = new RelayData(`${RELAY_URL.replace('http:', 'ws:')}/data/${this.sessionId}/130`);
+      this.data = new RelayData(`${relayUrl(this.port).replace('http:', 'ws:')}/data/${this.sessionId}/130`);
       diagnostics.websocket = this.data.metrics;
       this.diagnosticsTimer = setInterval(() => {
         const at = performance.now();
@@ -323,14 +335,19 @@ export class RelayDevice implements Identity {
 
 export class RelayUsb extends EventTarget {
   private readonly devices = new Map<string, RelayDevice>();
+  constructor(readonly port = DEFAULT_RELAY_PORT) {
+    super();
+  }
   async getDevices(): Promise<RelayDevice[]> {
-    const identities = (await (await relayFetch('/api/devices')).json()) as Identity[];
+    const identities = (await (await relayFetch('/api/devices', this.port)).json()) as Identity[];
     return identities.map((identity) => {
       const key = identity.serialNumber!;
       let device = this.devices.get(key);
       if (!device) {
-        device = new RelayDevice(identity, (value) =>
-          this.dispatchEvent(Object.assign(new Event('disconnect'), { device: value })),
+        device = new RelayDevice(
+          identity,
+          (value) => this.dispatchEvent(Object.assign(new Event('disconnect'), { device: value })),
+          this.port,
         );
         this.devices.set(key, device);
       } else if (!device.opened) Object.assign(device, identity);
@@ -349,12 +366,24 @@ export class RelayUsb extends EventTarget {
   }
 }
 
-export const relayUsb = new RelayUsb();
+const relayUsbs = new Map<number, RelayUsb>();
+export function relayUsbFor(port = DEFAULT_RELAY_PORT): RelayUsb {
+  const normalized = normalizeRelayPort(port);
+  let instance = relayUsbs.get(normalized);
+  if (!instance) {
+    instance = new RelayUsb(normalized);
+    relayUsbs.set(normalized, instance);
+  }
+  return instance;
+}
+export const relayUsb = relayUsbFor(DEFAULT_RELAY_PORT);
 export async function selectUsb<T>(
   mode: TransportMode,
   webusb: T,
+  port = DEFAULT_RELAY_PORT,
 ): Promise<{ api: RelayUsb | T; kind: TransportKind }> {
-  if (mode !== 'webusb' && (await relayAvailable())) return { api: relayUsb, kind: 'native' };
-  if (mode === 'native') throw new Error('USB bridge unavailable at 127.0.0.1:17641');
+  const normalized = normalizeRelayPort(port);
+  if (mode !== 'webusb' && (await relayAvailable(normalized))) return { api: relayUsbFor(normalized), kind: 'native' };
+  if (mode === 'native') throw new Error(`USB bridge unavailable at 127.0.0.1:${normalized}`);
   return { api: webusb, kind: 'webusb' };
 }

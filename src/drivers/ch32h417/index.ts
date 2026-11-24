@@ -28,7 +28,14 @@ import {
   type Capabilities,
 } from './protocol.js';
 import { H417Transport, TRANSPORT_WORKING_BYTES, type UsbApi } from './transport.js';
-import { selectUsb, type TransportMode, type TransportKind } from './relay.js';
+import {
+  DEFAULT_RELAY_PORT,
+  normalizeRelayPort,
+  parseRelayPort,
+  selectUsb,
+  type TransportMode,
+  type TransportKind,
+} from './relay.js';
 import { captureError } from './overflow.js';
 async function configureCompression(
   transport: H417Transport,
@@ -181,6 +188,7 @@ export interface H417Identity {
   capabilities: Capabilities;
   transportMode?: TransportMode;
   transportKind?: TransportKind;
+  relayPort?: number;
 }
 export type H417TransportMetrics = H417Transport['metrics'];
 export interface H417StreamStats {
@@ -205,6 +213,7 @@ export class CH32H417Device implements MultiRateDevice {
   private identity?: H417Identity;
   private api: UsbApi | null = null;
   private transportMode: TransportMode = 'auto';
+  private relayPort = DEFAULT_RELAY_PORT;
   private serialNumber?: string;
   private restoring = false;
   private autoRestore = true;
@@ -219,9 +228,15 @@ export class CH32H417Device implements MultiRateDevice {
     this.identity = initialization?.capabilities ? (initialization as H417Identity) : undefined;
     this.serialNumber = initialization?.serialNumber;
     this.transportMode = initialization?.transportMode ?? 'auto';
+    this.relayPort = normalizeRelayPort(initialization?.relayPort);
   }
   get initialization(): Partial<H417Identity> {
-    return { ...this.identity, serialNumber: this.serialNumber, transportMode: this.transportMode };
+    return {
+      ...this.identity,
+      serialNumber: this.serialNumber,
+      transportMode: this.transportMode,
+      relayPort: this.relayPort,
+    };
   }
   get connected(): boolean {
     return !!this.identity;
@@ -235,9 +250,10 @@ export class CH32H417Device implements MultiRateDevice {
       const saved = initialization as Partial<H417Identity>;
       if (saved.transportMode && ['auto', 'native', 'webusb'].includes(saved.transportMode))
         this.transportMode = saved.transportMode;
+      if (saved.relayPort !== undefined) this.relayPort = normalizeRelayPort(saved.relayPort);
       if (saved.serialNumber) this.serialNumber = saved.serialNumber;
     }
-    const { api: usb, kind } = await this.usb(this.transportMode);
+    const { api: usb, kind } = await this.usb(this.transportMode, this.relayPort);
     const matches = (await usb.getDevices()).filter(
       (device) =>
         device.vendorId === USB_VID && device.productId === USB_PID && device.serialNumber?.startsWith('H417-'),
@@ -251,7 +267,12 @@ export class CH32H417Device implements MultiRateDevice {
     const device =
       matches.find((item) => item.serialNumber === serialNumber) ?? (matches.length === 1 ? matches[0] : undefined);
     if (!device) throw new ComponentError('driver.ch32h417.error.ambiguous');
-    if (this.identity && this.identity.serialNumber === device.serialNumber && this.identity.transportKind === kind)
+    if (
+      this.identity &&
+      this.identity.serialNumber === device.serialNumber &&
+      this.identity.transportKind === kind &&
+      (kind !== 'native' || this.identity.relayPort === this.relayPort)
+    )
       return true;
     const transport = new H417Transport(device);
     try {
@@ -266,6 +287,7 @@ export class CH32H417Device implements MultiRateDevice {
         capabilities: caps,
         transportKind: kind,
         transportMode: this.transportMode,
+        relayPort: this.relayPort,
       };
       this.serialNumber = device.serialNumber;
       if (this.api !== usb) {
@@ -286,19 +308,27 @@ export class CH32H417Device implements MultiRateDevice {
     this.api = null;
     this.onConnectionChange?.();
   }
-  private async usb(mode: TransportMode): Promise<{ api: UsbApi; kind: TransportKind }> {
+  private async usb(mode: TransportMode, port = this.relayPort): Promise<{ api: UsbApi; kind: TransportKind }> {
     const webusb = (globalThis.navigator as (Navigator & { usb?: UsbApi }) | undefined)?.usb;
-    const selected = await selectUsb(mode, webusb);
+    const selected = await selectUsb(mode, webusb, port);
     if (!selected.api) throw new ComponentError('driver.ch32h417.error.browser');
     return { api: selected.api as UsbApi, kind: selected.kind };
   }
   private async captureUsb(): Promise<UsbApi> {
-    return (await this.usb(this.identity?.transportKind ?? this.transportMode)).api;
+    return (
+      await this.usb(this.identity?.transportKind ?? this.transportMode, this.identity?.relayPort ?? this.relayPort)
+    ).api;
   }
-  async setTransport(mode: string): Promise<void> {
+  async setTransport(mode: string, port?: number): Promise<void> {
     if (!['auto', 'native', 'webusb'].includes(mode)) throw new Error('Invalid USB transport');
+    if (port !== undefined) {
+      const parsed = parseRelayPort(port);
+      if (parsed === null) throw new ComponentError('driver.ch32h417.transport.portInvalid');
+      this.relayPort = parsed;
+    }
     this.transportMode = mode as TransportMode;
     this.autoRestore = true;
+    this.onConnectionChange?.();
     try {
       await this.restore();
     } catch (error) {
@@ -328,6 +358,8 @@ export class CH32H417Device implements MultiRateDevice {
         selected: this.transportMode,
         active: this.identity?.transportKind,
         choices: ['auto', 'native', 'webusb'],
+        port: this.relayPort,
+        defaultPort: DEFAULT_RELAY_PORT,
       },
     };
   }

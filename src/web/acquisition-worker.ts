@@ -11,6 +11,7 @@ import {
   type TransferProgress,
 } from '../libhakei/device.js';
 import { createDriverDevice } from '../drivers/workers.js';
+import { ensureWorkerDriver } from '../kernel/worker-plugins.js';
 import { createSampleChunk } from '../libhakei/index.js';
 import type { SharedChunkProducer, SharedPublisherMetrics } from './shared-chunks.js';
 import type { SharedChunkAllocator } from './shared-chunk-allocator.js';
@@ -331,6 +332,7 @@ scope.onmessage = ({ data }) => {
         reportSharedProgress(producer.allocatedBytes, producer.length, producer.publisherMetrics, true);
       }
       controller.signal.throwIfAborted();
+      await ensureWorkerDriver(data.driverId);
       const device = createDriverDevice(data.driverId, data.initialization);
       validateDeviceConfiguration(device, data.configuration);
       let configuration = data.configuration;

@@ -1,6 +1,6 @@
 import { decoderDefinitions } from '../decoders/index.js';
 import { driverDefinitions } from '../drivers/index.js';
-import { ComponentError, type ComponentLocale } from '../components.js';
+import { ComponentError, type ComponentLocale, type ComponentMessages } from '../components.js';
 import type { DecoderMessageKey } from '../generated/decoders.js';
 import type { DriverMessageKey } from '../generated/drivers.js';
 
@@ -68,7 +68,50 @@ export const en = {
 
   'app.title': 'Hakei · Logic Analyzer',
   'nav.workbench': 'Workbench',
+  'nav.plugins': 'Plugins',
   'nav.local': 'Local browser processing',
+  'search.placeholder': 'Search…',
+  'search.empty': 'No matching items',
+  'plugins.title': 'Plugin Manager',
+  'plugins.subtitle': 'Manage built-in modules and upload custom protocol decoders or capture drivers.',
+  'plugins.upload': 'Upload plugin (.zip / .js)',
+  'plugins.uploadHint':
+    'Drop a .zip plugin package or single-file .js/.mjs decoder/driver plugin here, or click to select',
+  'plugins.urlPlaceholder': 'Plugin URL (.zip, manifest.json, or .js)',
+  'plugins.installUrl': 'Install URL',
+  'plugins.templates': 'Starter templates',
+  'plugins.templateDecoder': 'Decoder template (.js)',
+  'plugins.templateDriver': 'Driver template (.js)',
+  'plugins.search': 'Search plugins by name, ID, or description…',
+  'plugins.filter.all': 'All',
+  'plugins.filter.core': 'Core & UI',
+  'plugins.filter.decoder': 'Decoders',
+  'plugins.filter.driver': 'Drivers',
+  'plugins.filter.installed': 'Installed',
+  'plugins.kind.core': 'Core',
+  'plugins.kind.ui': 'UI',
+  'plugins.kind.decoder': 'Decoder',
+  'plugins.kind.driver': 'Driver',
+  'plugins.status.active': 'Active',
+  'plugins.status.disabled': 'Disabled',
+  'plugins.status.failed': 'Failed',
+  'plugins.status.pending': 'Pending',
+  'plugins.source.builtin': 'Built-in',
+  'plugins.source.installed': 'Custom',
+  'plugins.source.override': 'Override',
+  'plugins.enable': 'Enable',
+  'plugins.disable': 'Disable',
+  'plugins.retry': 'Retry',
+  'plugins.uninstall': 'Uninstall',
+  'plugins.restoreBuiltin': 'Restore built-in',
+  'plugins.restoreDefaults': 'Restore defaults',
+  'plugins.services': 'Service providers',
+  'plugins.empty': 'No plugins match your filter.',
+  'plugins.count': '{shown} / {total} plugins',
+  'plugins.installedOk': 'Installed plugin: {name}',
+  'plugins.uninstalledOk': 'Removed plugin: {id}',
+  'plugins.restoredOk': 'Restored default plugin states',
+  'plugins.recovery': 'Recovery mode',
   'theme.label': 'Appearance',
   'theme.light': 'Day',
   'theme.dark': 'Night',
@@ -249,7 +292,49 @@ export const zh: Record<keyof typeof en, string> = {
 
   'app.title': 'Hakei · 逻辑分析仪',
   'nav.workbench': '工作台',
+  'nav.plugins': '插件',
   'nav.local': '本地浏览器处理',
+  'search.placeholder': '搜索…',
+  'search.empty': '无匹配项',
+  'plugins.title': '插件管理',
+  'plugins.subtitle': '管理内置模块，或上传自定义协议解码器与采集驱动插件。',
+  'plugins.upload': '上传插件（.zip / .js）',
+  'plugins.uploadHint': '将 .zip 插件包或单文件 .js/.mjs 解码器/驱动插件拖到此处，或点击选择',
+  'plugins.urlPlaceholder': '输入插件 URL（.zip / manifest.json / .js）',
+  'plugins.installUrl': '从 URL 安装',
+  'plugins.templates': '开发模板',
+  'plugins.templateDecoder': '下载解码器模板 (.js)',
+  'plugins.templateDriver': '下载驱动模板 (.js)',
+  'plugins.search': '按名称、ID 或描述搜索插件…',
+  'plugins.filter.all': '全部',
+  'plugins.filter.core': '核心与界面',
+  'plugins.filter.decoder': '协议解码器',
+  'plugins.filter.driver': '采集驱动',
+  'plugins.filter.installed': '已安装',
+  'plugins.kind.core': '核心',
+  'plugins.kind.ui': '界面',
+  'plugins.kind.decoder': '解码器',
+  'plugins.kind.driver': '驱动',
+  'plugins.status.active': '已启用',
+  'plugins.status.disabled': '已停用',
+  'plugins.status.failed': '加载失败',
+  'plugins.status.pending': '等待中',
+  'plugins.source.builtin': '内置',
+  'plugins.source.installed': '自定义',
+  'plugins.source.override': '覆盖内置',
+  'plugins.enable': '启用',
+  'plugins.disable': '停用',
+  'plugins.retry': '重试',
+  'plugins.uninstall': '卸载',
+  'plugins.restoreBuiltin': '还原内置',
+  'plugins.restoreDefaults': '恢复默认',
+  'plugins.services': '服务提供者绑定',
+  'plugins.empty': '没有符合条件的插件。',
+  'plugins.count': '显示 {shown} / {total} 个插件',
+  'plugins.installedOk': '已安装插件：{name}',
+  'plugins.uninstalledOk': '已卸载插件：{id}',
+  'plugins.restoredOk': '已恢复默认插件状态',
+  'plugins.recovery': '恢复模式',
   'theme.label': '主题',
   'theme.light': '日间',
   'theme.dark': '夜间',
@@ -361,11 +446,12 @@ export const zh: Record<keyof typeof en, string> = {
   'error.capture': '采集错误：{detail}',
   'error.decoder': '解码器错误：{detail}',
 };
-export const messages = { en: { ...en }, 'zh-CN': { ...zh } } as Record<Locale, Record<MessageKey, string>>;
-for (const component of [...decoderDefinitions, ...driverDefinitions]) {
-  Object.assign(messages.en, component.messages.en);
-  Object.assign(messages['zh-CN'], component.messages.en, component.messages['zh-CN']);
+export const messages = { en: { ...en }, 'zh-CN': { ...zh } } as Record<Locale, Record<string, string>>;
+export function registerComponentMessages(componentMessages: ComponentMessages): void {
+  Object.assign(messages.en, componentMessages.en);
+  Object.assign(messages['zh-CN'], componentMessages.en, componentMessages['zh-CN']);
 }
+for (const component of [...decoderDefinitions, ...driverDefinitions]) registerComponentMessages(component.messages);
 let locale: Locale = 'zh-CN';
 export function getLocale(): Locale {
   return locale;

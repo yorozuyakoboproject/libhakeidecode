@@ -2,6 +2,8 @@ import { decoderWorkerDefinition } from './workers.js';
 import { createSignalWindow } from '../libhakeidecode/signal.js';
 import { resultMemory } from './definition.js';
 import type {
+  Annotation,
+  DecodeFrame,
   DecodeGraphHost,
   DecodeGraphNode,
   DecodeGraphResult,
@@ -201,6 +203,24 @@ export class DecodeGraphRuntime {
       results.push({ id: node.spec.id, decoder: node.spec.decoder, result });
     }
     return results.sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  frameCountFor(instanceId: string): number {
+    const node = this.nodes.get(instanceId);
+    if (!node) throw new Error('Unknown protocol instance: ' + instanceId);
+    return node.runtime.frameCount;
+  }
+
+  queryAnnotations(instanceId: string, start: bigint, end: bigint, maxResults: number): Annotation[] | null {
+    const node = this.nodes.get(instanceId);
+    if (!node) throw new Error('Unknown protocol instance: ' + instanceId);
+    return node.runtime.queryAnnotations?.(start, end, maxResults) ?? null;
+  }
+
+  readFrames(instanceId: string, offset: number, count: number): DecodeFrame[] | null {
+    const node = this.nodes.get(instanceId);
+    if (!node) throw new Error('Unknown protocol instance: ' + instanceId);
+    return node.runtime.readFrames?.(offset, count) ?? null;
   }
 
   reset(): void {

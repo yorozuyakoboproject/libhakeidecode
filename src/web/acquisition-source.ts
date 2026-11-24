@@ -198,6 +198,9 @@ export class WorkerSampleSource implements AsyncIterableIterator<AcquisitionChun
   get publishedSamples(): bigint {
     return this.sharedPublishedSamples;
   }
+  get acceptingConsumers(): boolean {
+    return this.shared && !this.closed && !this.finished;
+  }
   get publisherMetrics(): { calls: number; bytes: number; totalMs: number; maxMs: number } {
     return { ...this.sharedPublisher };
   }

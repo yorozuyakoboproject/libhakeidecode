@@ -7,6 +7,7 @@ import {
 } from '../libhakeidecode/signal.js';
 import { compareSamples } from '../libhakei/sample-index.js';
 import { decoderWorkerDefinition } from '../decoders/workers.js';
+import { ensureWorkerDecoder } from '../kernel/worker-plugins.js';
 import { DecodeGraphRuntime } from '../decoders/graph-runtime.js';
 import { createDecodeRuntime } from './decode-runtime.js';
 import type { DecodeRuntime, DecodeRuntimeResult } from './decode-runtime.js';
@@ -14,6 +15,7 @@ import { resultMemory } from '../decoders/definition.js';
 import { DecodeResultStore } from './decode-result-store.js';
 import { SharedCaptureError, SharedChunkReader } from './shared-chunks.js';
 import type {
+  Annotation,
   DecodeChunkRequest,
   DecodeEdgeChunkRequest,
   DecodeFinishRequest,
@@ -252,7 +254,7 @@ function startGraph(request: DecodeGraphStartRequest): void {
   }
   let graph!: DecodeGraphRuntime;
   const s = {
-    decoder: request.nodes[0]!.id,
+    decoder: request.nodes[0]!.decoder,
     sampleRate: request.sampleRate,
     length: request.length,
     rolling: request.rolling ?? false,
@@ -336,12 +338,16 @@ function startGraph(request: DecodeGraphStartRequest): void {
 }
 function queryAnnotations(request: DecodeQueryAnnotationsRequest): void {
   const s = session;
-  const store = s && instanceStore(s, request.instanceId);
-  const annotations = store
-    ? store.annotations.query(request.start, request.end, request.maxResults)
-    : (s?.runtime.queryAnnotations?.(request.start, request.end, request.maxResults) ??
-      s?.results.annotations.query(request.start, request.end, request.maxResults) ??
-      []);
+  let annotations: Annotation[] = [];
+  if (s) {
+    const instance = resolveInstance(s, request.instanceId);
+    annotations =
+      instance && s.graph
+        ? (s.graph.queryAnnotations(instance.id, request.start, request.end, request.maxResults) ??
+          instance.results.annotations.query(request.start, request.end, request.maxResults))
+        : (s.runtime.queryAnnotations?.(request.start, request.end, request.maxResults) ??
+          s.results.annotations.query(request.start, request.end, request.maxResults));
+  }
   scope.postMessage({ type: 'decode-query-annotations-result', requestId: request.requestId, annotations });
 }
 function readFrames(request: DecodeReadFramesRequest): void {
@@ -349,25 +355,34 @@ function readFrames(request: DecodeReadFramesRequest): void {
   const frames = s ? readFrameRange(s, request.offset, request.count, request.instanceId) : [];
   scope.postMessage({ type: 'decode-read-frames-result', requestId: request.requestId, frames });
 }
-function instanceStore(s: Session, instanceId: string | undefined): DecodeResultStore | null {
+function resolveInstance(
+  s: Session,
+  instanceId: string | undefined,
+): { id: string; decoder: DecoderId; results: DecodeResultStore } | null {
   if (!s.instances) return null;
-  if (!instanceId) throw new Error('Protocol instance is required');
-  const instance = s.instances.get(instanceId);
-  if (!instance) throw new Error('Unknown protocol instance: ' + instanceId);
-  return instance.results;
+  const id = instanceId ?? (s.instances.size === 1 ? s.instances.keys().next().value : undefined);
+  if (!id) throw new Error('Protocol instance is required');
+  const instance = s.instances.get(id);
+  if (!instance) throw new Error('Unknown protocol instance: ' + id);
+  return { id, ...instance };
 }
 function readFrameRange(s: Session, offset: number, count: number, instanceId?: string) {
-  const store = instanceStore(s, instanceId);
-  if (s.rolling) {
-    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(count) || offset < 0 || count < 0)
-      throw new RangeError('Invalid frame range');
-    const total = store?.length ?? s.runtime.frameCount;
-    offset = Math.min(offset, total);
-    count = Math.min(count, total - offset);
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(count) || offset < 0 || count < 0)
+    throw new RangeError('Invalid frame range');
+  const instance = resolveInstance(s, instanceId);
+  if (instance && s.graph) {
+    const total = Math.max(instance.results.length, s.graph.frameCountFor(instance.id));
+    const clampedOffset = Math.min(offset, total);
+    const clampedCount = Math.min(count, total - clampedOffset);
+    return (
+      s.graph.readFrames(instance.id, clampedOffset, clampedCount) ??
+      instance.results.readFrames(clampedOffset, clampedCount)
+    );
   }
-  return (
-    store?.readFrames(offset, count) ?? s.runtime.readFrames?.(offset, count) ?? s.results.readFrames(offset, count)
-  );
+  const total = Math.max(s.results.length, s.runtime.frameCount);
+  const clampedOffset = Math.min(offset, total);
+  const clampedCount = Math.min(count, total - clampedOffset);
+  return s.runtime.readFrames?.(clampedOffset, clampedCount) ?? s.results.readFrames(clampedOffset, clampedCount);
 }
 function readCsv(request: DecodeReadCsvRequest): void {
   const s = session;
@@ -375,9 +390,9 @@ function readCsv(request: DecodeReadCsvRequest): void {
     scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv: '' });
     return;
   }
-  const instance = request.instanceId && s.instances ? s.instances.get(request.instanceId) : null;
+  const instance = resolveInstance(s, request.instanceId);
   const definition = decoderWorkerDefinition(instance?.decoder ?? s.decoder);
-  const frames = readFrameRange(s, request.offset, request.count, request.instanceId);
+  const frames = readFrameRange(s, request.offset, request.count, instance?.id);
   const origin = request.sampleOffset ?? 0n;
   const rows = frames.map((frame) =>
     definition.csvRow(
@@ -390,11 +405,11 @@ function readCsv(request: DecodeReadCsvRequest): void {
   scope.postMessage({ type: 'decode-read-csv-result', requestId: request.requestId, csv });
 }
 function readBinary(request: Extract<DecodeStreamRequest, { type: 'decode-read-binary' }>): void {
-  const store = session && instanceStore(session, request.instanceId);
+  const instance = session && resolveInstance(session, request.instanceId);
   scope.postMessage({
     type: 'decode-read-binary-result',
     requestId: request.requestId,
-    blob: store?.readBinary(request.key) ?? session?.results.readBinary(request.key) ?? null,
+    blob: instance ? instance.results.readBinary(request.key) : (session?.results.readBinary(request.key) ?? null),
   });
 }
 function startShared(s: Session, request: DecodeSharedStartRequest): void {
@@ -808,10 +823,12 @@ async function finishGraph(s: Session, request: DecodeFinishRequest): Promise<vo
 }
 async function handle(request: DecodeStreamRequest): Promise<void> {
   if (request.type === 'decode-start') {
+    await ensureWorkerDecoder(request.decoder);
     start(request);
     return;
   }
   if (request.type === 'decode-graph-start') {
+    await Promise.all(request.nodes.map((node) => ensureWorkerDecoder(node.decoder)));
     startGraph(request);
     return;
   }

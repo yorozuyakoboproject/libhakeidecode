@@ -67,6 +67,12 @@ export function descriptor(caps: Capabilities = defaultCaps): DeviceDescriptor {
     id: 'ch32h417',
     name: 'CH32H417 Logic Analyzer',
     capabilities: capabilities(caps),
+    transport: {
+      selected: 'auto',
+      choices: ['auto', 'native', 'webusb'],
+      port: 17641,
+      defaultPort: 17641,
+    },
     logicInputs: digital.map((index) => ({ index, name: `D${index}` })),
     analogInputs: [0, 1]
       .filter((i) => caps.analogMask & (1 << i))

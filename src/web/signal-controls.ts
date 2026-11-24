@@ -1,6 +1,6 @@
 import { encoderIds, loadSignalEncoderPresets } from '../generated/encoders.js';
 import type { SignalEncoderPreset } from '../decoders/signal.js';
-import { decoderDefinition } from '../decoders/index.js';
+import { decoderDefinition, decoderDefinitions, hasDecoderDefinition } from '../decoders/index.js';
 import type { DecoderId } from './protocol.js';
 import type { DeviceControls } from './device-controls.js';
 import type { OptionDeclaration, OptionValue } from '../libhakeidecode/types.js';
@@ -13,10 +13,25 @@ import {
   type DemoSignal,
 } from '../drivers/demo/signal.js';
 import { hasMessage, t } from './i18n.js';
+import { SearchSelect, decoderSearchText } from './search-select.js';
 
 const STORAGE_KEY = 'hakei.demo.signals';
 
+function activeEncoderIds(): readonly string[] {
+  const active = new Set(decoderDefinitions.map((definition) => definition.descriptor.id));
+  return encoderIds.filter((id) => active.has(id));
+}
+
+function decoderOptionText(decoder: string): string {
+  try {
+    return decoderSearchText(decoderDefinition(decoder));
+  } catch {
+    return decoder;
+  }
+}
+
 function declarations(decoder: DecoderId): readonly OptionDeclaration[] {
+  if (!hasDecoderDefinition(decoder)) return [];
   const options = decoderDefinition(decoder).descriptor.options;
   if (!options) return [];
   return Array.isArray(options)
@@ -26,7 +41,12 @@ function declarations(decoder: DecoderId): readonly OptionDeclaration[] {
 
 function decoderName(decoder: string): string {
   const key = `decoder.${decoder}.name`;
-  return hasMessage(key) ? t(key) : (decoderDefinition(decoder).descriptor.name ?? decoder);
+  if (hasMessage(key)) return t(key);
+  try {
+    return decoderDefinition(decoder).descriptor.name ?? decoder;
+  } catch {
+    return decoder;
+  }
 }
 
 function channelRange(count: number): number[] {
@@ -55,15 +75,33 @@ export class SignalControls {
   private readonly presets = new Map<string, readonly SignalEncoderPreset[]>();
   private readonly pendingPresets = new Map<string, Promise<readonly SignalEncoderPreset[]>>();
   private readonly section = document.getElementById('signal-section') as HTMLElement | null;
+  private readonly addTypePicker: SearchSelect;
+  private readonly decoderPicker: SearchSelect;
+  private readonly onLocaleChange: () => void;
   constructor(private readonly devices: DeviceControls) {
     if (!this.section) throw new Error('Missing signal generator UI');
+    this.addTypePicker = new SearchSelect(select(this.section, 'add-signal-type'));
+    this.decoderPicker = new SearchSelect(select(this.section, 'signal-decoder'));
     this.populateAddTypes();
     this.signals = this.restore();
     this.selectedId = this.signals[0]?.id ?? null;
     this.bindControls();
     this.refresh();
     void this.initialize();
-    window.addEventListener('hakei:localechange', () => this.render());
+    this.onLocaleChange = () => {
+      this.populateAddTypes();
+      this.render();
+    };
+    window.addEventListener('hakei:localechange', this.onLocaleChange);
+  }
+  dispose(): void {
+    window.removeEventListener('hakei:localechange', this.onLocaleChange);
+    this.addTypePicker.dispose();
+    this.decoderPicker.dispose();
+  }
+  refreshDecoders(): void {
+    this.populateAddTypes();
+    this.render();
   }
   private restore(): DemoSignal[] {
     let raw = DEFAULT_DEMO_SIGNALS;
@@ -85,21 +123,27 @@ export class SignalControls {
     this.render();
   }
   private populateAddTypes(): void {
-    const select = document.getElementById('add-signal-type') as HTMLSelectElement | null;
-    if (!select) return;
-    select.replaceChildren();
-    for (const decoder of encoderIds) {
+    const addSelect = document.getElementById('add-signal-type') as HTMLSelectElement | null;
+    if (!addSelect) return;
+    const previous = addSelect.value;
+    const encoders = activeEncoderIds();
+    addSelect.replaceChildren();
+    for (const decoder of encoders) {
       const option = document.createElement('option');
       option.value = decoder;
       option.textContent = decoderName(decoder);
-      select.append(option);
+      option.dataset.search = decoderOptionText(decoder);
+      addSelect.append(option);
     }
     const analog = document.createElement('option');
     analog.value = 'analog';
     analog.dataset.i18n = 'signal.analog';
+    analog.dataset.search = 'analog waveform 模拟 模拟波形 sine square triangle sawtooth';
     analog.textContent = t('signal.analog');
-    select.append(analog);
-    if (encoderIds.includes('pwm')) select.value = 'pwm';
+    addSelect.append(analog);
+    if (previous && (previous === 'analog' || encoders.includes(previous))) addSelect.value = previous;
+    else if (encoders.includes('pwm')) addSelect.value = 'pwm';
+    this.addTypePicker.refresh();
   }
   private bindControls(): void {
     const section = this.section!;
@@ -137,6 +181,8 @@ export class SignalControls {
       'button, input, select',
     ))
       control.disabled = busy;
+    this.addTypePicker.refresh();
+    this.decoderPicker.refresh();
   }
   refresh(): void {
     const visible = this.devices.device.descriptor.id === 'demo';
@@ -219,16 +265,17 @@ export class SignalControls {
     }
   }
   private defaultInputs(decoder: string): readonly string[] {
-    return decoderDefinition(decoder).ui.inputs.map((item) => item.key);
+    return hasDecoderDefinition(decoder) ? decoderDefinition(decoder).ui.inputs.map((item) => item.key) : [];
   }
   private preset(signal: DemoEncoderSignal): SignalEncoderPreset | undefined {
     return this.presets.get(signal.decoder)?.find((item) => item.name === signal.caseName);
   }
   private inputDeclarations(signal: DemoEncoderSignal): readonly { key: string; label: string; labelKey?: string }[] {
     const preset = this.preset(signal);
-    if (!preset) return decoderDefinition(signal.decoder).ui.inputs;
-    const root = preset.chain[0]?.decoder ?? signal.decoder,
-      definition = decoderDefinition(root).descriptor,
+    if (!preset) return hasDecoderDefinition(signal.decoder) ? decoderDefinition(signal.decoder).ui.inputs : [];
+    const root = preset.chain[0]?.decoder ?? signal.decoder;
+    if (!hasDecoderDefinition(root)) return preset.channels.map((key) => ({ key, label: key }));
+    const definition = decoderDefinition(root).descriptor,
       labels = new Map(
         [...(definition.channels ?? []), ...(definition.optionalChannels ?? [])].map((channel) => [
           channel.id,
@@ -283,14 +330,18 @@ export class SignalControls {
   }
   private renderEncoder(signal: DemoEncoderSignal): void {
     const decoder = select(this.section!, 'signal-decoder');
+    const encoders = activeEncoderIds();
+    const choices = encoders.includes(signal.decoder) ? encoders : [signal.decoder, ...encoders];
     decoder.replaceChildren();
-    for (const id of encoderIds) {
+    for (const id of choices) {
       const option = document.createElement('option');
       option.value = id;
       option.textContent = decoderName(id);
+      option.dataset.search = decoderOptionText(id);
       decoder.append(option);
     }
     decoder.value = signal.decoder;
+    this.decoderPicker.refresh();
     const presets = this.presets.get(signal.decoder),
       cases = select(this.section!, 'signal-case');
     cases.replaceChildren();
@@ -342,7 +393,7 @@ export class SignalControls {
     }
     const options = document.getElementById('signal-options')!;
     options.replaceChildren();
-    for (const declaration of declarations(decoderDefinition(signal.decoder).descriptor.id as DecoderId)) {
+    for (const declaration of declarations(signal.decoder as DecoderId)) {
       const label = document.createElement('label');
       label.className = 'field';
       const caption = document.createElement('span');

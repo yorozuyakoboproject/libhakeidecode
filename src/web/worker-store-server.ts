@@ -387,7 +387,7 @@ export class WorkerStoreServer {
       requestedStart = maxSample(0n, request.startSample),
       requestedSpan = maxSample(0n, request.endSample - requestedStart),
       absoluteStart = opening ? maxSample(offset, requestedStart) : requestedStart,
-      absoluteEnd = opening ? minSample(sourceEnd, absoluteStart + requestedSpan) : requestedStart + requestedSpan;
+      absoluteEnd = minSample(sourceEnd, absoluteStart + requestedSpan);
     if (absoluteStart < offset) throw new Error('Decoder fell behind the retained capture window');
     if (
       Object.values(request.channels).some(
@@ -396,8 +396,8 @@ export class WorkerStoreServer {
     )
       throw new RangeError('Invalid decode channel');
     const start = absoluteStart - offset,
-      availableEnd = minSample(sourceEnd, absoluteEnd) - offset;
-    if (absoluteStart >= sourceEnd || (live && absoluteEnd > sourceEnd)) {
+      availableEnd = absoluteEnd - offset;
+    if (absoluteStart >= sourceEnd || availableEnd <= start) {
       port.postMessage({
         type: 'decode-read-result',
         id: request.id,

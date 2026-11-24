@@ -33,35 +33,26 @@ export class DeviceControls {
   private connectionSequence = 0;
   private configurationError: unknown = null;
   private connectionError: unknown = null;
-  private pendingTransport?: string;
+  private pendingTransport?: { mode?: string; port?: number };
+  private devicesList: DeviceControl[];
+  private readonly transportTimer: ReturnType<typeof setInterval>;
+  private readonly onLocaleChange: () => void;
   constructor(
     readonly form: HTMLFormElement,
-    readonly devices: readonly DeviceControl[],
+    devices: readonly DeviceControl[],
   ) {
+    this.devicesList = [...devices];
     const select = this.control<HTMLSelectElement>('device-select');
     const mode = this.control<HTMLSelectElement>('capture-mode');
     try {
       if (localStorage.getItem('hakei.captureMode') === 'continuous') mode.value = 'continuous';
     } catch {}
-    for (const device of devices) {
-      const option = document.createElement('option');
-      option.value = device.descriptor.id;
-      this.caption(option, `driver.${device.descriptor.id}.name`, device.descriptor.name);
-      select.append(option);
-    }
+    this.populateDeviceSelect();
     const remembered = this.rememberedDevice();
-    const defaultDevice = this.devices.find((device) => device.descriptor.id === DEFAULT_DEVICE_ID);
+    const defaultDevice = this.devicesList.find((device) => device.descriptor.id === DEFAULT_DEVICE_ID);
     if (remembered) select.value = remembered;
     else if (defaultDevice) select.value = defaultDevice.descriptor.id;
-    for (const device of devices)
-      device.onConnectionChange = () => {
-        if (device === this.device) {
-          if (!this.busy) this.renderOptions();
-          this.reconcileChannelSelection();
-          this.refreshConnection();
-          this.onConnectionChange?.();
-        }
-      };
+    this.bindDevices();
     const connect = form.querySelector<HTMLButtonElement>('#connect-device');
     const disconnect = form.querySelector<HTMLButtonElement>('#disconnect-device');
     connect?.addEventListener('click', () => {
@@ -87,21 +78,83 @@ export class DeviceControls {
         } catch {}
         return;
       }
-      if (event.target === select || (event.target as HTMLElement).id === 'device-transport' || this.busy) return;
-      if ((event.target as HTMLElement).id.startsWith('device-option-')) this.rememberOptions();
-      if ((event.target as HTMLElement).id === 'capture-duration')
-        this.durationSeconds = Number(this.control('capture-duration').value);
+      const targetId = (event.target as HTMLElement).id;
+      if (
+        event.target === select ||
+        targetId === 'device-transport' ||
+        targetId === 'device-transport-port' ||
+        this.busy
+      )
+        return;
+      if (targetId.startsWith('device-option-')) this.rememberOptions();
+      if (targetId === 'capture-duration') this.durationSeconds = Number(this.control('capture-duration').value);
       void this.refreshCapabilities();
     });
-    window.addEventListener('hakei:localechange', () => {
+    this.onLocaleChange = () => {
       if (this.samplingCapabilities) this.renderSampling(this.configuration(), this.samplingCapabilities);
       this.refreshConnection();
-    });
+    };
+    window.addEventListener('hakei:localechange', this.onLocaleChange);
     void this.restoreAuthorizedDevices();
-    setInterval(() => {
+    this.transportTimer = setInterval(() => {
       if (!this.busy && !this.connecting && !this.configuring && this.device.descriptor.transport)
         void this.updateTransport();
     }, 3000);
+  }
+  get devices(): readonly DeviceControl[] {
+    return this.devicesList;
+  }
+  setDevices(devices: readonly DeviceControl[]): void {
+    const previousId = this.form.querySelector<HTMLSelectElement>('#device-select')?.value;
+    for (const old of this.devicesList) old.onConnectionChange = null;
+    this.devicesList = [...devices];
+    this.populateDeviceSelect();
+    this.bindDevices();
+    const select = this.control<HTMLSelectElement>('device-select');
+    const stillPresent = this.devicesList.some((device) => device.descriptor.id === previousId);
+    if (stillPresent && previousId) select.value = previousId;
+    else {
+      const remembered = this.rememberedDevice();
+      const fallback =
+        this.devicesList.find((device) => device.descriptor.id === DEFAULT_DEVICE_ID) ?? this.devicesList[0];
+      if (remembered) select.value = remembered;
+      else if (fallback) select.value = fallback.descriptor.id;
+    }
+    if (this.devicesList.length && (!stillPresent || select.value !== previousId)) {
+      ++this.connectionSequence;
+      this.connecting = false;
+      this.selectDevice();
+      void this.restoreAuthorizedDevices();
+    } else if (this.devicesList.length) {
+      this.refreshConnection();
+      translateDOM();
+    }
+  }
+  dispose(): void {
+    clearInterval(this.transportTimer);
+    window.removeEventListener('hakei:localechange', this.onLocaleChange);
+    for (const device of this.devicesList) device.onConnectionChange = null;
+  }
+  private populateDeviceSelect(): void {
+    const select = this.control<HTMLSelectElement>('device-select');
+    select.replaceChildren();
+    for (const device of this.devicesList) {
+      const option = document.createElement('option');
+      option.value = device.descriptor.id;
+      this.caption(option, `driver.${device.descriptor.id}.name`, device.descriptor.name);
+      select.append(option);
+    }
+  }
+  private bindDevices(): void {
+    for (const device of this.devicesList)
+      device.onConnectionChange = () => {
+        if (device === this.device) {
+          if (!this.busy) this.renderOptions();
+          this.reconcileChannelSelection();
+          this.refreshConnection();
+          this.onConnectionChange?.();
+        }
+      };
   }
   private control<T extends HTMLInputElement | HTMLSelectElement = HTMLInputElement>(id: string): T {
     const node = this.form.querySelector<T>(`#${id}`);
@@ -232,7 +285,7 @@ export class DeviceControls {
             const prefix = this.logicPrefix(next);
             this.logicSelection = prefix.length || !next.length ? prefix : [...this.channelIndices(kind)];
           } else this.analogSelection = next;
-        } else if (indices === undefined && kind === 'logic') {
+        } else if (indices === undefined && kind === 'logic' && this.device.descriptor.logicInputs) {
           this.logicSelection = [...this.channelIndices(kind)];
         }
       }
@@ -364,12 +417,18 @@ export class DeviceControls {
     const device = this.device,
       row = this.form.querySelector<HTMLElement>('#device-connection');
     if (!row) return;
+    let transportField = row.querySelector<HTMLElement>('#device-transport-field');
     let transport = row.querySelector<HTMLSelectElement>('#device-transport');
     let transportStatus = row.querySelector<HTMLElement>('#device-transport-status');
-    if (!transport && device.descriptor.transport) {
+    let portField = row.querySelector<HTMLElement>('#device-transport-port-field');
+    let portInput = row.querySelector<HTMLInputElement>('#device-transport-port');
+    if (device.descriptor.transport && (!transportField || transportField.dataset.driverId !== device.descriptor.id)) {
+      transportField?.remove();
+      portField?.remove();
       const label = document.createElement('label');
       label.className = 'field';
       label.id = 'device-transport-field';
+      label.dataset.driverId = device.descriptor.id;
       const name = document.createElement('span');
       this.caption(name, `driver.${device.descriptor.id}.transport.label`, 'USB transport');
       transport = document.createElement('select');
@@ -388,9 +447,50 @@ export class DeviceControls {
       transportStatus.role = 'status';
       label.append(name, transport, transportStatus);
       row.prepend(label);
+      transportField = label;
+      portField = null;
+      portInput = null;
     }
-    const transportField = row.querySelector<HTMLElement>('#device-transport-field');
+    if (device.descriptor.transport?.port !== undefined && !portField) {
+      const label = document.createElement('label');
+      label.className = 'field';
+      label.id = 'device-transport-port-field';
+      const name = document.createElement('span');
+      this.caption(name, `driver.${device.descriptor.id}.transport.port`, 'Native relay port');
+      portInput = document.createElement('input');
+      portInput.type = 'number';
+      portInput.id = 'device-transport-port';
+      portInput.min = '1';
+      portInput.max = '65535';
+      portInput.step = '1';
+      portInput.inputMode = 'numeric';
+      let committedRaw = '';
+      const commitPort = () => {
+        const current = this.device.descriptor.transport;
+        if (!current) return;
+        const raw = portInput!.value.trim();
+        if (raw === committedRaw) return;
+        committedRaw = raw;
+        const port = raw ? Number(raw) : (current.defaultPort ?? current.port ?? 17641);
+        void this.updateTransport(transport?.value ?? current.selected, port);
+      };
+      portInput.addEventListener('focus', () => {
+        committedRaw = portInput!.value.trim();
+      });
+      portInput.addEventListener('change', commitPort);
+      portInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commitPort();
+          portInput!.blur();
+        }
+      });
+      label.append(name, portInput);
+      transportField?.after(label);
+      portField = label;
+    }
     if (transportField) transportField.hidden = !device.descriptor.transport;
+    if (portField) portField.hidden = device.descriptor.transport?.port === undefined;
     if (transport && device.descriptor.transport) {
       transport.value = device.descriptor.transport.selected;
       transport.disabled = this.busy || this.connecting || this.configuring;
@@ -400,6 +500,13 @@ export class DeviceControls {
         'Disconnected',
       );
       transportStatus!.dataset.transport = device.descriptor.transport.active ?? 'none';
+      if (portInput && device.descriptor.transport.port !== undefined) {
+        if (document.activeElement !== portInput) portInput.value = String(device.descriptor.transport.port);
+        if (device.descriptor.transport.defaultPort !== undefined)
+          portInput.placeholder = String(device.descriptor.transport.defaultPort);
+        portInput.disabled =
+          this.busy || this.connecting || this.configuring || device.descriptor.transport.selected === 'webusb';
+      }
     }
     const disconnected = device.connected === false;
     this.form.querySelector<HTMLElement>('#device-sampling')!.hidden = disconnected;
@@ -435,10 +542,11 @@ export class DeviceControls {
     if (this.device.connected !== false) return;
     await this.updateConnection('restore');
   }
-  private async updateTransport(mode?: string): Promise<void> {
+  private async updateTransport(mode?: string, port?: number): Promise<void> {
     if (this.busy || this.configuring) return;
+    const explicit = mode !== undefined || port !== undefined;
     if (this.connecting || this.updatingTransport) {
-      if (mode !== undefined) this.pendingTransport = mode;
+      if (explicit) this.pendingTransport = { mode, port };
       return;
     }
     const device = this.device;
@@ -455,13 +563,13 @@ export class DeviceControls {
     const previousSettings = settingsKey();
     const connected = device.connected;
     this.updatingTransport = true;
-    if (mode !== undefined) {
+    if (explicit) {
       this.connecting = true;
       this.refreshConnection();
       this.onConnectionChange?.();
     }
     try {
-      await device.setTransport(mode);
+      await device.setTransport(mode, port);
       if (device !== this.device) return;
       this.connectionError = null;
       if (connected && device.connected && previousSettings === settingsKey()) return;
@@ -474,12 +582,12 @@ export class DeviceControls {
       if (device === this.device) this.connectionError = error;
     } finally {
       this.updatingTransport = false;
-      if (mode !== undefined) this.connecting = false;
+      if (explicit) this.connecting = false;
       this.refreshConnection();
       this.onConnectionChange?.();
       const pending = this.pendingTransport;
       this.pendingTransport = undefined;
-      if (pending !== undefined) void this.updateTransport(pending);
+      if (pending !== undefined) void this.updateTransport(pending.mode, pending.port);
     }
   }
   private async updateConnection(action: 'connect' | 'disconnect' | 'restore'): Promise<void> {

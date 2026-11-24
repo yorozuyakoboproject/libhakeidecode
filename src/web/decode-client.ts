@@ -41,14 +41,16 @@ function graphChannels(mapping: ChannelMapping): [string, number][] {
   if (!entries.length) throw new UIError('error.noMapping');
   return entries;
 }
-function graphEdgeInput(nodes: readonly DecodeGraphNode[]): string | undefined {
-  const values = new Set<string | null>(
-    nodes
-      .filter((node) => !node.inputs || !Object.keys(node.inputs).length)
-      .map((node) => decoderDefinition(node.decoder).ui.edgeInput ?? null),
-  );
-  if (values.size > 1) throw new UIError('error.noMapping');
-  return [...values][0] ?? undefined;
+function graphEdgeInput(nodes: readonly DecodeGraphNode[], channels: readonly [string, number][]): string | undefined {
+  if (channels.length !== 1) return undefined;
+  const roots = nodes.filter((node) => !node.inputs || !Object.keys(node.inputs).length);
+  if (roots.length !== 1) return undefined;
+  const root = roots[0]!;
+  const edgeKey = decoderDefinition(root.decoder).ui.edgeInput;
+  if (!edgeKey) return undefined;
+  const source = root.channels?.[edgeKey];
+  const channelKey = source === undefined ? edgeKey : String(source);
+  return channels[0]![0] === channelKey ? channelKey : undefined;
 }
 export interface LiveDecodeSession {
   advance(capture: Capture): Promise<void>;
@@ -355,7 +357,7 @@ export class DecodeClient {
     const rolling = capture.acquisition?.mode === 'continuous';
     if (rolling && workerStore) this.liveOffset = () => workerStore.metadata.sampleOffset ?? 0n;
     const channels = graphChannels(mapping),
-      edgeInput = graphEdgeInput(nodes);
+      edgeInput = graphEdgeInput(nodes, channels);
     const worker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
     this.worker = worker;
     let failure: Error | null = null,
@@ -501,7 +503,7 @@ export class DecodeClient {
                   ? sampleLimit
                   : availableLength;
           const channels = graphChannels(mapping),
-            edgeInput = graphEdgeInput(nodes);
+            edgeInput = graphEdgeInput(nodes, channels);
           if (generation !== this.generation) return;
           const worker = (activeWorker = new Worker(new URL('./decode-worker.js', import.meta.url), {
             type: 'module',

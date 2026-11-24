@@ -1,4 +1,5 @@
 import { createDriverDevice } from '../drivers/workers.js';
+import { ensureWorkerDriver } from '../kernel/worker-plugins.js';
 import { componentFailure } from '../components.js';
 import { resolveDeviceConfiguration, validateDeviceConfiguration, type SampleDevice } from '../libhakei/device.js';
 import type { DeviceRequest, DeviceResponse, DeviceState } from './device-protocol.js';
@@ -19,6 +20,7 @@ scope.onmessage = ({ data }) => {
     try {
       if (driverId && driverId !== data.driverId) throw new Error('Device control Worker cannot change drivers');
       if (!device) {
+        await ensureWorkerDriver(data.driverId);
         device = createDriverDevice(data.driverId);
         driverId = data.driverId;
         const current = device;
@@ -32,8 +34,8 @@ scope.onmessage = ({ data }) => {
         await device.connect(data.initialization);
       } else if (data.type === 'disconnect') await device.disconnect?.();
       else if (data.type === 'transport') {
-        if (data.mode === undefined) await device.refreshTransport?.();
-        else await device.setTransport?.(data.mode);
+        if (data.mode === undefined && data.port === undefined) await device.refreshTransport?.();
+        else await device.setTransport?.(data.mode ?? device.descriptor.transport?.selected ?? 'auto', data.port);
       } else if (data.type === 'configure') settings = resolveDeviceConfiguration(device, data.configuration);
       else if (data.type === 'prepare') {
         await device.refreshTransport?.();

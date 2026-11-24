@@ -54,8 +54,8 @@ export class DeviceClient implements DeviceControl {
   async disconnect(): Promise<void> {
     await this.request({ type: 'disconnect' });
   }
-  async setTransport(mode?: string): Promise<void> {
-    await this.request({ type: 'transport', mode });
+  async setTransport(mode?: string, port?: number): Promise<void> {
+    await this.request({ type: 'transport', mode, ...(port === undefined ? {} : { port }) });
   }
   async configure(configuration: DeviceConfiguration): Promise<DeviceConfigurationState> {
     const result = await this.request({ type: 'configure', configuration });
@@ -66,6 +66,15 @@ export class DeviceClient implements DeviceControl {
     const result = await this.request({ type: 'prepare', configuration });
     if (!result.description) throw new Error('Device Worker returned no acquisition description');
     return result.description;
+  }
+  dispose(): void {
+    this.worker?.terminate();
+    this.worker = null;
+    for (const item of this.pending.values()) {
+      clearTimeout(item.timer);
+      item.reject(new Error('Device client disposed'));
+    }
+    this.pending.clear();
   }
   private update(state: DeviceState, notify = true): void {
     this.state = state;

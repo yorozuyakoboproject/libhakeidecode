@@ -82,11 +82,11 @@ class PWMRuntime implements DecodeRuntime {
       binaryTruncated: false,
     };
   }
-  queryAnnotations(start: bigint, end: bigint, maxResults: number): Annotation[] {
-    return this.paged ? this.store.queryAnnotations(start, end, maxResults) : [];
+  queryAnnotations(start: bigint, end: bigint, maxResults: number): Annotation[] | null {
+    return this.paged ? this.store.queryAnnotations(start, end, maxResults) : null;
   }
-  readFrames(offset: number, count: number): DecodeFrame[] {
-    return this.paged ? this.store.readFrames(offset, count) : [];
+  readFrames(offset: number, count: number): DecodeFrame[] | null {
+    return this.paged ? this.store.readFrames(offset, count) : null;
   }
   private consume(batch: PWMScanBatch): void | Promise<void> {
     this.store.append(batch.cycles, batch.averages);

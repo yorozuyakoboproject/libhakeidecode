@@ -53,8 +53,17 @@ window.addEventListener('storage', (event) => {
   apply();
   if (previous !== getLocale()) window.dispatchEvent(new Event('hakei:localechange'));
 });
-for (const select of document.querySelectorAll<HTMLSelectElement>('[data-theme-select]'))
-  select.addEventListener('change', () => changeTheme(select.value as ThemeMode));
-for (const select of document.querySelectorAll<HTMLSelectElement>('[data-locale-select]'))
-  select.addEventListener('change', () => changeLocale(select.value as Locale));
-apply();
+export function bindPreferenceControls(root: ParentNode = document): void {
+  for (const select of root.querySelectorAll<HTMLSelectElement>('[data-theme-select]')) {
+    if (select.dataset.prefBound) continue;
+    select.dataset.prefBound = '1';
+    select.addEventListener('change', () => changeTheme(select.value as ThemeMode));
+  }
+  for (const select of root.querySelectorAll<HTMLSelectElement>('[data-locale-select]')) {
+    if (select.dataset.prefBound) continue;
+    select.dataset.prefBound = '1';
+    select.addEventListener('change', () => changeLocale(select.value as Locale));
+  }
+  apply();
+}
+bindPreferenceControls();

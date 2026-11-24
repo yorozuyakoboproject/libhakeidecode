@@ -44,7 +44,13 @@ export type DeviceOption = DeviceOptionBase &
       }
   );
 export interface DeviceDescriptor {
-  readonly transport?: { readonly selected: string; readonly active?: string; readonly choices: readonly string[] };
+  readonly transport?: {
+    readonly selected: string;
+    readonly active?: string;
+    readonly choices: readonly string[];
+    readonly port?: number;
+    readonly defaultPort?: number;
+  };
   readonly logicInputs?: readonly { readonly index: number; readonly name: string }[];
   readonly analogInputs?: readonly { readonly index: number; readonly name: string }[];
   readonly id: string;
@@ -163,7 +169,7 @@ interface DeviceBase {
   restore?(initialization?: unknown): Promise<boolean>;
   connect?(initialization?: unknown): Promise<void>;
   disconnect?(): Promise<void>;
-  setTransport?(mode: string): Promise<void>;
+  setTransport?(mode: string, port?: number): Promise<void>;
   refreshTransport?(): Promise<void>;
   onConnectionChange?: (() => void) | null;
 

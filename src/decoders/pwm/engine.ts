@@ -48,15 +48,26 @@ export class PWMScanEngine implements DecoderEngine<PWMScanBatch> {
     const view = window.channel('data');
     if (!view) throw new DecodeError('PWM requires a data channel.');
     if (view.kind === 'packed' && view.data)
-      await this.pushPacked(window.startSample, view.data as Uint8Array, view.bit ?? 0);
+      await this.pushPacked(window.startSample, view.data as Uint8Array, view.bit ?? 0, view.sampleBytes ?? 1);
     else if (view.kind === 'edges') await this.pushEdges(window.startSample, view.initial ?? 0, view.edges ?? []);
     else await this.pushValues(window, view);
     await this.flush();
   }
-  private async pushPacked(startSample: bigint, data: Uint8Array, bit: number): Promise<void> {
+  private async pushPacked(startSample: bigint, data: Uint8Array, bit: number, sampleBytes = 1): Promise<void> {
+    if (![1, 2, 3, 4].includes(sampleBytes) || data.length % sampleBytes)
+      throw new RangeError('Invalid packed PWM sample width');
+    if (!Number.isInteger(bit) || bit < 0 || bit >= sampleBytes * 8)
+      throw new RangeError('Invalid packed PWM channel bit');
     if (!data.length) return;
-    if (!Number.isInteger(bit) || bit < 0 || bit > 7) throw new RangeError('Invalid packed PWM channel bit');
-    if (startSample < 0n || startSample + BigInt(data.length) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    if (sampleBytes > 1) {
+      await this.pushPackedStrided(startSample, data, bit, sampleBytes);
+      return;
+    }
+    if (
+      this.activeStart !== null ||
+      startSample < 0n ||
+      startSample + BigInt(data.length) > BigInt(Number.MAX_SAFE_INTEGER)
+    ) {
       await this.pushPackedBigint(startSample, data, bit);
       return;
     }
@@ -133,6 +144,63 @@ export class PWMScanEngine implements DecoderEngine<PWMScanBatch> {
     }
     this.level = level;
   }
+  private async pushPackedStrided(
+    startSample: bigint,
+    data: Uint8Array,
+    bit: number,
+    sampleBytes: number,
+  ): Promise<void> {
+    const sampleCount = data.length / sampleBytes;
+    const byteOffset = bit >>> 3;
+    const mask = 1 << (bit & 7);
+    if (
+      this.activeStart !== null ||
+      startSample < 0n ||
+      startSample + BigInt(sampleCount) > BigInt(Number.MAX_SAFE_INTEGER)
+    ) {
+      this.promoteFast();
+      let pos = byteOffset;
+      let sample = 0;
+      if (this.level === null) {
+        this.level = (data[pos]! & mask ? 1 : 0) as 0 | 1;
+        pos += sampleBytes;
+        sample = 1;
+      }
+      let level = this.level;
+      for (; sample < sampleCount; sample++, pos += sampleBytes) {
+        const next = (data[pos]! & mask ? 1 : 0) as 0 | 1;
+        if (next === level) continue;
+        level = next;
+        this.transition(startSample + BigInt(sample));
+        if (this.cycles.length >= 3 * FLUSH_CYCLES) {
+          const pending = this.flush();
+          if (pending) await pending;
+        }
+      }
+      this.level = level;
+      return;
+    }
+    const start = Number(startSample);
+    let pos = byteOffset;
+    let sample = 0;
+    if (this.level === null) {
+      this.level = (data[pos]! & mask ? 1 : 0) as 0 | 1;
+      pos += sampleBytes;
+      sample = 1;
+    }
+    let level = this.level;
+    for (; sample < sampleCount; sample++, pos += sampleBytes) {
+      const next = (data[pos]! & mask ? 1 : 0) as 0 | 1;
+      if (next === level) continue;
+      level = next;
+      this.transitionNumber(start + sample);
+      if (this.cycles.length >= 3 * FLUSH_CYCLES) {
+        const pending = this.flush();
+        if (pending) await pending;
+      }
+    }
+    this.level = level;
+  }
   private async pushValues(window: SignalWindow, view: LogicWindow): Promise<void> {
     if (!view.length) return;
     let offset = 0;
@@ -158,7 +226,7 @@ export class PWMScanEngine implements DecoderEngine<PWMScanBatch> {
     }
   }
   private async transitionAt(startSample: bigint, offset: number): Promise<void> {
-    if (startSample + BigInt(offset) <= BigInt(Number.MAX_SAFE_INTEGER))
+    if (this.activeStart === null && startSample + BigInt(offset) <= BigInt(Number.MAX_SAFE_INTEGER))
       this.transitionNumber(Number(startSample) + offset);
     else {
       this.promoteFast();

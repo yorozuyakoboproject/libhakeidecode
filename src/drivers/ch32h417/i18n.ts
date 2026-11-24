@@ -3,6 +3,8 @@ import type { ComponentMessages } from '../../components.js';
 export const messages = {
   en: {
     'driver.ch32h417.transport.label': 'USB transport',
+    'driver.ch32h417.transport.port': 'Native relay port',
+    'driver.ch32h417.transport.portInvalid': 'Relay port must be an integer between 1 and 65535',
     'driver.ch32h417.transport.auto': 'Auto (prefer native relay)',
     'driver.ch32h417.transport.native': 'Native USB relay',
     'driver.ch32h417.transport.webusb': 'Direct WebUSB',
@@ -54,6 +56,8 @@ export const messages = {
   },
   'zh-CN': {
     'driver.ch32h417.transport.label': 'USB 传输通道',
+    'driver.ch32h417.transport.port': '后台转发端口',
+    'driver.ch32h417.transport.portInvalid': '转发端口须为 1–65535 的整数',
     'driver.ch32h417.transport.auto': '自动（优先后台转发）',
     'driver.ch32h417.transport.native': '后台原生 USB 转发',
     'driver.ch32h417.transport.webusb': '浏览器 WebUSB 直连',

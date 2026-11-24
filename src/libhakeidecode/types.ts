@@ -120,6 +120,7 @@ export interface LogicWindow {
   readonly length: number;
   readonly data?: ArrayLike<number>;
   readonly bit?: number;
+  readonly sampleBytes?: number;
   readonly initial?: LogicLevel;
   readonly edges?: readonly (number | bigint)[];
   at(index: number): Pin;
