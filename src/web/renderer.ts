@@ -867,6 +867,15 @@ export class WaveformRenderer {
     ctx.fillRect(0, 0, this.width, height);
     if (!capture) {
       this.updateSettingsButtons([], started);
+      if (this.axisCanvas) {
+        const axisCtx = this.axisCanvas.getContext('2d');
+        axisCtx?.clearRect(0, 0, this.axisCanvas.width, this.axisCanvas.height);
+      }
+      const overviewCtx = this.overview.getContext('2d');
+      if (overviewCtx) {
+        overviewCtx.setTransform(1, 0, 0, 1, 0, 0);
+        overviewCtx.clearRect(0, 0, this.overview.width, this.overview.height);
+      }
       this.presentFrame();
       return performance.now() - started;
     }
@@ -876,8 +885,9 @@ export class WaveformRenderer {
       this.gutter + sampleRatio(sample - this.start, this.end - this.start) * plotWidth;
     ctx.font = '11px ui-monospace, Consolas, monospace';
     ctx.textBaseline = 'middle';
-    const ticks = Math.max(2, Math.min(8, Math.floor(plotWidth / 115)));
+    const ticks = Math.max(2, Math.min(8, Math.floor(plotWidth / 128)));
     const tickResolution = Number(this.end - this.start) / ticks / store.samplerate;
+    const axisLabels: Array<{ x: number; text: string; width: number }> = [];
     for (let i = 0; i <= ticks; i++) {
       const x = this.gutter + (plotWidth * i) / ticks,
         sample = this.start + ((this.end - this.start) * BigInt(i)) / BigInt(ticks);
@@ -887,14 +897,12 @@ export class WaveformRenderer {
       ctx.moveTo(x + 0.5, this.axisHeight());
       ctx.lineTo(x + 0.5, height);
       ctx.stroke();
-      ctx.fillStyle = this.palette['axis'];
-      ctx.textAlign = i === ticks ? 'right' : 'left';
-      ctx.fillText(
-        timeLabel(Number(sample - triggerSample) / store.samplerate, tickResolution),
-        x + (i === ticks ? -3 : 4),
-        16,
-      );
+      if (!this.axisCanvas) {
+        const text = timeLabel(Number(sample - triggerSample) / store.samplerate, tickResolution);
+        axisLabels.push({ x, text, width: ctx.measureText(text).width });
+      }
     }
+    if (!this.axisCanvas && axisLabels.length) this.drawTickLabels(ctx, axisLabels);
     ctx.textAlign = 'left';
     const now = performance.now(),
       floating = this.rowDrag?.moved ? rowKey(this.rowDrag.entry) : null;
@@ -1056,15 +1064,18 @@ export class WaveformRenderer {
           : null;
       const settings = this.analogSettings[channel]!;
       const text = `[ ${value == null ? '—' : voltageLabel(value)} ] ${voltageLabel(analogAxis(range, settings).perDivision)}/div`,
-        width = Math.min(this.width - this.gutter - 16, ctx.measureText(text).width + 14),
-        right = this.width - 22,
+        padX = 8,
+        boxRight = this.width - 24,
+        maxBoxWidth = Math.max(40, boxRight - this.gutter - 4),
+        textWidth = Math.min(maxBoxWidth - padX * 2, ctx.measureText(text).width),
+        boxWidth = textWidth + padX * 2,
         top = row.top + 3;
       ctx.fillStyle = this.palette['bg'];
       ctx.globalAlpha = 0.94;
-      ctx.fillRect(right - width, top, width + 4, 20);
+      ctx.fillRect(boxRight - boxWidth, top, boxWidth, 20);
       ctx.globalAlpha = 1;
       ctx.fillStyle = settings.color;
-      ctx.fillText(text, right, top + 10, width - 10);
+      ctx.fillText(text, boxRight - padX, top + 10, textWidth);
     }
     ctx.restore();
   }
@@ -1618,6 +1629,33 @@ export class WaveformRenderer {
     }
     ctx.restore();
   }
+  private drawTickLabels(
+    ctx: CanvasRenderingContext2D,
+    labels: ReadonlyArray<{ x: number; text: string; width: number }>,
+  ): void {
+    const lastIndex = labels.length - 1;
+    const last = labels[lastIndex]!;
+    const lastLeft = last.x - 4 - last.width;
+    let previousRight = -Infinity;
+    ctx.fillStyle = this.palette['axis'];
+    for (let i = 0; i <= lastIndex; i++) {
+      const item = labels[i]!;
+      if (i === lastIndex) {
+        if (lastLeft >= previousRight + 10) {
+          ctx.textAlign = 'right';
+          ctx.fillText(item.text, item.x - 4, 16);
+        }
+      } else {
+        const left = item.x + 4;
+        const right = left + item.width;
+        if (left >= previousRight + 10 && right + 12 <= lastLeft) {
+          ctx.textAlign = 'left';
+          ctx.fillText(item.text, left, 16);
+          previousRight = right;
+        }
+      }
+    }
+  }
   private drawAxis(capture: Capture, dpr: number): void {
     const target = this.axisCanvas;
     if (!target) return;
@@ -1634,10 +1672,11 @@ export class WaveformRenderer {
     ctx.fillStyle = this.palette['bg'];
     ctx.fillRect(0, 0, this.width, height);
     const plotWidth = Math.max(1, this.width - this.gutter - 16),
-      ticks = Math.max(2, Math.min(8, Math.floor(plotWidth / 115)));
+      ticks = Math.max(2, Math.min(8, Math.floor(plotWidth / 128)));
     const tickResolution = Number(this.end - this.start) / ticks / capture.store.samplerate;
     ctx.font = '11px ui-monospace, Consolas, monospace';
     ctx.textBaseline = 'middle';
+    const labels: Array<{ x: number; text: string; width: number }> = [];
     for (let i = 0; i <= ticks; i++) {
       const x = this.gutter + (plotWidth * i) / ticks,
         sample = this.start + ((this.end - this.start) * BigInt(i)) / BigInt(ticks);
@@ -1647,14 +1686,10 @@ export class WaveformRenderer {
       ctx.moveTo(x + 0.5, 0);
       ctx.lineTo(x + 0.5, height);
       ctx.stroke();
-      ctx.fillStyle = this.palette['axis'];
-      ctx.textAlign = i === ticks ? 'right' : 'left';
-      ctx.fillText(
-        timeLabel(Number(sample - capture.triggerSample) / capture.store.samplerate, tickResolution),
-        x + (i === ticks ? -3 : 4),
-        16,
-      );
+      const text = timeLabel(Number(sample - capture.triggerSample) / capture.store.samplerate, tickResolution);
+      labels.push({ x, text, width: ctx.measureText(text).width });
     }
+    this.drawTickLabels(ctx, labels);
     this.drawCursor(ctx, height, true);
   }
   private drawOverview(capture: Capture, dpr: number): void {

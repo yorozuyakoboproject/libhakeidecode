@@ -58,6 +58,7 @@ class PWMRuntime implements DecodeRuntime {
   }
   reset(): void {
     this.engine.reset();
+    if (this.retained && !this.store.length) this.store.clear();
   }
   retain(startSample: bigint): void {
     this.retained = true;

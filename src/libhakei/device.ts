@@ -152,6 +152,7 @@ export type AcquisitionChunk =
   | TimelineChunk;
 export interface SampleSourceContext {
   readonly signal?: AbortSignal;
+  readonly mode?: CaptureMode;
   readonly chunkSamples?: number;
 
   readonly acquireBuffer?: () => Promise<ArrayBuffer>;

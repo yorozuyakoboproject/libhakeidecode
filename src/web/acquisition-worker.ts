@@ -370,6 +370,7 @@ scope.onmessage = ({ data }) => {
       let borrowed: ArrayBuffer | null = null;
       const context: ManagedSampleSourceContext = {
         signal: controller.signal,
+        mode: data.mode,
         chunkSamples: data.chunkSamples,
         reportDiagnostics: (snapshot) => {
           Object.assign((driverDiagnostics ??= {}), snapshot);

@@ -44,9 +44,6 @@ export class DeviceControls {
     this.devicesList = [...devices];
     const select = this.control<HTMLSelectElement>('device-select');
     const mode = this.control<HTMLSelectElement>('capture-mode');
-    try {
-      if (localStorage.getItem('hakei.captureMode') === 'continuous') mode.value = 'continuous';
-    } catch {}
     this.populateDeviceSelect();
     const remembered = this.rememberedDevice();
     const defaultDevice = this.devicesList.find((device) => device.descriptor.id === DEFAULT_DEVICE_ID);
@@ -73,9 +70,7 @@ export class DeviceControls {
     });
     form.addEventListener('change', (event) => {
       if (event.target === mode) {
-        try {
-          localStorage.setItem('hakei.captureMode', mode.value);
-        } catch {}
+        this.rememberCaptureMode();
         return;
       }
       const targetId = (event.target as HTMLElement).id;
@@ -315,6 +310,7 @@ export class DeviceControls {
       Array.from({ length: defaults.logicChannels }, (_, i) => i);
     this.analogSelection = Array.from({ length: defaults.analogChannels }, (_, i) => i);
     this.restoreChannelSelection();
+    this.restoreCaptureMode();
     const configuration = {
       ...defaults,
       sampleRate: Number(this.savedSampling('sampleRate') ?? defaults.sampleRate),
@@ -789,6 +785,21 @@ export class DeviceControls {
       step = BigInt(capability.step);
     count = count < minimum ? minimum : count > maximum ? maximum : count;
     return minimum + ((count - minimum) / step) * step;
+  }
+  private captureModeKey(): string {
+    return `hakei.${this.device.descriptor.id}.captureMode`;
+  }
+  private restoreCaptureMode(): void {
+    const mode = this.control<HTMLSelectElement>('capture-mode');
+    mode.value = 'single';
+    try {
+      if (localStorage.getItem(this.captureModeKey()) === 'continuous') mode.value = 'continuous';
+    } catch {}
+  }
+  private rememberCaptureMode(): void {
+    try {
+      localStorage.setItem(this.captureModeKey(), this.captureMode);
+    } catch {}
   }
   private samplingKey(key: 'sampleRate' | 'analogSampleRate' | 'sampleCount'): string {
     return `hakei.${this.device.descriptor.id}.${key}`;

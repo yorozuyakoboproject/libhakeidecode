@@ -183,6 +183,8 @@ export const en = {
   'wave.aria':
     'Digital waveforms and protocol annotations; wheel to zoom, drag to pan, drag left labels to mix and reorder channels and protocols; click the cursor button before each range measurement',
   'wave.overviewAria': 'Capture overview; drag to pan the viewport',
+  'wave.emptyTitle': 'No waveform captured yet',
+  'wave.emptyHint': 'Start a capture or drop a .sr / .hakei.json / binary capture file here',
   'wave.hint': 'Wheel to zoom · Drag anywhere to pan · Cursor button + drag measures a range',
   'wave.samples': 'samples',
   'wave.draw': 'Draw p95 {ms} ms',
@@ -405,6 +407,8 @@ export const zh: Record<keyof typeof en, string> = {
   'wave.clearCursors': '清除光标',
   'wave.aria': '数字波形和协议标注；滚轮缩放，拖动平移，拖动左侧标签可交叉排列通道和协议；每次测量区间前点击光标按钮',
   'wave.overviewAria': '采样概览；拖动平移视口',
+  'wave.emptyTitle': '尚未采集波形数据',
+  'wave.emptyHint': '点击开始采集，或将 .sr / .hakei.json 等采样文件拖放到此处打开',
   'wave.hint': '滚轮缩放 · 任意位置拖动平移 · 点击光标后拖动测量区间',
   'wave.samples': '采样点',
   'wave.draw': '绘制 p95 {ms} ms',

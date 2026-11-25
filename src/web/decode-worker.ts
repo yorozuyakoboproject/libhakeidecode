@@ -564,12 +564,21 @@ async function consumeWorkerReader(s: Session, edgeInput: string | undefined, ed
       s.runtime.retain?.(s.retainedStart);
     }
     if (response.kind === 'wait') {
+      if (s.rolling && response.startSample > s.processed) {
+        if (s.decodedSamples > 0n) resetAtGap(s);
+        s.processed = cursor = response.startSample;
+      }
       if (s.finishRequested && response.availableEnd <= cursor) break;
       maybePostProgress(s);
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
       continue;
     }
-    if (s.rolling && s.decodedSamples === 0n) s.processed = response.startSample;
+    if (s.rolling && response.startSample > s.processed) {
+      if (s.decodedSamples > 0n) resetAtGap(s);
+      s.processed = response.startSample;
+    } else if (s.rolling && s.decodedSamples === 0n) {
+      s.processed = response.startSample;
+    }
     if (response.kind === 'edges') {
       if (response.startSample !== s.processed || response.endSample > s.length)
         throw new Error('Decode stream is not contiguous');

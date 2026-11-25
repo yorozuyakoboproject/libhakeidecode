@@ -347,9 +347,7 @@ export class WorkerStoreServer {
     this.decodePorts.delete(id);
   }
   private connectDecodeReader(id: number, port: MessagePort, live = false): void {
-    let snapshot: StoreCaptureSource | undefined,
-      failure: unknown,
-      established = false;
+    let snapshot: StoreCaptureSource | undefined, failure: unknown;
     try {
       if (!live) snapshot = this.source()?.snapshot?.();
     } catch (error) {
@@ -359,7 +357,7 @@ export class WorkerStoreServer {
     port.onmessage = ({ data }: MessageEvent<DecodeReadRequest>) => {
       try {
         if (failure) throw failure;
-        established = this.answerDecodeRequest(port, data, snapshot, live, live && !established) || established;
+        this.answerDecodeRequest(port, data, snapshot, live);
       } catch (error) {
         port.postMessage({
           type: 'decode-read-error',
@@ -376,9 +374,8 @@ export class WorkerStoreServer {
     request: DecodeReadRequest,
     snapshot?: StoreCaptureSource,
     live = false,
-    opening = false,
-  ): boolean {
-    if (request.type !== 'decode-read' || !Number.isSafeInteger(request.id)) return false;
+  ): void {
+    if (request.type !== 'decode-read' || !Number.isSafeInteger(request.id)) return;
     const capture = snapshot ?? this.source();
     if (!capture) throw new Error('Capture data is not ready');
     const store = capture.store,
@@ -386,9 +383,8 @@ export class WorkerStoreServer {
       sourceEnd = offset + store.length,
       requestedStart = maxSample(0n, request.startSample),
       requestedSpan = maxSample(0n, request.endSample - requestedStart),
-      absoluteStart = opening ? maxSample(offset, requestedStart) : requestedStart,
+      absoluteStart = live ? maxSample(offset, requestedStart) : requestedStart,
       absoluteEnd = minSample(sourceEnd, absoluteStart + requestedSpan);
-    if (absoluteStart < offset) throw new Error('Decoder fell behind the retained capture window');
     if (
       Object.values(request.channels).some(
         (channel) => !Number.isInteger(channel) || channel < 0 || channel >= store.channelCount,
@@ -406,7 +402,7 @@ export class WorkerStoreServer {
         availableEnd: sourceEnd,
         availableStart: offset,
       } satisfies DecodeReadResponse);
-      return false;
+      return;
     }
     if (availableEnd - start > BigInt(MAX_CHUNK)) throw new RangeError('Decode read range is too large');
     const edgeIndex = request.edgeInput === undefined ? undefined : request.channels[request.edgeInput];
@@ -435,7 +431,7 @@ export class WorkerStoreServer {
           channels,
           sampleRate: store.samplerate,
         } satisfies DecodeReadResponse);
-        return availableEnd > start;
+        return;
       }
     }
     const fastEdges =
@@ -470,7 +466,7 @@ export class WorkerStoreServer {
             },
           ],
         } satisfies DecodeReadResponse);
-        return availableEnd > start;
+        return;
       }
     }
     const channels: Record<string, Uint8Array> = {},
@@ -494,7 +490,6 @@ export class WorkerStoreServer {
       } satisfies DecodeReadResponse,
       transfer,
     );
-    return availableEnd > start;
   }
 }
 

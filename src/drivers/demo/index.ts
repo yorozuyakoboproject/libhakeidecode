@@ -144,6 +144,22 @@ function copyPattern(target: Uint8Array, pattern: Uint8Array, start: bigint): vo
   }
 }
 
+function waitForPace(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function encoderPatterns(signal: DemoEncoderSignal, sampleRate: number): Promise<Map<number, Uint8Array>> {
   const module = await loadSignalEncoder(signal.decoder);
   const source = [...module.cases({ minimumPayloadBits: 0 })].find(
@@ -252,11 +268,15 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
     startSample: bigint,
     endSample: bigint,
     signals: Map<number, DemoAnalogSignal>,
+    pace = false,
   ): AsyncGenerator<AnalogStreamChunk> {
     const { analogSampleRate, analogChannels, chunkSamples } = this.options;
-    for (let start = startSample; start < endSample; start += BigInt(chunkSamples)) {
+    const stepSamples = pace ? Math.max(1, Math.min(chunkSamples, Math.round(analogSampleRate * 0.02))) : chunkSamples;
+    let paceOrigin = performance.now();
+    let pacedSamples = 0;
+    for (let start = startSample; start < endSample; start += BigInt(stepSamples)) {
       this.context.signal?.throwIfAborted();
-      const count = Number(minSample(BigInt(chunkSamples), endSample - start));
+      const count = Number(minSample(BigInt(stepSamples), endSample - start));
       for (const physical of analogChannels) {
         const buffer = await this.context.acquireBuffer();
         const data = new Float32Array(buffer, 0, count);
@@ -273,6 +293,17 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
           data,
         };
       }
+      if (pace) {
+        pacedSamples += count;
+        const targetMs = (pacedSamples * 1000) / analogSampleRate;
+        const elapsed = performance.now() - paceOrigin;
+        if (elapsed - targetMs > 200) {
+          paceOrigin = performance.now();
+          pacedSamples = 0;
+        } else if (targetMs - elapsed >= 1) {
+          await waitForPace(targetMs - elapsed, this.context.signal);
+        }
+      }
     }
   }
   async *[Symbol.asyncIterator](): AsyncGenerator<DemoAcquisitionChunk> {
@@ -280,7 +311,9 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
     const patterns = await this.digitalPatterns();
     const analogSignals = this.analogSignals();
     const analogLength = analogSampleCount(length, analogSampleRate, sampleRate);
-    const values = new Uint8Array(chunkSamples);
+    const continuous = this.context.mode === 'continuous';
+    const stepSamples = continuous ? Math.max(1, Math.min(chunkSamples, Math.round(sampleRate * 0.02))) : chunkSamples;
+    const values = new Uint8Array(stepSamples);
     if (logicChannels.length) {
       const sampleBytes = logicSampleBytes(logicChannels.length),
         encoding =
@@ -291,9 +324,11 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
               : sampleBytes === 3
                 ? ('raw24' as const)
                 : ('raw32' as const);
-      for (let start = 0n; start < length; start += BigInt(chunkSamples)) {
+      let paceOrigin = performance.now();
+      let pacedSamples = 0;
+      for (let start = 0n; start < length; start += BigInt(stepSamples)) {
         this.context.signal?.throwIfAborted();
-        const count = Number(minSample(BigInt(chunkSamples), length - start));
+        const count = Number(minSample(BigInt(stepSamples), length - start));
         const buffer = await this.context.acquireBuffer();
         const data = new Uint8Array(buffer, 0, count * sampleBytes);
         data.fill(0);
@@ -319,10 +354,22 @@ export class DemoDriver implements AsyncIterable<DemoAcquisitionChunk> {
           const end = start + BigInt(count),
             analogStart = analogSampleCount(start, analogSampleRate, sampleRate),
             analogEnd = analogSampleCount(end, analogSampleRate, sampleRate);
-          yield* this.analogChunks(analogStart, analogEnd, analogSignals);
+          yield* this.analogChunks(analogStart, analogEnd, analogSignals, false);
+        }
+        if (continuous) {
+          pacedSamples += count;
+          const targetMs = (pacedSamples * 1000) / sampleRate;
+          const elapsed = performance.now() - paceOrigin;
+          if (elapsed - targetMs > 200) {
+            paceOrigin = performance.now();
+            pacedSamples = 0;
+          } else if (targetMs - elapsed >= 1) {
+            await waitForPace(targetMs - elapsed, this.context.signal);
+          }
         }
       }
-    } else if (analogChannels.length && analogLength > 0n) yield* this.analogChunks(0n, analogLength, analogSignals);
+    } else if (analogChannels.length && analogLength > 0n)
+      yield* this.analogChunks(0n, analogLength, analogSignals, continuous);
     if (!logicChannels.length) yield { format: 'timeline', length };
   }
 }

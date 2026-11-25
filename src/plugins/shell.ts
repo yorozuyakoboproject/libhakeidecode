@@ -61,8 +61,8 @@ export const shellPlugin: BuiltinPluginDefinition = {
           <svg viewBox="0 0 28 24" aria-hidden="true"><path d="M1 17h5V5h7v12h7V5h7" /></svg>
           <span>HAKEI<span class="brand-sub">LOGIC ANALYZER</span></span>
         </a>
-        <div id="shell-header-slots" class="shell-header-slots"></div>
         <nav id="shell-nav" class="top-nav" aria-label="Primary"></nav>
+        <div id="shell-header-slots" class="shell-header-slots"></div>
         <span class="local-badge"><i></i><span data-i18n="nav.local">本地浏览器处理</span></span>
         <div class="preferences">
           <label class="preference-control">
@@ -120,6 +120,7 @@ export const shellPlugin: BuiltinPluginDefinition = {
           page.navButton.classList.toggle('nav-active', isActive);
           page.navButton.setAttribute('aria-current', isActive ? 'page' : 'false');
         }
+        headerSlots.hidden = !target || !target.headerSlot.childElementCount;
         if (target && target !== previous) target.spec.onActivate?.();
       };
 

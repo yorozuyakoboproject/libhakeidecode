@@ -298,6 +298,39 @@ export class AnalyzerApp {
       }, 180);
     });
     element('open-file').addEventListener('click', () => element<HTMLInputElement>('file-input').click());
+    element('empty-open-file').addEventListener('click', () => element<HTMLInputElement>('file-input').click());
+    element('empty-run-capture').addEventListener('click', () => {
+      void this.startCapture();
+    });
+    const wavePanel = element('wave-panel');
+    let waveDropDepth = 0;
+    const hasDroppedFiles = (event: DragEvent): boolean =>
+      Array.from(event.dataTransfer?.types ?? []).includes('Files');
+    wavePanel.addEventListener('dragenter', (event) => {
+      if (!hasDroppedFiles(event)) return;
+      event.preventDefault();
+      waveDropDepth++;
+      wavePanel.classList.add('dragover');
+    });
+    wavePanel.addEventListener('dragover', (event) => {
+      if (!hasDroppedFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      wavePanel.classList.add('dragover');
+    });
+    wavePanel.addEventListener('dragleave', (event) => {
+      if (!hasDroppedFiles(event)) return;
+      waveDropDepth = Math.max(0, waveDropDepth - 1);
+      if (!waveDropDepth) wavePanel.classList.remove('dragover');
+    });
+    wavePanel.addEventListener('drop', (event) => {
+      if (!hasDroppedFiles(event)) return;
+      event.preventDefault();
+      waveDropDepth = 0;
+      wavePanel.classList.remove('dragover');
+      const file = event.dataTransfer?.files?.[0];
+      if (file) void this.openFile(file);
+    });
     element<HTMLInputElement>('file-input').addEventListener('change', (event) => {
       const input = event.target as HTMLInputElement,
         file = input.files?.[0];
@@ -594,20 +627,17 @@ export class AnalyzerApp {
       });
     } else {
       const existing = this.loadSavedRowOrder(driverId);
+      if (!existing || !existing.some((entry) => entry.kind !== 'protocol')) return;
       const protocolIds = this.protocols.map((item) => item.id);
-      if (existing) {
-        const present = new Set(protocolIds);
-        const queue = [...protocolIds];
-        entries = existing.flatMap((entry): SavedRowEntry[] => {
-          if (entry.kind !== 'protocol') return [entry];
-          if (!present.has(entry.id)) return [];
-          const next = queue.shift();
-          return next ? [{ kind: 'protocol', id: next }] : [];
-        });
-        for (const id of queue) entries.push({ kind: 'protocol', id });
-      } else {
-        entries = protocolIds.map((id) => ({ kind: 'protocol', id }));
-      }
+      const present = new Set(protocolIds);
+      const queue = [...protocolIds];
+      entries = existing.flatMap((entry): SavedRowEntry[] => {
+        if (entry.kind !== 'protocol') return [entry];
+        if (!present.has(entry.id)) return [];
+        const next = queue.shift();
+        return next ? [{ kind: 'protocol', id: next }] : [];
+      });
+      for (const id of queue) entries.push({ kind: 'protocol', id });
     }
     this.cachedRowOrders.set(driverId, entries);
     try {
@@ -617,7 +647,7 @@ export class AnalyzerApp {
   private restoreRowOrder(capture: Capture): void {
     const driverId = capture.deviceChannels?.driverId ?? 'file';
     const saved = this.loadSavedRowOrder(driverId);
-    if (!saved) return;
+    if (!saved || !saved.some((entry) => entry.kind !== 'protocol')) return;
     const logicCount = capture.logicChannelCount ?? capture.store.channelCount;
     const analogCount = capture.analogChannels?.length ?? 0;
     const protocolIds = new Set(this.protocols.map((protocol) => protocol.id));
@@ -1394,6 +1424,7 @@ export class AnalyzerApp {
       this.restoreRowOrder(capture);
     }
     this.updateCaptureLabels();
+    this.syncEmptyState();
     this.selectProtocol(this.selectedId, false);
     if (capture.workspace) {
       this.renderer.cursorA = capture.workspace.cursorA ?? capture.workspace.cursor;
@@ -1607,9 +1638,19 @@ export class AnalyzerApp {
     this.refreshProtocolMappings();
     this.renderer.clearCapture();
     for (const protocol of this.protocols) this.clearProtocol(protocol);
+    element('capture-name').dataset.i18n = 'capture.empty';
     element('capture-name').textContent = t('capture.empty');
     element('capture-streams').replaceChildren();
     element('duration-label').textContent = '—';
+    element('view-range').textContent = '—';
+    element('cursor-measurement').textContent = t('wave.hint');
+    const memoryStatus = element('memory-status');
+    memoryStatus.textContent = '—';
+    memoryStatus.title = '';
+    const renderStatus = element('render-status');
+    renderStatus.textContent = '—';
+    renderStatus.title = '';
+    this.syncEmptyState();
     this.renderChannelControls();
     this.updateDecodeSummary();
     this.updateViewport();
@@ -2155,10 +2196,19 @@ export class AnalyzerApp {
     this.statusMessage = { key, params };
     this.renderStatus();
   }
+  private syncEmptyState(): void {
+    const hasCapture = !!this.capture;
+    element('wave-empty').hidden = hasCapture;
+    element('time-axis').hidden = !hasCapture;
+    element('capture-heading').classList.toggle('is-empty', !hasCapture && !this.captureAbort);
+    element('capture-metrics').hidden = !hasCapture;
+  }
   private renderStatus(): void {
     const message = t(this.statusMessage.key, this.statusMessage.params);
     element('decode-state').textContent = message;
-    element('status-text').textContent = message;
+    const statusText = element('status-text');
+    statusText.textContent = message;
+    statusText.title = message;
     const run = element<HTMLButtonElement>('run-capture');
     const runKey = this.captureAbort
       ? this.captureStop?.signal.aborted
@@ -2171,6 +2221,11 @@ export class AnalyzerApp {
     run.disabled = this.captureAbort
       ? !!this.captureStop?.signal.aborted
       : this.state === 'loading' || !this.deviceControls.ready;
+    const emptyRun = element<HTMLButtonElement>('empty-run-capture');
+    emptyRun.dataset.i18n = runKey;
+    emptyRun.textContent = run.textContent;
+    emptyRun.disabled = run.disabled;
+    this.syncEmptyState();
     this.deviceControls.setBusy(!!this.captureAbort);
     this.signalControls.setBusy(!!this.captureAbort);
     for (const check of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
@@ -2271,10 +2326,12 @@ export class AnalyzerApp {
       metric.append(count, label);
       container.append(metric);
     }
-    element('memory-status').textContent = t('status.memory', {
+    const memoryStatus = element('memory-status');
+    memoryStatus.textContent = t('status.memory', {
       memory: (captureMemory(capture).totalBytes / 1048576).toFixed(2),
       ms: capture.loadedMs.toFixed(1),
     });
+    memoryStatus.title = memoryStatus.textContent;
     for (const input of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
       const tag = input.closest('.channel-chip')?.querySelector('strong')?.textContent ?? '';
       input.setAttribute(
@@ -2311,7 +2368,8 @@ export class AnalyzerApp {
       shared?.publishedSamples && shared.publishedSamples > storedSamples ? shared.publishedSamples : storedSamples;
     const target = this.capture?.acquisition?.targetSamples ?? samples;
     const progress = target > 0n ? Number((samples * 10000n) / target) / 100 : 0;
-    element('capture-memory-usage').textContent = t(
+    const usage = element('capture-memory-usage');
+    usage.textContent = t(
       this.captureAbort && this.capture?.acquisition?.mode === 'continuous'
         ? 'capture.continuousMemory'
         : 'capture.memoryUsage',
@@ -2323,6 +2381,7 @@ export class AnalyzerApp {
         progress: progress.toFixed(1),
       },
     );
+    usage.title = usage.textContent;
   }
   private showCaptureOutcome(): void {
     const outcome = this.capture?.acquisition;
@@ -2381,7 +2440,10 @@ export class AnalyzerApp {
     element('waveform').style.cursor = this.renderer.cursorMode ? 'crosshair' : '';
     element('cursor-toggle').classList.toggle('active', this.renderer.cursorMode);
     element('cursor-toggle').setAttribute('aria-pressed', String(this.renderer.cursorMode));
-    if (!this.capture) return;
+    if (!this.capture) {
+      element('cursor-measurement').textContent = t('wave.hint');
+      return;
+    }
     const rate = this.capture.store.samplerate,
       trigger = this.capture.triggerSample,
       resolution = this.renderer.timeResolution();
@@ -2401,6 +2463,8 @@ export class AnalyzerApp {
       element('cursor-measurement').textContent =
         `${t('wave.cursor')}: ${timeLabel(Number(sample - trigger) / rate, resolution)} · ${numberLabel(sample)} ${t('wave.samples')}`;
     }
-    element('render-status').textContent = t('wave.draw', { ms: this.renderer.metrics().p95Ms.toFixed(1) });
+    const renderStatus = element('render-status');
+    renderStatus.textContent = t('wave.draw', { ms: this.renderer.metrics().p95Ms.toFixed(1) });
+    renderStatus.title = renderStatus.textContent;
   }
 }

@@ -6,12 +6,12 @@ import type { ComponentRegistryService } from './registry.js';
 import type { ShellService } from './shell.js';
 
 const HEADER_HTML = `
-  <div class="capture-heading">
+  <div id="capture-heading" class="capture-heading is-empty">
     <div>
       <div class="eyebrow" data-i18n="capture.workspace">采样工作台</div>
       <h1 id="capture-name" data-i18n="capture.empty">尚未采集</h1>
     </div>
-    <div class="capture-metrics">
+    <div id="capture-metrics" class="capture-metrics" hidden>
       <span><b id="duration-label">—</b><span data-i18n="capture.duration">实际时长</span></span>
       <div id="capture-streams"></div>
       <span id="usb-transfer" hidden data-i18n-attrs="title:capture.usbRateHint"
@@ -36,7 +36,7 @@ const WORKBENCH_HTML = `
           <label class="field"
             ><span data-i18n="capture.mode">采样模式</span
             ><select id="capture-mode" data-i18n-attrs="aria-label:capture.mode">
-              <option value="single" data-i18n="capture.mode.single">单次采样</option>
+              <option value="single" selected data-i18n="capture.mode.single">单次采样</option>
               <option value="continuous" data-i18n="capture.mode.continuous">连续采样</option>
             </select></label
           >
@@ -220,7 +220,7 @@ const WORKBENCH_HTML = `
     </aside>
     <main>
       <div id="message" class="message" role="status" hidden></div>
-      <section class="wave-panel">
+      <section id="wave-panel" class="wave-panel">
         <div class="panel-toolbar">
           <span class="panel-title"><i class="green-dot"></i><span data-i18n="wave.title">数字波形</span></span>
           <div class="toolbar-controls">
@@ -243,6 +243,23 @@ const WORKBENCH_HTML = `
         <div class="wave-scroll">
           <canvas id="time-axis" aria-hidden="true"></canvas
           ><canvas id="waveform" data-i18n-attrs="aria-label:wave.aria"></canvas>
+          <div id="wave-empty" class="wave-empty">
+            <div class="wave-empty-card">
+              <svg class="wave-empty-icon" viewBox="0 0 48 26" aria-hidden="true">
+                <path d="M2 20h7V6h10v14h10V6h10v14h7" />
+              </svg>
+              <strong data-i18n="wave.emptyTitle">尚未采集波形数据</strong>
+              <p class="hint" data-i18n="wave.emptyHint">点击开始采集，或将 .sr / .hakei.json 等采样文件拖放到此处打开</p>
+              <div class="wave-empty-actions">
+                <button id="empty-run-capture" type="button" class="button primary" data-i18n="device.run">
+                  ▶ 开始采集
+                </button>
+                <button id="empty-open-file" type="button" class="button" data-i18n="capture.open">
+                  ↥ 打开文件
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="overview-wrap">
           <canvas id="overview" data-i18n-attrs="aria-label:wave.overviewAria"></canvas>
