@@ -2,45 +2,50 @@ import type { Annotation, AnnotationTextContext, DecoderDefinition } from '../de
 import { descriptor } from './descriptor.js';
 import { messages } from './i18n.js';
 
+function hexByte(value: number): string {
+  return value.toString(16).toUpperCase().padStart(2, '0');
+}
+
 function annotationTexts(annotation: Annotation, context: AnnotationTextContext): readonly string[] {
-  if (annotation.classIndex === 0)
-    return [
-      context.text('decoder.i2c.annotation.address', 'Address') +
-        ': 0x' +
-        (annotation.value ?? 0).toString(16).toUpperCase() +
-        ' (' +
-        ackText(annotation.texts[1], context) +
-        ')',
-    ];
+  if (annotation.classIndex === 0) return [context.text('decoder.i2c.annotation.start', 'START'), 'S'];
   if (annotation.classIndex === 1)
-    return [
-      context.text('decoder.i2c.annotation.data', 'Data') +
-        ': 0x' +
-        (annotation.value ?? 0).toString(16).padStart(2, '0').toUpperCase() +
-        ' (' +
-        ackText(annotation.texts[1], context) +
-        ')',
-    ];
-  if (annotation.classIndex === 2)
+    return [context.text('decoder.i2c.annotation.repeated-start', 'Repeated START'), 'Sr'];
+  if (annotation.classIndex === 2) return [context.text('decoder.i2c.annotation.stop', 'STOP'), 'P'];
+  if (annotation.classIndex === 3) return [context.text('decoder.i2c.annotation.ack', 'ACK'), 'A'];
+  if (annotation.classIndex === 4) return [context.text('decoder.i2c.annotation.nack', 'NACK'), 'N'];
+  if (annotation.classIndex === 6 || annotation.classIndex === 7) {
+    const rw = annotation.texts[0];
+    if (rw === 'Read' || rw === 'Write') {
+      const label = context.text(
+        rw === 'Read' ? 'decoder.i2c.annotation.rw-read' : 'decoder.i2c.annotation.rw-write',
+        rw,
+      );
+      return [label, ...annotation.texts.slice(1)];
+    }
+    const hex = hexByte(annotation.value ?? 0);
+    const prefix = context.text(
+      annotation.classIndex === 6 ? 'decoder.i2c.annotation.address-read' : 'decoder.i2c.annotation.address-write',
+      annotation.classIndex === 6 ? 'Address read' : 'Address write',
+    );
+    const short = annotation.classIndex === 6 ? 'AR' : 'AW';
+    return [`${prefix}: ${hex}`, `${short}: ${hex}`, hex];
+  }
+  if (annotation.classIndex === 8 || annotation.classIndex === 9) {
+    const hex = hexByte(annotation.value ?? 0);
+    const prefix = context.text(
+      annotation.classIndex === 8 ? 'decoder.i2c.annotation.data-read' : 'decoder.i2c.annotation.data-write',
+      annotation.classIndex === 8 ? 'Data read' : 'Data write',
+    );
+    const short = annotation.classIndex === 8 ? 'DR' : 'DW';
+    return [`${prefix}: ${hex}`, `${short}: ${hex}`, hex];
+  }
+  if (annotation.classIndex === 10)
     return [
       context.text('decoder.i2c.annotation.warning', 'Warning') +
         ': ' +
         warningText(annotation.texts[0] ?? '', context),
     ];
-  if (annotation.classIndex === 3)
-    return [
-      annotation.texts[0] === 'Repeated START'
-        ? context.text('decoder.i2c.annotation.repeated-start', 'Repeated START')
-        : context.text('decoder.i2c.annotation.start', 'START'),
-    ];
-  if (annotation.classIndex === 4) return [context.text('decoder.i2c.annotation.stop', 'STOP')];
   return annotation.texts;
-}
-
-function ackText(text: string | undefined, context: AnnotationTextContext): string {
-  return text === 'NACK'
-    ? context.text('decoder.i2c.annotation.nack', 'NACK')
-    : context.text('decoder.i2c.annotation.ack', 'ACK');
 }
 
 function warningText(text: string, context: AnnotationTextContext): string {
@@ -64,10 +69,14 @@ export const component = {
     ],
     inputRequirement: 'all',
     rows: [
-      { label: 'Addresses', labelKey: 'decoder.i2c.annotation.address', classes: [0] },
-      { label: 'Data', labelKey: 'decoder.i2c.annotation.data', classes: [1] },
-      { label: 'Warnings', labelKey: 'decoder.i2c.annotation.warning', classes: [2] },
-      { label: 'Conditions', labelKey: 'decoder.i2c.conditions', classes: [3, 4] },
+      { id: 'bits', label: 'Bits', labelKey: 'decoder.i2c.row.bits', classes: [5] },
+      {
+        id: 'addr-data',
+        label: 'Address/data',
+        labelKey: 'decoder.i2c.row.addr-data',
+        classes: [0, 1, 2, 3, 4, 6, 7, 8, 9],
+      },
+      { id: 'warnings', label: 'Warnings', labelKey: 'decoder.i2c.row.warnings', classes: [10] },
     ],
     primaryOptions: ['address_format'],
     binaryOutputs: [
@@ -78,7 +87,7 @@ export const component = {
     ],
     annotationTexts,
     isErrorClass(classIndex): boolean {
-      return classIndex === 2;
+      return classIndex === 10;
     },
   },
 } satisfies DecoderDefinition;

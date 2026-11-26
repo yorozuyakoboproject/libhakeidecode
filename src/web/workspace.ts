@@ -1,5 +1,6 @@
 import { sampleIndex, type SampleInput } from '../libhakei/sample-index.js';
 import { decoderDefinition } from '../decoders/index.js';
+import { normalizeHiddenRows } from './protocol-tracks.js';
 import type { OptionValue } from '../libhakeidecode/index.js';
 import type { ProtocolBinding } from '../decoders/definition.js';
 import { rowKey, type TimelineRow } from './timeline.js';
@@ -12,6 +13,8 @@ export interface ProtocolSettings {
   color: string;
   options: Record<string, OptionValue>;
   decimalPlaces?: number;
+  hiddenRows?: string[];
+  collapsed?: boolean;
   mapping: Record<string, ProtocolMappingValue>;
 }
 export interface WorkspaceSettings {
@@ -70,7 +73,10 @@ export function parseWorkspace(
         (!Number.isInteger(p.decimalPlaces) || p.decimalPlaces < 0 || p.decimalPlaces > 9)) ||
       !p.mapping ||
       typeof p.mapping !== 'object' ||
-      Array.isArray(p.mapping)
+      Array.isArray(p.mapping) ||
+      (p.hiddenRows !== undefined &&
+        (!Array.isArray(p.hiddenRows) || p.hiddenRows.some((item) => typeof item !== 'string'))) ||
+      (p.collapsed !== undefined && typeof p.collapsed !== 'boolean')
     )
       throw new Error('Invalid protocol settings');
     try {
@@ -86,7 +92,8 @@ export function parseWorkspace(
     ids.add(protocol.id);
   }
   const protocols = parsed.map((p) => {
-    const inputs = new Map(decoderDefinition(p.decoder).ui.inputs.map((input) => [input.key, input]));
+    const definition = decoderDefinition(p.decoder);
+    const inputs = new Map(definition.ui.inputs.map((input) => [input.key, input]));
     const mapping = Object.fromEntries(
       Object.entries(p.mapping).map(([key, value]) => {
         const input = inputs.get(key);
@@ -108,7 +115,14 @@ export function parseWorkspace(
         return [key, Number(value)];
       }),
     );
-    return { ...p, options: { ...p.options }, mapping };
+    const hiddenRows = normalizeHiddenRows(definition, p.hiddenRows);
+    return {
+      ...p,
+      options: { ...p.options },
+      ...(hiddenRows.length ? { hiddenRows } : {}),
+      ...(p.collapsed ? { collapsed: true } : {}),
+      mapping,
+    };
   });
   validateProtocolGraph(protocols, false);
   if (obj.selectedId !== null && !ids.has(obj.selectedId)) throw new Error('Invalid selected protocol');

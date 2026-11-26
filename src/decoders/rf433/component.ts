@@ -34,8 +34,8 @@ export const component = {
     inputs: [{ key: 'data', label: 'DATA', labelKey: 'decoder.rf433.data' }],
     inputRequirement: 'all',
     rows: [
-      { label: 'Frames', labelKey: 'decoder.rf433.annotation.frame', classes: [0] },
-      { label: 'Warnings', labelKey: 'decoder.rf433.annotation.warning', classes: [1] },
+      { id: 'frames', label: 'Frames', labelKey: 'decoder.rf433.annotation.frame', classes: [0] },
+      { id: 'warnings', label: 'Warnings', labelKey: 'decoder.rf433.annotation.warning', classes: [1] },
     ],
     primaryOptions: ['encoding'],
     edgeInput: 'data',

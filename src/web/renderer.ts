@@ -14,6 +14,13 @@ import {
 import type { DecoderId } from './protocol.js';
 import type { ProtocolSettings } from './workspace.js';
 import { decoderDefinition, decoderDefinitions } from '../decoders/index.js';
+import {
+  contrastTextForHex,
+  isDarkColor,
+  normalizeHiddenRows,
+  protocolTrackColor,
+  visibleProtocolRows,
+} from './protocol-tracks.js';
 import type { Capture } from './capture.js';
 import type { AnalogColumnView, AnalogStore } from './data/analogStore.js';
 import type { ColumnView } from './data/types.js';
@@ -87,6 +94,7 @@ export interface TimelineLayoutRow {
 }
 export interface ProtocolTrace extends ProtocolSettings {
   annotations: AnnotationIndex;
+  readonly frameCount?: number;
 }
 export class WaveformRenderer {
   decoder: DecoderId = decoderDefinitions[0]?.descriptor.id ?? '';
@@ -119,8 +127,12 @@ export class WaveformRenderer {
   onAnalogSettings: (channel: number) => void = () => {};
   onDigitalSettings: (channel: number) => void = () => {};
   onProtocolSettings: (id: string) => void = () => {};
+  onToggleProtocolCollapse: (id: string) => void = () => {};
+  onToggleProtocolRow: (id: string, rowId: string, visible: boolean) => void = () => {};
   private readonly settingsLayer = document.createElement('div');
   private readonly settingsButtons = new Map<string, HTMLButtonElement>();
+  private readonly collapseButtons = new Map<string, HTMLButtonElement>();
+  private readonly trackHideButtons = new Map<string, HTMLButtonElement>();
   private pending = false;
   private viewRefresh: Promise<void> | null = null;
   private viewRefreshDirty = false;
@@ -168,7 +180,7 @@ export class WaveformRenderer {
     this.palette = readPalette();
     this.schedule();
   };
-  readonly gutter = 114;
+  readonly gutter = 136;
   constructor(
     readonly canvas: HTMLCanvasElement,
     readonly overview: HTMLCanvasElement,
@@ -481,11 +493,14 @@ export class WaveformRenderer {
   private waveformTop(): number {
     return this.axisHeight() + 8;
   }
+  private visibleRowsFor(protocol: ProtocolTrace) {
+    return visibleProtocolRows(decoderDefinition(protocol.decoder), protocol);
+  }
   private protocolRows(protocol: ProtocolTrace): number {
-    return decoderDefinition(protocol.decoder).ui.rows.length;
+    return this.visibleRowsFor(protocol).length;
   }
   private protocolHeight(protocol: ProtocolTrace): number {
-    return this.protocolRows(protocol) * 32 + 8;
+    return 28 + this.protocolRows(protocol) * 28 + 4;
   }
   getRowOrder(): TimelineRow[] {
     const count = this.capture ? (this.capture.logicChannelCount ?? this.capture.store.channelCount) : 0;
@@ -634,16 +649,19 @@ export class WaveformRenderer {
   }
   private updateSettingsButtons(layout: readonly TimelineLayoutRow[], now: number): void {
     const visible = new Set<string>();
+    const visibleCollapse = new Set<string>();
+    const visibleTracks = new Set<string>();
     for (const row of layout) {
       const entry = row.entry;
       const key = rowKey(entry);
+      const motionTop = this.motionTop(row, now);
       visible.add(key);
       let button = this.settingsButtons.get(key);
       if (!button) {
         button = document.createElement('button');
         button.type = 'button';
         button.textContent = '⚙';
-        button.style.left = `${this.gutter - 38}px`;
+        button.style.left = `${this.gutter - 36}px`;
         button.addEventListener('click', () => {
           if (entry.kind === 'analog') this.onAnalogSettings(entry.id);
           else if (entry.kind === 'channel') this.onDigitalSettings(entry.id);
@@ -652,24 +670,91 @@ export class WaveformRenderer {
         this.settingsButtons.set(key, button);
         this.settingsLayer.append(button);
       }
+      const protocol = entry.kind === 'protocol' ? this.protocols.find((p) => p.id === entry.id) : undefined;
       const label =
         entry.kind === 'analog'
           ? `${t('analog.settings')} · A${this.capture?.deviceChannels?.analog[entry.id] ?? entry.id}`
           : entry.kind === 'channel'
             ? `${t('channels.digitalSettings')} · D${this.capture?.deviceChannels?.logic[entry.id] ?? entry.id}`
-            : `${t('decoder.settings')} · ${this.protocols.find((protocol) => protocol.id === entry.id)!.name}`;
+            : `${t('decoder.settings')} · ${protocol?.name ?? entry.id}`;
       if (button.title !== label) {
         button.title = label;
         button.setAttribute('aria-label', label);
       }
-      const top = `${this.motionTop(row, now) + 5}px`;
+      const top = `${motionTop + (entry.kind === 'protocol' ? 3 : 5)}px`;
       if (button.style.top !== top) button.style.top = top;
       if (button.hidden !== !!this.rowDrag) button.hidden = !!this.rowDrag;
+
+      if (protocol) {
+        visibleCollapse.add(protocol.id);
+        let collapseBtn = this.collapseButtons.get(protocol.id);
+        if (!collapseBtn) {
+          collapseBtn = document.createElement('button');
+          collapseBtn.type = 'button';
+          collapseBtn.className = 'protocol-collapse-btn';
+          collapseBtn.style.left = `${this.gutter - 59}px`;
+          collapseBtn.addEventListener('click', () => {
+            this.onToggleProtocolCollapse(protocol.id);
+          });
+          this.collapseButtons.set(protocol.id, collapseBtn);
+          this.settingsLayer.append(collapseBtn);
+        }
+        const collapsed = !!protocol.collapsed;
+        const glyph = collapsed ? '▸' : '▾';
+        if (collapseBtn.textContent !== glyph) collapseBtn.textContent = glyph;
+        const collapseLabel = collapsed ? t('decoder.expandTracks') : t('decoder.collapseTracks');
+        if (collapseBtn.title !== collapseLabel) {
+          collapseBtn.title = collapseLabel;
+          collapseBtn.setAttribute('aria-label', collapseLabel);
+        }
+        const collapseTop = `${motionTop + 3}px`;
+        if (collapseBtn.style.top !== collapseTop) collapseBtn.style.top = collapseTop;
+        collapseBtn.hidden = !!this.rowDrag || !decoderDefinition(protocol.decoder).ui.rows.length;
+
+        const tracks = this.visibleRowsFor(protocol);
+        tracks.forEach((track, trackIndex) => {
+          const trackKey = `${protocol.id}:${track.id}`;
+          visibleTracks.add(trackKey);
+          let hideBtn = this.trackHideButtons.get(trackKey);
+          if (!hideBtn) {
+            hideBtn = document.createElement('button');
+            hideBtn.type = 'button';
+            hideBtn.className = 'protocol-track-hide';
+            hideBtn.textContent = '−';
+            hideBtn.style.left = `${this.gutter - 34}px`;
+            hideBtn.addEventListener('click', () => {
+              this.onToggleProtocolRow(protocol.id, track.id, false);
+            });
+            this.trackHideButtons.set(trackKey, hideBtn);
+            this.settingsLayer.append(hideBtn);
+          }
+          const rowName =
+            track.row.labelKey && hasMessage(track.row.labelKey) ? t(track.row.labelKey) : track.row.label;
+          const hideLabel = t('decoder.trackHide', { name: rowName });
+          if (hideBtn.title !== hideLabel) {
+            hideBtn.title = hideLabel;
+            hideBtn.setAttribute('aria-label', hideLabel);
+          }
+          const trackTop = `${motionTop + 28 + trackIndex * 28 + 4}px`;
+          if (hideBtn.style.top !== trackTop) hideBtn.style.top = trackTop;
+          if (hideBtn.hidden !== !!this.rowDrag) hideBtn.hidden = !!this.rowDrag;
+        });
+      }
     }
     for (const [key, button] of this.settingsButtons) {
       if (visible.has(key)) continue;
       button.remove();
       this.settingsButtons.delete(key);
+    }
+    for (const [key, button] of this.collapseButtons) {
+      if (visibleCollapse.has(key)) continue;
+      button.remove();
+      this.collapseButtons.delete(key);
+    }
+    for (const [key, button] of this.trackHideButtons) {
+      if (visibleTracks.has(key)) continue;
+      button.remove();
+      this.trackHideButtons.delete(key);
     }
   }
   private nearestCursor(x: number, label: boolean): 'a' | 'b' | null {
@@ -702,13 +787,14 @@ export class WaveformRenderer {
     if (!row || row.entry.kind !== 'protocol') return;
     const protocol = this.protocols.find((p) => p.id === row.entry.id)!;
     const top = row.top;
-    if (x < this.gutter) {
+    if (x < this.gutter || y - top < 28) {
       this.onAnnotationClick(protocol.id, this.start, this.end);
       return;
     }
-    const index = Math.floor((y - top) / 32);
-    if (index >= this.protocolRows(protocol)) return;
-    const classes = decoderDefinition(protocol.decoder).ui.rows[index]?.classes ?? [];
+    const visible = this.visibleRowsFor(protocol);
+    const index = Math.floor((y - top - 28) / 28);
+    if (index < 0 || index >= visible.length) return;
+    const classes = visible[index]?.row.classes ?? [];
     const sample = this.sampleAtX(x),
       annotation = protocol.annotations.query(sample, sample).find((a) => classes.includes(a.classIndex));
     if (annotation) this.onAnnotationClick(protocol.id, annotation.ss, annotation.es);
@@ -1494,88 +1580,231 @@ export class WaveformRenderer {
     toX: (sample: bigint) => number,
     plotWidth: number,
   ): void {
+    if (!this.capture || !this.capture.store.length) return;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textBaseline = 'middle';
     const definition = decoderDefinition(protocol.decoder),
-      rowDefinitions = definition.ui.rows;
-    const rows = this.protocolRows(protocol),
-      rowHeight = 32,
-      height = this.protocolHeight(protocol);
+      allRows = definition.ui.rows,
+      hiddenCount = normalizeHiddenRows(definition, protocol.hiddenRows).length,
+      visibleRows = visibleProtocolRows(definition, protocol),
+      rows = visibleRows.length,
+      mainHeight = 28,
+      rowHeight = 28,
+      totalHeight = this.protocolHeight(protocol),
+      darkTheme = isDarkColor(this.palette['bg'] ?? '#ffffff');
+
     ctx.save();
     ctx.textAlign = 'left';
-    for (let row = 0; row < rows; row++) {
-      const y = annY + row * rowHeight;
-      ctx.fillStyle = this.palette['label-bg'];
-      ctx.fillRect(0, y, this.gutter - 12, rowHeight - 2);
-      this.drawGrip(ctx, y, rowHeight - 2);
-      ctx.fillStyle = protocol.color;
-      ctx.fillRect(14, y + 2, 3, rowHeight - 4);
+
+    // PulseView-style Main Header Row (主行)
+    ctx.fillStyle = this.palette['label-bg'];
+    ctx.fillRect(0, annY, this.gutter - 12, mainHeight - 2);
+    this.drawGrip(ctx, annY, mainHeight - 2);
+
+    const badgeLeft = 15,
+      badgeRight = this.gutter - 62,
+      badgeTop = annY + 4,
+      badgeBottom = annY + mainHeight - 6,
+      badgeMid = (badgeTop + badgeBottom) / 2,
+      tip = 6;
+    if (badgeRight > badgeLeft + tip + 6) {
       ctx.save();
       ctx.beginPath();
-      ctx.rect(23, y, this.gutter - (row === 0 ? 63 : 37), rowHeight - 2);
+      ctx.moveTo(badgeLeft, badgeTop);
+      ctx.lineTo(badgeRight - tip, badgeTop);
+      ctx.lineTo(badgeRight, badgeMid);
+      ctx.lineTo(badgeRight - tip, badgeBottom);
+      ctx.lineTo(badgeLeft, badgeBottom);
+      ctx.closePath();
+      ctx.fillStyle = protocol.color;
+      ctx.fill();
+      ctx.strokeStyle = darkTheme ? 'rgba(255,255,255,0.22)' : 'rgba(15,23,42,0.22)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.clip();
+      ctx.fillStyle = contrastTextForHex(protocol.color);
+      ctx.font = '600 10px system-ui, sans-serif';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(protocol.name, badgeLeft + 6, badgeMid + 0.5);
+      ctx.restore();
+    }
+
+    // Header band across timeline plot area
+    ctx.save();
+    ctx.fillStyle = protocol.color;
+    ctx.globalAlpha = protocol.id === this.selectedProtocolId ? 0.1 : 0.05;
+    ctx.fillRect(this.gutter, annY, plotWidth, mainHeight - 2);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = this.palette['grid'];
+    ctx.beginPath();
+    ctx.moveTo(this.gutter, annY + mainHeight - 2);
+    ctx.lineTo(this.width - 16, annY + mainHeight - 2);
+    ctx.stroke();
+
+    const activeTrackCount = Math.max(0, allRows.length - hiddenCount);
+    const kindKey = `decoder.${protocol.decoder}.name`;
+    const kindName = hasMessage(kindKey) ? t(kindKey) : (definition.descriptor.name ?? protocol.decoder);
+    const summaryText = protocol.collapsed
+      ? `${kindName} · ${t('decoder.collapsedSummary', {
+          visible: activeTrackCount,
+          total: allRows.length,
+          frames: protocol.frameCount ?? 0,
+        })}`
+      : `${kindName} · ${t('decoder.tracksCount', {
+          visible: activeTrackCount,
+          total: allRows.length,
+        })}`;
+    ctx.fillStyle = this.palette['label'];
+    ctx.globalAlpha = 0.72;
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(summaryText, this.gutter + 8, annY + (mainHeight - 2) / 2);
+    ctx.restore();
+
+    // Sub-tracks (轨道)
+    for (let rowIdx = 0; rowIdx < rows; rowIdx++) {
+      const visibleRow = visibleRows[rowIdx]!,
+        y = annY + mainHeight + rowIdx * rowHeight;
+      const trackStyle = protocolTrackColor(protocol.color, visibleRow.rowIndex, 0, darkTheme);
+      ctx.fillStyle = this.palette['label-bg'];
+      ctx.fillRect(0, y, this.gutter - 12, rowHeight - 2);
+
+      // Tree connector from Main Row + colored track bar
+      ctx.save();
+      ctx.strokeStyle = protocol.color;
+      ctx.globalAlpha = 0.45;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(10, y - 2);
+      ctx.lineTo(10, y + (rowHeight - 2) / 2);
+      ctx.lineTo(17, y + (rowHeight - 2) / 2);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = trackStyle.fill;
+      ctx.strokeStyle = trackStyle.border;
+      ctx.fillRect(18, y + 4, 4, rowHeight - 10);
+      ctx.strokeRect(18, y + 4, 4, rowHeight - 10);
+
+      // Disclosure chevron matching PulseView row header (`▶ MISO bits`)
+      ctx.fillStyle = this.palette['label'];
+      ctx.beginPath();
+      ctx.moveTo(26, y + rowHeight / 2 - 4);
+      ctx.lineTo(31, y + rowHeight / 2 - 1);
+      ctx.lineTo(26, y + rowHeight / 2 + 2);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(34, y, Math.max(8, this.gutter - 70), rowHeight - 2);
       ctx.clip();
       ctx.fillStyle = this.palette['label'];
-      ctx.font = '600 10px system-ui, sans-serif';
-      ctx.fillText(protocol.name, 26, y + 10);
-      ctx.font = '9px system-ui, sans-serif';
-      const rowDefinition = rowDefinitions[row]!,
-        rowLabel =
-          rowDefinition.labelKey && hasMessage(rowDefinition.labelKey)
-            ? t(rowDefinition.labelKey)
-            : rowDefinition.label;
-      ctx.fillText(rowLabel, 26, y + 23);
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.textBaseline = 'middle';
+      const rowLabel =
+        visibleRow.row.labelKey && hasMessage(visibleRow.row.labelKey)
+          ? t(visibleRow.row.labelKey)
+          : visibleRow.row.label;
+      ctx.fillText(rowLabel, 34, y + (rowHeight - 2) / 2);
       ctx.restore();
+
       ctx.strokeStyle = this.palette['grid'];
       ctx.beginPath();
       ctx.moveTo(this.gutter, y + rowHeight - 2);
       ctx.lineTo(this.width - 16, y + rowHeight - 2);
       ctx.stroke();
     }
+
+    if (!rows) {
+      ctx.restore();
+      return;
+    }
+
     ctx.beginPath();
-    ctx.rect(this.gutter, annY, plotWidth, height - 4);
+    ctx.rect(this.gutter, annY + mainHeight, plotWidth, totalHeight - mainHeight - 2);
     ctx.clip();
     const queryStarted = performance.now();
     const visible = protocol.annotations.query(this.start, this.end, Math.max(1, Math.floor(plotWidth * rows * 3)));
     this.recordQuery?.(performance.now() - queryStarted);
-    const rowOfClass = new Map<number, number>();
-    rowDefinitions.forEach((row, index) => {
-      for (const classIndex of row.classes) rowOfClass.set(classIndex, index);
+    const rowOfClass = new Map<number, { row: number; rowIndex: number; classOffset: number }>();
+    visibleRows.forEach((visibleRow, index) => {
+      visibleRow.row.classes.forEach((classIndex, classOffset) => {
+        if (!rowOfClass.has(classIndex)) {
+          rowOfClass.set(classIndex, { row: index, rowIndex: visibleRow.rowIndex, classOffset });
+        }
+      });
     });
     const dense = visible.length > plotWidth * rows * 3;
     const occupied = Array.from({ length: rows }, () => new Set<number>());
     const merged = new Map<
       string,
-      { annotation: (typeof visible)[number]; row: number; x: number; right: number; error: boolean }
+      {
+        annotation: (typeof visible)[number];
+        row: number;
+        rowIndex: number;
+        classOffset: number;
+        x: number;
+        right: number;
+        error: boolean;
+      }
     >();
     const blocks: Array<{
       annotation: (typeof visible)[number];
       row: number;
+      rowIndex: number;
+      classOffset: number;
       x: number;
       right: number;
       merged: boolean;
     }> = [];
     for (const annotation of visible) {
-      const row = rowOfClass.get(annotation.classIndex);
-      if (row === undefined) continue;
-      const x = Math.max(this.gutter, toX(annotation.ss)),
-        right = Math.min(this.width - 16, toX(annotation.es));
-      const w = Math.max(2, right - x),
+      const mapping = rowOfClass.get(annotation.classIndex);
+      if (mapping === undefined) continue;
+      const rawX = toX(annotation.ss),
+        rawRight = toX(annotation.es),
+        instant = annotation.ss === annotation.es;
+      const x = Math.max(this.gutter, Math.min(this.width - 16, rawX)),
+        right = Math.max(x, Math.min(this.width - 16, rawRight));
+      const w = instant ? 18 : Math.max(2, right - x),
         cell = Math.floor(x);
-      if (!dense && w < 8 && occupied[row].has(cell)) continue;
-      if (!dense) occupied[row].add(cell);
+      if (!dense && w < 8 && occupied[mapping.row]!.has(cell)) continue;
+      if (!dense) occupied[mapping.row]!.add(cell);
       if (dense && w < 12) {
         const error = definition.ui.isErrorClass?.(annotation.classIndex) ?? false;
-        const key = `${row}:${cell}:${error ? 1 : 0}`;
+        const key = `${mapping.row}:${cell}:${error ? 1 : 0}`;
         const previous = merged.get(key);
         if (previous) {
           previous.x = Math.min(previous.x, x);
           previous.right = Math.max(previous.right, right);
-        } else merged.set(key, { annotation, row, x, right, error });
-      } else blocks.push({ annotation, row, x, right, merged: false });
+        } else {
+          merged.set(key, {
+            annotation,
+            row: mapping.row,
+            rowIndex: mapping.rowIndex,
+            classOffset: mapping.classOffset,
+            x,
+            right,
+            error,
+          });
+        }
+      } else {
+        blocks.push({
+          annotation,
+          row: mapping.row,
+          rowIndex: mapping.rowIndex,
+          classOffset: mapping.classOffset,
+          x: instant ? rawX : x,
+          right: instant ? rawX : right,
+          merged: false,
+        });
+      }
     }
     const compact: Array<{
       annotation: (typeof visible)[number];
       row: number;
+      rowIndex: number;
+      classOffset: number;
       x: number;
       right: number;
       error: boolean;
@@ -1587,18 +1816,60 @@ export class WaveformRenderer {
       else compact.push({ ...block });
     }
     for (const block of compact) blocks.push({ ...block, merged: true });
+    const sampleRate = this.capture!.store.samplerate,
+      decimals = protocol.decimalPlaces ?? 3;
     for (const block of blocks) {
-      const { annotation, row, x, right } = block;
-      const blockHeight = Math.max(6, rowHeight - 4),
-        w = Math.max(2, right - x),
-        y = annY + row * rowHeight + 2;
-      ctx.fillStyle = definition.ui.isErrorClass?.(annotation.classIndex)
-        ? this.palette['annotation-error']
-        : protocol.color;
-      ctx.globalAlpha = protocol.id === this.selectedProtocolId ? 0.9 : 0.7;
-      const leftTab = Math.min(7, Math.max(2, w / 3)),
+      const { annotation, row, rowIndex, classOffset, x, right } = block;
+      const blockHeight = Math.max(6, rowHeight - 6),
+        y = annY + mainHeight + row * rowHeight + 2,
+        middle = y + blockHeight / 2,
+        error = definition.ui.isErrorClass?.(annotation.classIndex) ?? false;
+      const style = error
+        ? {
+            fill: this.palette['annotation-error'] ?? '#ef4444',
+            border: darkTheme ? '#fca5a5' : '#b91c1c',
+            text: '#ffffff',
+          }
+        : protocolTrackColor(protocol.color, rowIndex, classOffset, darkTheme);
+      const texts = !block.merged
+        ? (definition.ui.annotationTexts?.(annotation, {
+            sampleRate,
+            decimals,
+            text: (key, fallback) => (hasMessage(key) ? t(key) : fallback),
+          }) ?? annotation.texts)
+        : [];
+
+      ctx.globalAlpha = protocol.id === this.selectedProtocolId ? 0.95 : 0.85;
+      if (!block.merged && annotation.ss === annotation.es) {
+        // PulseView draw_instant: centered rounded pill (START, Repeated START, STOP)
+        ctx.font = '11px system-ui, sans-serif';
+        const label = texts.at(-1) ?? texts[0] ?? '';
+        const textWidth = label ? ctx.measureText(label).width : 0;
+        const pillW = Math.min(Math.max(blockHeight, textWidth + 10), Math.max(blockHeight, plotWidth));
+        const pillX = Math.max(this.gutter, Math.min(this.width - 16 - pillW, x - pillW / 2));
+        const radius = blockHeight / 2;
+        ctx.fillStyle = style.fill;
+        ctx.strokeStyle = style.border;
+        ctx.beginPath();
+        ctx.roundRect(pillX, y, pillW, blockHeight, radius);
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        if (label) {
+          ctx.fillStyle = style.text;
+          ctx.textAlign = 'center';
+          ctx.fillText(label, pillX + pillW / 2, middle);
+          ctx.textAlign = 'left';
+        }
+        continue;
+      }
+
+      const w = Math.max(2, right - x);
+      const leftTab = Math.min(5, Math.max(1.5, w / 4)),
         rightTab = leftTab;
-      const middle = y + blockHeight / 2;
+      ctx.fillStyle = style.fill;
+      ctx.strokeStyle = style.border;
       ctx.beginPath();
       ctx.moveTo(x, middle);
       ctx.lineTo(x + leftTab, y);
@@ -1608,17 +1879,15 @@ export class WaveformRenderer {
       ctx.lineTo(x + leftTab, y + blockHeight);
       ctx.closePath();
       ctx.fill();
+      if (w >= 4) {
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
       ctx.globalAlpha = 1;
       if (!block.merged && w > 8) {
-        ctx.fillStyle = this.palette['annotation-text'];
+        ctx.fillStyle = style.text;
         ctx.font = '11px system-ui, sans-serif';
-        const texts =
-          definition.ui.annotationTexts?.(annotation, {
-            sampleRate: this.capture!.store.samplerate,
-            decimals: protocol.decimalPlaces ?? 3,
-            text: (key, fallback) => (hasMessage(key) ? t(key) : fallback),
-          }) ?? annotation.texts;
-        const available = Math.max(8, w - 4),
+        const available = Math.max(8, w - 6),
           text = texts.find((value) => ctx.measureText(value).width <= available);
         if (text) {
           ctx.textAlign = 'center';

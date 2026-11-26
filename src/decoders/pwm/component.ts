@@ -19,9 +19,9 @@ export const component = {
     inputs: [{ key: 'data', label: 'Data', labelKey: 'decoder.pwm.channel' }],
     inputRequirement: 'all',
     rows: [
-      { label: 'Duty cycle', labelKey: 'decoder.pwm.duty', classes: [0] },
-      { label: 'Period', labelKey: 'decoder.pwm.period', classes: [1] },
-      { label: 'Frequency', labelKey: 'decoder.pwm.frequency', classes: [2] },
+      { id: 'duty-cycle-vals', label: 'Duty cycle', labelKey: 'decoder.pwm.duty', classes: [0] },
+      { id: 'periods', label: 'Period', labelKey: 'decoder.pwm.period', classes: [1] },
+      { id: 'frequency-vals', label: 'Frequency', labelKey: 'decoder.pwm.frequency', classes: [2] },
     ],
     primaryOptions: ['polarity'],
     decimals: true,

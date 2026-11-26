@@ -2,8 +2,6 @@ import type { Annotation, AnnotationTextContext, DecoderDefinition } from '../de
 import { descriptor } from './descriptor.js';
 import { messages } from './i18n.js';
 
-const rowData = [0, 2, 4, 6, 8, 10, 14, 16] as const;
-const rowTxData = [1, 3, 5, 7, 9, 11, 15, 17] as const;
 function annotationTexts(annotation: Annotation, context: AnnotationTextContext): readonly string[] {
   if (annotation.classIndex === 6 || annotation.classIndex === 7)
     return [context.text('decoder.uart.annotation.parityError', 'Parity error'), 'PE'];
@@ -24,10 +22,16 @@ export const component = {
     ],
     inputRequirement: 'any',
     rows: [
-      { label: 'RX bits', classes: [12] },
-      { label: 'RX data', classes: rowData },
-      { label: 'TX bits', classes: [13] },
-      { label: 'TX data', classes: rowTxData },
+      { id: 'rx-data-bits', label: 'RX bits', labelKey: 'decoder.uart.row.rx-data-bits', classes: [12] },
+      { id: 'rx-data-vals', label: 'RX data', labelKey: 'decoder.uart.row.rx-data-vals', classes: [0, 2, 4, 6, 8] },
+      { id: 'rx-warnings', label: 'RX warnings', labelKey: 'decoder.uart.row.rx-warnings', classes: [10] },
+      { id: 'rx-breaks', label: 'RX breaks', labelKey: 'decoder.uart.row.rx-breaks', classes: [14] },
+      { id: 'rx-packets', label: 'RX packets', labelKey: 'decoder.uart.row.rx-packets', classes: [16] },
+      { id: 'tx-data-bits', label: 'TX bits', labelKey: 'decoder.uart.row.tx-data-bits', classes: [13] },
+      { id: 'tx-data-vals', label: 'TX data', labelKey: 'decoder.uart.row.tx-data-vals', classes: [1, 3, 5, 7, 9] },
+      { id: 'tx-warnings', label: 'TX warnings', labelKey: 'decoder.uart.row.tx-warnings', classes: [11] },
+      { id: 'tx-breaks', label: 'TX breaks', labelKey: 'decoder.uart.row.tx-breaks', classes: [15] },
+      { id: 'tx-packets', label: 'TX packets', labelKey: 'decoder.uart.row.tx-packets', classes: [17] },
     ],
     primaryOptions: ['baudrate', 'data_bits', 'parity', 'stop_bits', 'format'],
     binaryOutputs: [

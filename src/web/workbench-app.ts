@@ -26,6 +26,7 @@ import { PagedAnnotationIndex } from './paged-annotation-index.js';
 import type { DecoderId } from './protocol.js';
 import type { ProtocolMappingValue, ProtocolSettings, WorkspaceSettings } from './workspace.js';
 import { validateProtocolGraph } from './workspace.js';
+import { isDarkColor, normalizeHiddenRows, protocolRowId, protocolTrackColor } from './protocol-tracks.js';
 import type { DecodeGraphNode, ProtocolBinding } from '../decoders/definition.js';
 import type { DecodeProgressMessage } from './protocol.js';
 import type { OptionDeclaration, OptionValue } from '../libhakeidecode/types.js';
@@ -236,6 +237,8 @@ export class AnalyzerApp {
     this.renderer.onAnalogSettings = (channel) => this.configureAnalog(channel);
     this.renderer.onDigitalSettings = (channel) => this.configureDigital(channel);
     this.renderer.onProtocolSettings = (id) => this.selectProtocol(id);
+    this.renderer.onToggleProtocolCollapse = (id) => this.toggleProtocolCollapsed(id);
+    this.renderer.onToggleProtocolRow = (id, rowId, visible) => this.setProtocolRowVisible(id, rowId, visible);
     this.renderer.onAnnotationClick = (id, ss, es) => {
       this.selectProtocol(id);
       if (ss !== this.renderer.start || es !== this.renderer.end) this.renderer.focus(ss, es);
@@ -266,6 +269,7 @@ export class AnalyzerApp {
       if (!protocol) return;
       protocol.color = element<HTMLInputElement>('protocol-color').value;
       this.renderProtocolList();
+      this.renderDecoderTracks();
       this.saveProtocols();
       this.renderer.schedule();
     });
@@ -543,6 +547,13 @@ export class AnalyzerApp {
               options[key] = value;
           }
         }
+        const definition = decoderDefinition(candidate.decoder);
+        const hiddenRows = Array.isArray(candidate.hiddenRows)
+          ? normalizeHiddenRows(
+              definition,
+              candidate.hiddenRows.filter((value): value is string => typeof value === 'string'),
+            )
+          : [];
         restored.push(
           this.createProtocol({
             id: candidate.id,
@@ -559,6 +570,8 @@ export class AnalyzerApp {
               candidate.decimalPlaces <= 9
                 ? candidate.decimalPlaces
                 : 3,
+            ...(hiddenRows.length ? { hiddenRows } : {}),
+            ...(typeof candidate.collapsed === 'boolean' && candidate.collapsed ? { collapsed: true } : {}),
             options,
             mapping,
           }),
@@ -586,15 +599,22 @@ export class AnalyzerApp {
         version: 1,
         driverId: this.mappingDevice || this.deviceControls.device.descriptor.id,
         selectedId: this.selectedId,
-        protocols: this.protocols.map((protocol) => ({
-          id: protocol.id,
-          decoder: protocol.decoder,
-          name: protocol.name,
-          color: protocol.color,
-          decimalPlaces: protocol.decimalPlaces,
-          options: { ...protocol.options },
-          mapping: this.mappingFor(protocol),
-        })),
+        protocols: this.protocols.map((protocol) => {
+          const hiddenRows = hasDecoderDefinition(protocol.decoder)
+            ? normalizeHiddenRows(decoderDefinition(protocol.decoder), protocol.hiddenRows)
+            : [];
+          return {
+            id: protocol.id,
+            decoder: protocol.decoder,
+            name: protocol.name,
+            color: protocol.color,
+            decimalPlaces: protocol.decimalPlaces,
+            ...(hiddenRows.length ? { hiddenRows } : {}),
+            ...(protocol.collapsed ? { collapsed: true } : {}),
+            options: { ...protocol.options },
+            mapping: this.mappingFor(protocol),
+          };
+        }),
       };
       localStorage.setItem(PROTOCOLS_STORAGE_KEY, JSON.stringify(payload));
     } catch {}
@@ -747,9 +767,14 @@ export class AnalyzerApp {
   }
   private createProtocol(settings: ProtocolSettings): ProtocolInstance {
     const client = new DecodeClient();
+    const hiddenRows = hasDecoderDefinition(settings.decoder)
+      ? normalizeHiddenRows(decoderDefinition(settings.decoder), settings.hiddenRows)
+      : [];
     return {
       ...settings,
       decimalPlaces: settings.decimalPlaces ?? 3,
+      ...(hiddenRows.length ? { hiddenRows } : { hiddenRows: undefined }),
+      collapsed: !!settings.collapsed,
       options: { ...defaults(settings.decoder), ...settings.options },
       mapping: { ...settings.mapping },
       client,
@@ -1046,6 +1071,8 @@ export class AnalyzerApp {
     protocol.savedOptions[protocol.decoder] = { ...protocol.options };
     protocol.decoder = decoder;
     protocol.options = protocol.savedOptions[decoder] ?? defaults(decoder);
+    protocol.hiddenRows = undefined;
+    protocol.collapsed = false;
     const previous = protocol.mapping,
       next: Record<string, ProtocolMappingValue> = {},
       inputs = decoderDefinition(decoder).ui.inputs;
@@ -1119,7 +1146,157 @@ export class AnalyzerApp {
       binary.append(option);
     }
     binary.hidden = !definition.ui.binaryOutputs?.length;
+    this.renderDecoderTracks();
     translateDOM();
+  }
+  private renderDecoderTracks(): void {
+    const container = element('decoder-tracks');
+    const protocol = this.selectedProtocol;
+    if (!protocol || !hasDecoderDefinition(protocol.decoder)) {
+      delete container.dataset.protocolKey;
+      container.replaceChildren();
+      container.hidden = true;
+      return;
+    }
+    const definition = decoderDefinition(protocol.decoder),
+      rows = definition.ui.rows;
+    if (!rows.length) {
+      delete container.dataset.protocolKey;
+      container.replaceChildren();
+      container.hidden = true;
+      return;
+    }
+    const hiddenSet = new Set(normalizeHiddenRows(definition, protocol.hiddenRows));
+    const darkTheme = isDarkColor(
+      getComputedStyle(document.documentElement).getPropertyValue('--wave-bg') || '#111720',
+    );
+    const visibleCount = rows.length - hiddenSet.size;
+    container.hidden = false;
+
+    const protocolKey = `${protocol.id}:${protocol.decoder}`;
+    if (container.dataset.protocolKey === protocolKey) {
+      const count = container.querySelector('.decoder-tracks-count');
+      if (count) count.textContent = t('decoder.tracksCount', { visible: visibleCount, total: rows.length });
+      const showAllBtn = container.querySelector<HTMLButtonElement>('[data-action="show-all"]');
+      if (showAllBtn) showAllBtn.disabled = hiddenSet.size === 0;
+      const hideAllBtn = container.querySelector<HTMLButtonElement>('[data-action="hide-all"]');
+      if (hideAllBtn) hideAllBtn.disabled = hiddenSet.size === rows.length;
+      rows.forEach((row, index) => {
+        const rowId = protocolRowId(row, index);
+        const isHidden = hiddenSet.has(rowId);
+        const checkbox = container.querySelector<HTMLInputElement>(`input[data-track-id="${CSS.escape(rowId)}"]`);
+        if (checkbox) {
+          checkbox.checked = !isHidden;
+          const item = checkbox.closest('.decoder-track-item');
+          item?.classList.toggle('is-hidden', isHidden);
+          const swatch = item?.querySelector<HTMLElement>('.decoder-track-swatch');
+          if (swatch) {
+            const style = protocolTrackColor(protocol.color, index, 0, darkTheme);
+            swatch.style.backgroundColor = style.fill;
+            swatch.style.borderColor = style.border;
+          }
+        }
+      });
+      return;
+    }
+
+    container.dataset.protocolKey = protocolKey;
+    const header = document.createElement('div');
+    header.className = 'decoder-tracks-header';
+    const title = document.createElement('strong');
+    title.dataset.i18n = 'decoder.tracks';
+    title.textContent = t('decoder.tracks');
+    const count = document.createElement('span');
+    count.className = 'decoder-tracks-count';
+    count.textContent = t('decoder.tracksCount', { visible: visibleCount, total: rows.length });
+
+    const showAllBtn = document.createElement('button');
+    showAllBtn.type = 'button';
+    showAllBtn.className = 'text-button';
+    showAllBtn.dataset.action = 'show-all';
+    showAllBtn.dataset.i18n = 'decoder.tracksShowAll';
+    showAllBtn.textContent = t('decoder.tracksShowAll');
+    showAllBtn.disabled = hiddenSet.size === 0;
+    showAllBtn.addEventListener('click', () => {
+      const current = this.selectedProtocol;
+      if (!current) return;
+      current.hiddenRows = undefined;
+      current.collapsed = false;
+      this.renderDecoderTracks();
+      this.saveProtocols();
+      this.renderer.schedule();
+    });
+
+    const hideAllBtn = document.createElement('button');
+    hideAllBtn.type = 'button';
+    hideAllBtn.className = 'text-button';
+    hideAllBtn.dataset.action = 'hide-all';
+    hideAllBtn.dataset.i18n = 'decoder.tracksHideAll';
+    hideAllBtn.textContent = t('decoder.tracksHideAll');
+    hideAllBtn.disabled = hiddenSet.size === rows.length;
+    hideAllBtn.addEventListener('click', () => {
+      const current = this.selectedProtocol;
+      if (!current) return;
+      current.hiddenRows = rows.map((row, index) => protocolRowId(row, index));
+      this.renderDecoderTracks();
+      this.saveProtocols();
+      this.renderer.schedule();
+    });
+
+    header.append(title, count, showAllBtn, hideAllBtn);
+
+    const list = document.createElement('div');
+    list.className = 'decoder-tracks-list';
+    rows.forEach((row, index) => {
+      const rowId = protocolRowId(row, index);
+      const isHidden = hiddenSet.has(rowId);
+      const item = document.createElement('label');
+      item.className = 'decoder-track-item' + (isHidden ? ' is-hidden' : '');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = !isHidden;
+      checkbox.dataset.trackId = rowId;
+      checkbox.addEventListener('change', () => {
+        this.setProtocolRowVisible(protocol.id, rowId, checkbox.checked);
+      });
+      const swatch = document.createElement('span');
+      swatch.className = 'decoder-track-swatch';
+      const style = protocolTrackColor(protocol.color, index, 0, darkTheme);
+      swatch.style.backgroundColor = style.fill;
+      swatch.style.borderColor = style.border;
+      const text = document.createElement('span');
+      text.className = 'decoder-track-label';
+      if (row.labelKey && hasMessage(row.labelKey)) text.dataset.i18n = row.labelKey;
+      text.textContent = row.labelKey && hasMessage(row.labelKey) ? t(row.labelKey) : row.label;
+      text.title = text.textContent;
+      item.append(checkbox, swatch, text);
+      list.append(item);
+    });
+    container.replaceChildren(header, list);
+  }
+  private setProtocolRowVisible(id: string, rowId: string, visible: boolean): void {
+    const protocol = this.protocols.find((item) => item.id === id);
+    if (!protocol || !hasDecoderDefinition(protocol.decoder)) return;
+    const definition = decoderDefinition(protocol.decoder);
+    const hidden = new Set(normalizeHiddenRows(definition, protocol.hiddenRows));
+    if (visible) hidden.delete(rowId);
+    else hidden.add(rowId);
+    const next = normalizeHiddenRows(definition, [...hidden]);
+    protocol.hiddenRows = next.length ? next : undefined;
+    if (visible && protocol.collapsed) protocol.collapsed = false;
+    if (protocol.id === this.selectedId) {
+      this.renderDecoderTracks();
+      translateDOM(element('decoder-tracks'));
+    }
+    this.saveProtocols();
+    this.renderer.schedule();
+  }
+  private toggleProtocolCollapsed(id: string): void {
+    const protocol = this.protocols.find((item) => item.id === id);
+    if (!protocol) return;
+    protocol.collapsed = !protocol.collapsed;
+    this.saveProtocols();
+    this.renderer.schedule();
   }
   readOptions(protocol = this.selectedProtocol): Record<string, OptionValue> {
     if (!protocol) return {};
@@ -2105,15 +2282,22 @@ export class AnalyzerApp {
     this.commitForm();
     const rowOrder = this.renderer.getRowOrder();
     return {
-      protocols: this.protocols.map((protocol) => ({
-        id: protocol.id,
-        decoder: protocol.decoder,
-        name: protocol.name,
-        color: protocol.color,
-        decimalPlaces: protocol.decimalPlaces,
-        options: { ...protocol.options },
-        mapping: this.mappingFor(protocol),
-      })),
+      protocols: this.protocols.map((protocol) => {
+        const hiddenRows = hasDecoderDefinition(protocol.decoder)
+          ? normalizeHiddenRows(decoderDefinition(protocol.decoder), protocol.hiddenRows)
+          : [];
+        return {
+          id: protocol.id,
+          decoder: protocol.decoder,
+          name: protocol.name,
+          color: protocol.color,
+          decimalPlaces: protocol.decimalPlaces,
+          ...(hiddenRows.length ? { hiddenRows } : {}),
+          ...(protocol.collapsed ? { collapsed: true } : {}),
+          options: { ...protocol.options },
+          mapping: this.mappingFor(protocol),
+        };
+      }),
       selectedId: this.selectedId,
       cursor: this.renderer.cursorA,
       cursorA: this.renderer.cursorA,

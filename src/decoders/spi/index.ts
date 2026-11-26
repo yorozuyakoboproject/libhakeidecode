@@ -26,7 +26,15 @@ export interface SPIFrame extends DecodeFrame {
 export type SPIProtocolPacket =
   | ['WORD', mosi: number | null, miso: number | null, cs: boolean | null, wordIndex: number]
   | ['WARNING', message: string];
-export const SPI_ANN = Object.freeze({ WORD: 0, WARNING: 1 });
+export const SPI_ANN = Object.freeze({
+  MISO_DATA: 0,
+  MOSI_DATA: 1,
+  MISO_BIT: 2,
+  MOSI_BIT: 3,
+  WARNING: 4,
+  MISO_TRANSFER: 5,
+  MOSI_TRANSFER: 6,
+});
 const CLK = 0,
   MISO = 1,
   MOSI = 2,
@@ -45,6 +53,13 @@ export class SPIDecoder extends Decoder<SPIOptions> {
   private bits = 0;
   private mosi = 0;
   private miso = 0;
+  private mosiRawBits: number[] = [];
+  private misoRawBits: number[] = [];
+  private bitSamples: bigint[] = [];
+  private transferStart: bigint | null = null;
+  private transferEnd: bigint | null = null;
+  private mosiTransferWords: string[] = [];
+  private misoTransferWords: string[] = [];
   private firstSample: bigint | null = null;
   private wordIndex = 0;
 
@@ -62,6 +77,13 @@ export class SPIDecoder extends Decoder<SPIOptions> {
     this.bits = 0;
     this.mosi = 0;
     this.miso = 0;
+    this.mosiRawBits = [];
+    this.misoRawBits = [];
+    this.bitSamples = [];
+    this.transferStart = null;
+    this.transferEnd = null;
+    this.mosiTransferWords = [];
+    this.misoTransferWords = [];
     this.firstSample = null;
     this.wordIndex = 0;
   }
@@ -88,12 +110,32 @@ export class SPIDecoder extends Decoder<SPIOptions> {
     this.put(this.samplenum, this.samplenum, this.outProtocol, ['WARNING', message]);
   }
 
+  private flushTransfers(endSample: bigint | null = null): void {
+    const ss = this.transferStart,
+      es = endSample ?? this.transferEnd;
+    if (ss !== null && es !== null) {
+      if (this.hasMiso && this.misoTransferWords.length) {
+        this.put(ss, es, this.outAnn, [SPI_ANN.MISO_TRANSFER, [this.misoTransferWords.join(' ')]]);
+      }
+      if (this.hasMosi && this.mosiTransferWords.length) {
+        this.put(ss, es, this.outAnn, [SPI_ANN.MOSI_TRANSFER, [this.mosiTransferWords.join(' ')]]);
+      }
+    }
+    this.transferStart = null;
+    this.transferEnd = null;
+    this.mosiTransferWords = [];
+    this.misoTransferWords = [];
+  }
+
   private discardPartial(reason: string): void {
     if (!this.bits) return;
     this.warning(reason + ': ' + this.bits + ' bit(s) discarded');
     this.bits = 0;
     this.mosi = 0;
     this.miso = 0;
+    this.mosiRawBits = [];
+    this.misoRawBits = [];
+    this.bitSamples = [];
     this.firstSample = null;
   }
 
@@ -102,19 +144,41 @@ export class SPIDecoder extends Decoder<SPIOptions> {
     return Uint8Array.from({ length: width }, (_, index) => Math.floor(value / 2 ** (8 * (width - index - 1))) & 0xff);
   }
 
+  private formatWord(value: number): string {
+    const digits = Math.ceil(this.options.wordsize / 4);
+    return value.toString(16).padStart(digits, '0').toUpperCase();
+  }
+
   private emitWord(): void {
     const mosi = this.hasMosi ? this.mosi : null,
       miso = this.hasMiso ? this.miso : null,
       cs = this.hasCs ? this.csActive : null,
       ss = this.firstSample ?? this.samplenum,
-      digits = Math.ceil(this.options.wordsize / 4),
-      texts = [
-        'Word',
-        String(this.wordIndex),
-        ...(mosi === null ? [] : ['MOSI=0x' + mosi.toString(16).padStart(digits, '0').toUpperCase()]),
-        ...(miso === null ? [] : ['MISO=0x' + miso.toString(16).padStart(digits, '0').toUpperCase()]),
-      ];
-    this.put(ss, this.samplenum, this.outAnn, [SPI_ANN.WORD, texts, mosi ?? miso ?? 0]);
+      bitCount = this.bitSamples.length,
+      lastSample = this.bitSamples[bitCount - 1] ?? this.samplenum,
+      bitWidth = bitCount > 1 ? lastSample - this.bitSamples[bitCount - 2]! : 1n,
+      annEs = lastSample + (bitWidth > 0n ? bitWidth : 1n);
+
+    for (let i = 0; i < bitCount; i++) {
+      const bSs = this.bitSamples[i]!,
+        bEs = i + 1 < bitCount ? this.bitSamples[i + 1]! : annEs;
+      if (miso !== null) this.put(bSs, bEs, this.outAnn, [SPI_ANN.MISO_BIT, [String(this.misoRawBits[i]!)]]);
+      if (mosi !== null) this.put(bSs, bEs, this.outAnn, [SPI_ANN.MOSI_BIT, [String(this.mosiRawBits[i]!)]]);
+    }
+
+    if (miso !== null) {
+      const misoHex = this.formatWord(miso);
+      this.put(ss, annEs, this.outAnn, [SPI_ANN.MISO_DATA, [misoHex], miso]);
+      this.misoTransferWords.push(misoHex);
+    }
+    if (mosi !== null) {
+      const mosiHex = this.formatWord(mosi);
+      this.put(ss, annEs, this.outAnn, [SPI_ANN.MOSI_DATA, [mosiHex], mosi]);
+      this.mosiTransferWords.push(mosiHex);
+    }
+    if (this.transferStart === null) this.transferStart = ss;
+    this.transferEnd = annEs;
+
     this.put(ss, this.samplenum, this.outProtocol, ['WORD', mosi, miso, cs, this.wordIndex]);
     if (mosi !== null) this.put(ss, this.samplenum, this.outBinary, [0, this.binary(mosi)]);
     if (miso !== null) this.put(ss, this.samplenum, this.outBinary, [1, this.binary(miso)]);
@@ -122,11 +186,17 @@ export class SPIDecoder extends Decoder<SPIOptions> {
     this.bits = 0;
     this.mosi = 0;
     this.miso = 0;
+    this.mosiRawBits = [];
+    this.misoRawBits = [];
+    this.bitSamples = [];
     this.firstSample = null;
   }
 
   private sample(mosi: number, miso: number): void {
     if (!this.bits) this.firstSample = this.samplenum;
+    this.bitSamples.push(this.samplenum);
+    this.mosiRawBits.push(mosi);
+    this.misoRawBits.push(miso);
     if (this.options.bitorder === 'msb-first') {
       this.mosi = ((this.mosi << 1) | mosi) >>> 0;
       this.miso = ((this.miso << 1) | miso) >>> 0;
@@ -153,7 +223,10 @@ export class SPIDecoder extends Decoder<SPIOptions> {
         cs = this.hasCs ? Number(pins[CS]) : null;
       if (this.hasCs && cs !== previousCs) {
         const active = cs === (this.options.cs_polarity === 'active-low' ? 0 : 1);
-        if (!active && this.csActive) this.discardPartial('Chip select deasserted');
+        if (!active && this.csActive) {
+          this.discardPartial('Chip select deasserted');
+          this.flushTransfers(this.samplenum);
+        }
         this.csActive = active;
       }
       if (clk === sampleLevel && previousClk !== clk && this.csActive)
@@ -165,6 +238,7 @@ export class SPIDecoder extends Decoder<SPIOptions> {
 
   onEof(): void {
     if (this.bits) this.discardPartial('End of capture');
+    this.flushTransfers();
   }
 }
 

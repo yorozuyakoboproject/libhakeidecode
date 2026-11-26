@@ -180,6 +180,7 @@ const WORKBENCH_HTML = `
             ><select id="decoder-type" data-i18n-attrs="aria-label:decoder.protocol"></select
           ></label>
           <p id="protocol-description" class="hint"></p>
+          <div id="decoder-tracks" class="decoder-tracks" hidden></div>
           <form id="decoder-form">
             <div id="decoder-mapping" class="two-fields"></div>
             <div id="decoder-options"></div>

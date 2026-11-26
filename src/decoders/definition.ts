@@ -98,6 +98,7 @@ export interface DecoderInputDefinition {
   readonly kind?: 'channel' | 'protocol';
 }
 export interface DecoderRowDefinition {
+  readonly id?: string;
   readonly label: string;
   readonly labelKey?: string;
   readonly classes: readonly number[];

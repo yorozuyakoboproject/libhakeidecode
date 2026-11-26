@@ -26,8 +26,8 @@ export const component = {
     inputs: [{ key: 'din', label: 'DIN', labelKey: 'decoder.ws2812.din' }],
     inputRequirement: 'all',
     rows: [
-      { label: 'Pixels', labelKey: 'decoder.ws2812.annotation.pixel', classes: [0] },
-      { label: 'Warnings', labelKey: 'decoder.ws2812.annotation.warning', classes: [1] },
+      { id: 'pixels', label: 'Pixels', labelKey: 'decoder.ws2812.annotation.pixel', classes: [0] },
+      { id: 'warnings', label: 'Warnings', labelKey: 'decoder.ws2812.annotation.warning', classes: [1] },
     ],
     primaryOptions: ['wireorder', 'textorder'],
     edgeInput: 'din',

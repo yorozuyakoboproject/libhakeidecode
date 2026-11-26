@@ -24,12 +24,14 @@ export function standardUi(descriptor: DecoderDescriptor): DecoderUiDefinition {
   ];
   const rows = descriptor.annotationRows?.length
     ? descriptor.annotationRows.map((row, index) => ({
+        id: row[0],
         label: row[1],
         labelKey: `decoder.${descriptor.id}.row.${index}`,
         classes: row[2],
       }))
     : [
         {
+          id: 'annotations',
           label: 'Annotations',
           labelKey: `decoder.${descriptor.id}.row.default`,
           classes: (descriptor.annotations ?? []).map((_, index) => index),

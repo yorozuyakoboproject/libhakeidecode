@@ -153,9 +153,12 @@ export class UARTDecoder extends Decoder<UARTOptions> {
       this.bit_width = value / this.options.baudrate;
     }
   }
+  private clampStart(ss: bigint): bigint {
+    return ss < 0n ? 0n : ss;
+  }
   putx(rxtx: UARTDirection, data: AnnotationData): void {
     this.put(
-      this.startsample[rxtx] - BigInt(Math.floor(this.bit_width! / 2)),
+      this.clampStart(this.startsample[rxtx] - BigInt(Math.floor(this.bit_width! / 2))),
       this.samplenum + BigInt(Math.ceil(this.bit_width! / 2)),
       this.out_ann,
       data,
@@ -163,7 +166,7 @@ export class UARTDecoder extends Decoder<UARTOptions> {
   }
   putx_packet(rxtx: UARTDirection, data: AnnotationData): void {
     this.put(
-      this.ss_packet[rxtx]! - BigInt(Math.floor(this.bit_width! / 2)),
+      this.clampStart(this.ss_packet[rxtx]! - BigInt(Math.floor(this.bit_width! / 2))),
       this.samplenum + BigInt(Math.ceil(this.bit_width! / 2)),
       this.out_ann,
       data,
@@ -171,7 +174,7 @@ export class UARTDecoder extends Decoder<UARTOptions> {
   }
   putpx(rxtx: UARTDirection, data: UARTProtocolPacket): void {
     this.put(
-      this.startsample[rxtx] - BigInt(Math.floor(this.bit_width! / 2)),
+      this.clampStart(this.startsample[rxtx] - BigInt(Math.floor(this.bit_width! / 2))),
       this.samplenum + BigInt(Math.ceil(this.bit_width! / 2)),
       this.out_python,
       data,
@@ -179,7 +182,7 @@ export class UARTDecoder extends Decoder<UARTOptions> {
   }
   putg(data: AnnotationData): void {
     this.put(
-      this.samplenum - BigInt(Math.floor(this.bit_width! / 2)),
+      this.clampStart(this.samplenum - BigInt(Math.floor(this.bit_width! / 2))),
       this.samplenum + BigInt(Math.ceil(this.bit_width! / 2)),
       this.out_ann,
       data,
@@ -187,21 +190,21 @@ export class UARTDecoder extends Decoder<UARTOptions> {
   }
   putp(data: UARTProtocolPacket): void {
     this.put(
-      this.samplenum - BigInt(Math.floor(this.bit_width! / 2)),
+      this.clampStart(this.samplenum - BigInt(Math.floor(this.bit_width! / 2))),
       this.samplenum + BigInt(Math.ceil(this.bit_width! / 2)),
       this.out_python,
       data,
     );
   }
   putgse(ss: bigint, es: bigint, data: AnnotationData): void {
-    this.put(ss, es, this.out_ann, data);
+    this.put(this.clampStart(ss), es, this.out_ann, data);
   }
   putpse(ss: bigint, es: bigint, data: UARTProtocolPacket): void {
-    this.put(ss, es, this.out_python, data);
+    this.put(this.clampStart(ss), es, this.out_python, data);
   }
   putbin(rxtx: UARTDirection, data: BinaryData): void {
     this.put(
-      this.startsample[rxtx] - BigInt(Math.floor(this.bit_width! / 2)),
+      this.clampStart(this.startsample[rxtx] - BigInt(Math.floor(this.bit_width! / 2))),
       this.samplenum + BigInt(Math.ceil(this.bit_width! / 2)),
       this.out_binary,
       data,
