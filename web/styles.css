@@ -423,6 +423,7 @@ select {
 .channel-settings-dialog {
   width: min(470px, calc(100vw - 32px));
   max-height: calc(100vh - 40px);
+  overflow: auto;
   padding: 22px;
   border: 1px solid var(--border-control);
   border-radius: 10px;
@@ -466,6 +467,36 @@ select {
 }
 .channel-settings-error:empty {
   display: none;
+}
+.dialog-description {
+  margin: 0 0 2px;
+}
+.channel-settings-dialog label.field {
+  margin: 0;
+  color: var(--text);
+  font-size: inherit;
+}
+.channel-settings-dialog label.decoder-track-item {
+  display: flex;
+  grid-template-columns: none;
+  gap: 7px;
+}
+.channel-settings-dialog .decoder-track-item input[type='checkbox'] {
+  width: 13px;
+  height: 13px;
+}
+.protocol-settings-dialog .decoder-tracks {
+  margin: 4px 0 0;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dialog-actions .button.danger {
+  margin-right: auto;
+  color: var(--text-danger);
 }
 .advanced summary {
   color: var(--text-secondary);

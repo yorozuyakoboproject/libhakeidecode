@@ -5,17 +5,34 @@ import { SampleColumn } from './sample-column.js';
 
 const PAGE_SIZE = 4096;
 
-function valueBytes(value: unknown, seen = new Set<unknown>()): number {
+function valueBytes(value: unknown, seen?: Set<unknown>): number {
+  if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number') return 8;
   if (typeof value === 'string') return value.length * 2;
   if (typeof value === 'bigint') return Math.ceil(value.toString(16).length / 2);
-  if (value === null || typeof value !== 'object' || seen.has(value)) return 8;
-  seen.add(value);
-  if (ArrayBuffer.isView(value)) return valueBytes(value.buffer, seen);
+  if (typeof value !== 'object') return 8;
+  if (Array.isArray(value)) {
+    let bytes = 32;
+    let allSimple = true;
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i];
+      if (item !== null && typeof item === 'object') {
+        allSimple = false;
+        break;
+      }
+      bytes += valueBytes(item, seen);
+    }
+    if (allSimple) return bytes;
+  }
+  const activeSeen = seen ?? new Set<unknown>();
+  if (activeSeen.has(value)) return 8;
+  activeSeen.add(value);
+  if (ArrayBuffer.isView(value)) return valueBytes(value.buffer, activeSeen);
   if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer) return value.byteLength;
   if (value instanceof Map)
-    return [...value].reduce((sum, [key, item]) => sum + valueBytes(key, seen) + valueBytes(item, seen), 0);
-  if (value instanceof Set) return [...value].reduce((sum, item) => sum + valueBytes(item, seen), 0);
-  return Object.entries(value).reduce((sum, [key, item]) => sum + key.length * 2 + valueBytes(item, seen), 0);
+    return [...value].reduce((sum, [key, item]) => sum + valueBytes(key, activeSeen) + valueBytes(item, activeSeen), 0);
+  if (value instanceof Set) return [...value].reduce((sum, item) => sum + valueBytes(item, activeSeen), 0);
+  if (Array.isArray(value)) return value.reduce<number>((sum, item) => sum + valueBytes(item, activeSeen), 32);
+  return Object.entries(value).reduce((sum, [key, item]) => sum + key.length * 2 + valueBytes(item, activeSeen), 0);
 }
 
 class FrameColumn {

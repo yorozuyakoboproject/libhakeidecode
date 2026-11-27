@@ -882,17 +882,33 @@ export class WaveformRenderer {
           );
       }
     }
+    const protocolTasks: Promise<void>[] = [];
     for (const protocol of this.protocols)
-      tasks.push(
+      protocolTasks.push(
         protocol.annotations.prepareView(start, end, Math.max(1, Math.floor(bins * this.protocolRows(protocol) * 3))),
       );
-    if (!tasks.length) {
+    if (!tasks.length && !protocolTasks.length) {
       this.viewReady = true;
       this.drawNow();
       return;
     }
+    const waitProtocols = (): Promise<void> => {
+      if (!protocolTasks.length) return Promise.resolve();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        Promise.all(protocolTasks).then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 32);
+        }),
+      ]).finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      });
+    };
     this.viewRefreshDirty = false;
-    const task = Promise.all(tasks)
+    const task = Promise.all([...tasks, waitProtocols()])
       .then(
         () => true,
         () => false,

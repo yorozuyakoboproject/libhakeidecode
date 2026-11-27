@@ -488,7 +488,7 @@ async function consumePacked(s: Session): Promise<void> {
   const selected = s.packedChannels!;
   const sampleBytes = Math.ceil(s.packedChannelCount / 8);
   for (let start = 0n; start < s.length;) {
-    const end = start + 1_048_576n < s.length ? start + 1_048_576n : s.length;
+    const end = start + 262_144n < s.length ? start + 262_144n : s.length;
     const packed = await requestPackedRange(s, start, end);
     await pushPacked(s, start, packed, selected, sampleBytes);
     maybePostProgress(s);
@@ -632,7 +632,7 @@ async function consumeShared(
     }
     let lastYield = performance.now();
     while (true) {
-      const part = await reader.next(1_048_576);
+      const part = await reader.next(131_072);
       if (!part) break;
       await pushPacked(s, part.startSample, part.data, picked, sampleBytes);
       maybePostProgress(s);

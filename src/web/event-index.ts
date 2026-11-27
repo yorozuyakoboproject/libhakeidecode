@@ -3,6 +3,9 @@ import type { Annotation } from './protocol.js';
 import { SampleColumn } from './sample-column.js';
 
 const PAGE_SIZE = 65_536;
+function textsCacheKey(texts: readonly string[]): string {
+  return texts.length === 1 ? '\u0001' + texts[0]! : JSON.stringify(texts);
+}
 type AnnotationPage = {
   ss: SampleColumn;
   es: SampleColumn;
@@ -98,7 +101,7 @@ export class AnnotationIndex {
         id = page.textIds[index % PAGE_SIZE]!;
       if (--this.textUses[id]! === 0) {
         const texts = this.textPool[id]!,
-          key = JSON.stringify(texts);
+          key = textsCacheKey(texts);
         this.textIds.delete(key);
         this.textBytes -= key.length * 2 + texts.length * 8 + texts.reduce((bytes, text) => bytes + text.length * 2, 0);
         this.textPool[id] = undefined;
@@ -169,7 +172,7 @@ export class AnnotationIndex {
   }
 
   private textId(texts: readonly string[]): number {
-    const key = JSON.stringify(texts),
+    const key = textsCacheKey(texts),
       existing = this.textIds.get(key);
     if (existing !== undefined) {
       this.textUses[existing] = this.textUses[existing]! + 1;

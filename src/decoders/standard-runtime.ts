@@ -37,6 +37,10 @@ interface StandardFrame extends DecodeFrame {
   readonly annotations?: number;
 }
 
+const MAX_RETAINED_ANNOTATIONS = 5_000_000;
+const MAX_RETAINED_FRAMES = 2_000_000;
+const MAX_RETAINED_BINARY_BYTES = 64 * 1024 * 1024;
+
 export class StandardRuntime implements DecodeRuntime {
   private readonly context: DecodeRuntimeContext;
   private readonly decoder: DecoderLifecycle;
@@ -52,6 +56,8 @@ export class StandardRuntime implements DecodeRuntime {
   private retained = false;
   private retainedStart = 0n;
   private finished = false;
+  private truncated = false;
+  private binaryTruncated = false;
   private rangeStart: bigint | null = null;
   private rangeEnd: bigint | null = null;
 
@@ -109,7 +115,12 @@ export class StandardRuntime implements DecodeRuntime {
     this.context.publish?.(event);
     this.updateRange(event.ss, event.es);
     if (this.retained && event.es <= this.retainedStart) return;
+    const bounded = !this.retained && this.context.paged === 'always';
     if (event.type === OUTPUT_ANN) {
+      if (bounded && this.annotationsCount >= MAX_RETAINED_ANNOTATIONS) {
+        this.truncated = true;
+        return;
+      }
       const data = event.data as readonly [number, readonly string[], number?];
       const annotation: Annotation = {
         ss: event.ss,
@@ -121,6 +132,10 @@ export class StandardRuntime implements DecodeRuntime {
       this.annotations.push(annotation);
       this.annotationsCount++;
     } else if (event.type === OUTPUT_PROTOCOL) {
+      if (bounded && this.framesCount >= MAX_RETAINED_FRAMES) {
+        this.truncated = true;
+        return;
+      }
       this.frames.push({
         ss: event.ss,
         es: event.es,
@@ -131,6 +146,10 @@ export class StandardRuntime implements DecodeRuntime {
       this.framesCount++;
     } else if (event.type === OUTPUT_BINARY) {
       const [index, bytes] = event.data as readonly [number, Uint8Array];
+      if (bounded && this.binaries.reservedBytes + bytes.byteLength > MAX_RETAINED_BINARY_BYTES) {
+        this.binaryTruncated = true;
+        return;
+      }
       const key = this.decoder.descriptor.binary?.[index]?.[0];
       if (key) this.binaries.append(key, bytes, this.retained ? event.es : undefined);
     } else if (event.type === OUTPUT_META) {
@@ -141,6 +160,7 @@ export class StandardRuntime implements DecodeRuntime {
 
   async push(window: SignalWindow, progress: number): Promise<void> {
     if (this.mode !== 'logic' || !this.runner) throw new Error('Decoder node does not accept logic input');
+    if (!this.retained && this.context.paged === 'always' && this.truncated && !this.context.publish) return;
     this.updateRange(window.startSample, window.endSample);
     this.runner.pushWindow(window);
     await this.flush(progress);
@@ -187,6 +207,8 @@ export class StandardRuntime implements DecodeRuntime {
     this.retained = false;
     this.retainedStart = 0n;
     this.finished = false;
+    this.truncated = false;
+    this.binaryTruncated = false;
     this.rangeStart = null;
     this.rangeEnd = null;
   }
@@ -225,8 +247,8 @@ export class StandardRuntime implements DecodeRuntime {
       values: Object.fromEntries(this.values),
       frames: this.framesCount,
       annotations: this.annotationsCount,
-      truncated: false,
-      binaryTruncated: false,
+      truncated: this.truncated,
+      binaryTruncated: this.binaryTruncated,
     };
   }
 

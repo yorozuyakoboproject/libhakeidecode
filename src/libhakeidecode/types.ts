@@ -124,7 +124,7 @@ export interface LogicWindow {
   readonly initial?: LogicLevel;
   readonly edges?: readonly (number | bigint)[];
   at(index: number): Pin;
-  nextEdge(index: number): number;
+  nextEdge(index: number, limit?: number): number;
 }
 export interface SignalWindow {
   readonly startSample: bigint;

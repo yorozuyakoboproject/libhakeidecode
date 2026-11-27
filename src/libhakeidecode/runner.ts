@@ -29,6 +29,8 @@ export class DecoderRunner {
   readonly initialPins: NonNullable<RunnerOptions['initialPins']>;
   readonly allowGaps: boolean;
   readonly outputs: OutputStreams;
+  private readonly channelIndexCache = new Map<ChannelId, number>();
+  private readonly compiledWaitCache = new WeakMap<WaitToken, CompiledWait>();
   started!: boolean;
   ended!: boolean;
   completed!: boolean;
@@ -68,6 +70,11 @@ export class DecoderRunner {
     this.initialPins = initialPins;
     this.allowGaps = allowGaps;
     this.outputs = new OutputStreams(decoder, { instanceId, onEvent });
+    for (let index = 0; index < this.channelDeclarations.length; index++) {
+      this.channelIndexCache.set(index, index);
+      this.channelIndexCache.set(String(index), index);
+      this.channelIndexCache.set(this.channelDeclarations[index]!.id, index);
+    }
     this.clearState();
   }
   clearState(): void {
@@ -92,8 +99,13 @@ export class DecoderRunner {
     this.decoder.matched = null;
   }
   channelIndex(id: ChannelId): number {
-    if (typeof id === 'number' || /^\d+$/.test(String(id))) return Number(id);
-    return this.channelDeclarations.findIndex((channel) => channel.id === id);
+    const cached = this.channelIndexCache.get(id);
+    if (cached !== undefined) return cached;
+    let index: number;
+    if (typeof id === 'number' || /^\d+$/.test(String(id))) index = Number(id);
+    else index = this.channelDeclarations.findIndex((channel) => channel.id === id);
+    this.channelIndexCache.set(id, index);
+    return index;
   }
   hasChannel(id: ChannelId): boolean {
     const index = this.channelIndex(id);
@@ -221,6 +233,7 @@ export class DecoderRunner {
   }
   private skipOffset(conditions: CompiledWait, cursor: number, length: number): number {
     let best = length - cursor;
+    if (best <= 1) return 0;
     for (const terms of conditions) {
       if (terms.length > 1 && terms.some((term) => term.kind === 'skip')) return 0;
       let candidate = 1;
@@ -228,10 +241,11 @@ export class DecoderRunner {
         let earliest = 1;
         if (term.kind === 'skip') {
           if (term.count < 0) return 0;
-          earliest = Number(term.count - term.skipped + 1n);
+          const remaining = term.count - term.skipped + 1n;
+          earliest = remaining >= BigInt(best) ? best : Number(remaining);
         } else {
           const view = this.windows[term.channel];
-          if (!view) earliest = length - cursor;
+          if (!view) earliest = best;
           else if (
             term.kind === 'e' ||
             term.kind === 'r' ||
@@ -239,11 +253,15 @@ export class DecoderRunner {
             (term.kind === 'h' && this.previous![term.channel] !== 1) ||
             (term.kind === 'l' && this.previous![term.channel] !== 0)
           )
-            earliest = view.nextEdge(cursor + 1) - cursor;
+            earliest = view.nextEdge(cursor + 1, cursor + best) - cursor;
         }
-        candidate = Math.max(candidate, earliest);
+        if (earliest > candidate) candidate = earliest;
+        if (candidate >= best) break;
       }
-      best = Math.min(best, candidate);
+      if (candidate < best) {
+        best = candidate;
+        if (best <= 1) return 0;
+      }
     }
     return best > 1 ? Math.min(best, length - cursor) : 0;
   }
@@ -281,11 +299,26 @@ export class DecoderRunner {
           return;
         }
         if (!(result.value instanceof WaitToken)) throw new DecodeError('A logic decoder must yield wait() tokens.');
-        this.pendingWait = compileWait(result.value, (id) => this.channelIndex(id), {
-          firstWait: this.firstWait,
-          position: this.position,
-        });
-        this.firstWait = false;
+        if (!this.firstWait) {
+          const cachedWait = this.compiledWaitCache.get(result.value);
+          if (cachedWait) {
+            this.pendingWait = cachedWait;
+          } else {
+            const compiled = compileWait(result.value, (id) => this.channelIndex(id), {
+              firstWait: false,
+              position: this.position,
+            });
+            if (!compiled.some((terms) => terms.some((term) => term.kind === 'skip')))
+              this.compiledWaitCache.set(result.value, compiled);
+            this.pendingWait = compiled;
+          }
+        } else {
+          this.pendingWait = compileWait(result.value, (id) => this.channelIndex(id), {
+            firstWait: true,
+            position: this.position,
+          });
+          this.firstWait = false;
+        }
       }
       this.readPins(cursor, this.pins);
       if (this.previous === null) {

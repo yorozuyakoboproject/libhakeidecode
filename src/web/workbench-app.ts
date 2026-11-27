@@ -20,13 +20,20 @@ import {
 import { WaveformRenderer, timeLabel, frequencyLabel } from './renderer.js';
 import { moveTimelineRow, type TimelineRow } from './timeline.js';
 import { openAnalogSettings, openDigitalSettings } from './channel-controls.js';
+import {
+  buildDecoderMappingField,
+  buildDecoderOptionField,
+  openProtocolSettings,
+  renderDecoderTracksSection,
+  type DecoderMappingCandidate,
+} from './protocol-controls.js';
 import { parseAnalogSettings, type AnalogSettings } from './analog-settings.js';
 import type { AnnotationIndex } from './event-index.js';
 import { PagedAnnotationIndex } from './paged-annotation-index.js';
 import type { DecoderId } from './protocol.js';
 import type { ProtocolMappingValue, ProtocolSettings, WorkspaceSettings } from './workspace.js';
 import { validateProtocolGraph } from './workspace.js';
-import { isDarkColor, normalizeHiddenRows, protocolRowId, protocolTrackColor } from './protocol-tracks.js';
+import { normalizeHiddenRows, protocolRowId } from './protocol-tracks.js';
 import type { DecodeGraphNode, ProtocolBinding } from '../decoders/definition.js';
 import type { DecodeProgressMessage } from './protocol.js';
 import type { OptionDeclaration, OptionValue } from '../libhakeidecode/types.js';
@@ -236,7 +243,7 @@ export class AnalyzerApp {
     };
     this.renderer.onAnalogSettings = (channel) => this.configureAnalog(channel);
     this.renderer.onDigitalSettings = (channel) => this.configureDigital(channel);
-    this.renderer.onProtocolSettings = (id) => this.selectProtocol(id);
+    this.renderer.onProtocolSettings = (id) => this.configureProtocol(id);
     this.renderer.onToggleProtocolCollapse = (id) => this.toggleProtocolCollapsed(id);
     this.renderer.onToggleProtocolRow = (id, rowId, visible) => this.setProtocolRowVisible(id, rowId, visible);
     this.renderer.onAnnotationClick = (id, ss, es) => {
@@ -289,17 +296,7 @@ export class AnalyzerApp {
       if ((this.state === 'loading' && !this.captureAbort) || !this.selectedProtocol) return;
       const protocol = this.selectedProtocol;
       this.commitForm();
-      this.saveProtocols();
-      const affected = [protocol, ...this.downstreamOf(protocol.id)];
-      if (this.captureAbort) this.cancelDecodeOnly();
-      else this.cancelDecodes();
-      for (const item of affected) this.clearProtocol(item);
-      this.setStatus('ready', 'status.updated');
-      this.decodeTimer = setTimeout(() => {
-        this.decodeTimer = null;
-        if (this.captureAbort) this.scheduleLiveDecode();
-        else void this.runProtocols(affected);
-      }, 180);
+      this.scheduleProtocolDecode(protocol);
     });
     element('open-file').addEventListener('click', () => element<HTMLInputElement>('file-input').click());
     element('empty-open-file').addEventListener('click', () => element<HTMLInputElement>('file-input').click());
@@ -779,7 +776,10 @@ export class AnalyzerApp {
       mapping: { ...settings.mapping },
       client,
       ownClient: client,
-      annotations: new PagedAnnotationIndex(client, settings.id, () => this.updateMemoryUsage()),
+      annotations: new PagedAnnotationIndex(client, settings.id, () => {
+        this.updateMemoryUsage();
+        this.renderer.schedule();
+      }),
       frameCount: 0,
       annotationCount: 0,
       resultBytes: 0,
@@ -920,41 +920,12 @@ export class AnalyzerApp {
     const primary = new Set(decoderDefinition(protocol.decoder).ui.primaryOptions ?? []);
     let advanced = 0;
     for (const option of declarations(protocol.decoder)) {
-      const label = document.createElement('label');
-      label.className = 'field';
-      const caption = document.createElement('span');
-      if (hasMessage('decoder.' + protocol.decoder + '.option.' + option.id))
-        caption.dataset.i18n = 'decoder.' + protocol.decoder + '.option.' + option.id;
-      caption.textContent = option.desc ?? option.id;
-      label.append(caption);
-      let input: HTMLInputElement | HTMLSelectElement;
-      if (option.values) {
-        input = document.createElement('select');
-        for (const value of option.values) {
-          const item = document.createElement('option');
-          item.value = String(value);
-          item.textContent = String(value);
-          if (hasMessage('decoder.' + protocol.decoder + '.value.' + value))
-            item.dataset.i18n = 'decoder.' + protocol.decoder + '.value.' + value;
-          input.append(item);
-        }
-      } else {
-        input = document.createElement('input');
-        input.type = typeof option.default === 'number' ? 'number' : 'text';
-        input.step =
-          option.step === 'any' ||
-          (option.step === undefined && typeof option.default === 'number' && !Number.isInteger(option.default))
-            ? 'any'
-            : String(option.step ?? 1);
-        if (option.min !== undefined) input.min = String(option.min);
-        if (option.max !== undefined) input.max = String(option.max);
-        input.required = !!option.required;
-      }
-      input.id = 'option-' + option.id;
-      input.value = String(protocol.options[option.id] ?? option.default);
-      if (hasMessage('decoder.' + protocol.decoder + '.option.' + option.id))
-        input.dataset.i18nAttrs = 'aria-label:decoder.' + protocol.decoder + '.option.' + option.id;
-      label.append(input);
+      const { label } = buildDecoderOptionField(
+        protocol.decoder,
+        option,
+        protocol.options[option.id] ?? option.default,
+        'option-',
+      );
       if (primary.has(option.id)) element('decoder-options').append(label);
       else {
         element('advanced-options').append(label);
@@ -980,61 +951,46 @@ export class AnalyzerApp {
       }
     }
   }
+  private upstreamCandidates(): DecoderMappingCandidate[] {
+    return this.protocols.flatMap((upstream) =>
+      hasDecoderDefinition(upstream.decoder)
+        ? [
+            {
+              id: upstream.id,
+              name: upstream.name,
+              outputs: decoderDefinition(upstream.decoder).descriptor.outputs ?? [],
+            },
+          ]
+        : [],
+    );
+  }
+  private mappingChannelCount(): number {
+    return this.capture
+      ? (this.capture.logicChannelCount ?? this.capture.store.channelCount)
+      : this.deviceControls.configuration().logicChannels;
+  }
   private populateMapping(): void {
     const protocol = this.selectedProtocol,
       capture = this.capture;
     if (!protocol || !hasDecoderDefinition(protocol.decoder)) return;
     const container = element('decoder-mapping');
     container.replaceChildren();
-    const count = capture
-      ? (capture.logicChannelCount ?? capture.store.channelCount)
-      : this.deviceControls.configuration().logicChannels;
+    const count = this.mappingChannelCount();
+    const downstream = new Set(this.downstreamOf(protocol.id).map((item) => item.id));
+    const candidates = this.upstreamCandidates();
+    const logicChannels = this.deviceControls.selectedChannels('logic');
     for (const input of decoderDefinition(protocol.decoder).ui.inputs) {
-      const label = document.createElement('label');
-      label.className = 'field';
-      const caption = document.createElement('span');
-      if (input.labelKey && hasMessage(input.labelKey)) caption.dataset.i18n = input.labelKey;
-      caption.textContent = input.label;
-      label.append(caption);
-      const select = document.createElement('select');
-      select.id = 'mapping-' + input.key;
-      if (input.labelKey && hasMessage(input.labelKey)) select.dataset.i18nAttrs = 'aria-label:' + input.labelKey;
-      const none = document.createElement('option');
-      none.value = '';
-      none.dataset.i18n = 'channels.none';
-      none.textContent = t('channels.none');
-      select.append(none);
-      if (input.kind === 'protocol') {
-        const downstream = new Set(this.downstreamOf(protocol.id).map((item) => item.id));
-        for (const upstream of this.protocols) {
-          if (upstream.id === protocol.id || downstream.has(upstream.id)) continue;
-          if (!hasDecoderDefinition(upstream.decoder)) continue;
-          const outputs = decoderDefinition(upstream.decoder).descriptor.outputs ?? [];
-          if (!outputs.includes(input.key)) continue;
-          const item = document.createElement('option');
-          item.value = JSON.stringify({ instanceId: upstream.id, protoId: input.key });
-          item.textContent = `${upstream.name} · ${input.key}`;
-          select.append(item);
-        }
-      } else {
-        for (let i = 0; i < count; i++) {
-          const item = document.createElement('option'),
-            labelText = capture?.labels[i] ?? 'D' + this.deviceControls.selectedChannels('logic')[i];
-          item.value = String(i);
-          item.textContent = labelText;
-          select.append(item);
-        }
-      }
-      const value = protocol.mapping[input.key];
-      select.value =
-        input.kind === 'protocol'
-          ? value && typeof value === 'object' && !Array.isArray(value)
-            ? JSON.stringify(value)
-            : ''
-          : typeof value === 'number' && value < count
-            ? String(value)
-            : '';
-      label.append(select);
+      const { label } = buildDecoderMappingField({
+        input,
+        count,
+        labels: capture?.labels,
+        selectedLogicChannels: logicChannels,
+        protocolId: protocol.id,
+        downstreamIds: downstream,
+        upstreamCandidates: candidates,
+        value: protocol.mapping[input.key],
+        idPrefix: 'mapping-',
+      });
       container.append(label);
     }
     translateDOM();
@@ -1158,121 +1114,25 @@ export class AnalyzerApp {
       container.hidden = true;
       return;
     }
-    const definition = decoderDefinition(protocol.decoder),
-      rows = definition.ui.rows;
-    if (!rows.length) {
-      delete container.dataset.protocolKey;
-      container.replaceChildren();
-      container.hidden = true;
-      return;
-    }
-    const hiddenSet = new Set(normalizeHiddenRows(definition, protocol.hiddenRows));
-    const darkTheme = isDarkColor(
-      getComputedStyle(document.documentElement).getPropertyValue('--wave-bg') || '#111720',
-    );
-    const visibleCount = rows.length - hiddenSet.size;
-    container.hidden = false;
-
-    const protocolKey = `${protocol.id}:${protocol.decoder}`;
-    if (container.dataset.protocolKey === protocolKey) {
-      const count = container.querySelector('.decoder-tracks-count');
-      if (count) count.textContent = t('decoder.tracksCount', { visible: visibleCount, total: rows.length });
-      const showAllBtn = container.querySelector<HTMLButtonElement>('[data-action="show-all"]');
-      if (showAllBtn) showAllBtn.disabled = hiddenSet.size === 0;
-      const hideAllBtn = container.querySelector<HTMLButtonElement>('[data-action="hide-all"]');
-      if (hideAllBtn) hideAllBtn.disabled = hiddenSet.size === rows.length;
-      rows.forEach((row, index) => {
-        const rowId = protocolRowId(row, index);
-        const isHidden = hiddenSet.has(rowId);
-        const checkbox = container.querySelector<HTMLInputElement>(`input[data-track-id="${CSS.escape(rowId)}"]`);
-        if (checkbox) {
-          checkbox.checked = !isHidden;
-          const item = checkbox.closest('.decoder-track-item');
-          item?.classList.toggle('is-hidden', isHidden);
-          const swatch = item?.querySelector<HTMLElement>('.decoder-track-swatch');
-          if (swatch) {
-            const style = protocolTrackColor(protocol.color, index, 0, darkTheme);
-            swatch.style.backgroundColor = style.fill;
-            swatch.style.borderColor = style.border;
-          }
-        }
-      });
-      return;
-    }
-
-    container.dataset.protocolKey = protocolKey;
-    const header = document.createElement('div');
-    header.className = 'decoder-tracks-header';
-    const title = document.createElement('strong');
-    title.dataset.i18n = 'decoder.tracks';
-    title.textContent = t('decoder.tracks');
-    const count = document.createElement('span');
-    count.className = 'decoder-tracks-count';
-    count.textContent = t('decoder.tracksCount', { visible: visibleCount, total: rows.length });
-
-    const showAllBtn = document.createElement('button');
-    showAllBtn.type = 'button';
-    showAllBtn.className = 'text-button';
-    showAllBtn.dataset.action = 'show-all';
-    showAllBtn.dataset.i18n = 'decoder.tracksShowAll';
-    showAllBtn.textContent = t('decoder.tracksShowAll');
-    showAllBtn.disabled = hiddenSet.size === 0;
-    showAllBtn.addEventListener('click', () => {
-      const current = this.selectedProtocol;
-      if (!current) return;
-      current.hiddenRows = undefined;
-      current.collapsed = false;
-      this.renderDecoderTracks();
-      this.saveProtocols();
-      this.renderer.schedule();
+    renderDecoderTracksSection(container, {
+      protocolId: protocol.id,
+      decoder: protocol.decoder,
+      color: protocol.color,
+      definition: decoderDefinition(protocol.decoder),
+      hiddenRows: protocol.hiddenRows,
+      onToggleRow: (rowId, visible) => this.setProtocolRowVisible(protocol.id, rowId, visible),
+      onSetAll: (visible) => this.setAllProtocolRowsVisible(protocol.id, visible),
     });
-
-    const hideAllBtn = document.createElement('button');
-    hideAllBtn.type = 'button';
-    hideAllBtn.className = 'text-button';
-    hideAllBtn.dataset.action = 'hide-all';
-    hideAllBtn.dataset.i18n = 'decoder.tracksHideAll';
-    hideAllBtn.textContent = t('decoder.tracksHideAll');
-    hideAllBtn.disabled = hiddenSet.size === rows.length;
-    hideAllBtn.addEventListener('click', () => {
-      const current = this.selectedProtocol;
-      if (!current) return;
-      current.hiddenRows = rows.map((row, index) => protocolRowId(row, index));
-      this.renderDecoderTracks();
-      this.saveProtocols();
-      this.renderer.schedule();
-    });
-
-    header.append(title, count, showAllBtn, hideAllBtn);
-
-    const list = document.createElement('div');
-    list.className = 'decoder-tracks-list';
-    rows.forEach((row, index) => {
-      const rowId = protocolRowId(row, index);
-      const isHidden = hiddenSet.has(rowId);
-      const item = document.createElement('label');
-      item.className = 'decoder-track-item' + (isHidden ? ' is-hidden' : '');
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.checked = !isHidden;
-      checkbox.dataset.trackId = rowId;
-      checkbox.addEventListener('change', () => {
-        this.setProtocolRowVisible(protocol.id, rowId, checkbox.checked);
-      });
-      const swatch = document.createElement('span');
-      swatch.className = 'decoder-track-swatch';
-      const style = protocolTrackColor(protocol.color, index, 0, darkTheme);
-      swatch.style.backgroundColor = style.fill;
-      swatch.style.borderColor = style.border;
-      const text = document.createElement('span');
-      text.className = 'decoder-track-label';
-      if (row.labelKey && hasMessage(row.labelKey)) text.dataset.i18n = row.labelKey;
-      text.textContent = row.labelKey && hasMessage(row.labelKey) ? t(row.labelKey) : row.label;
-      text.title = text.textContent;
-      item.append(checkbox, swatch, text);
-      list.append(item);
-    });
-    container.replaceChildren(header, list);
+  }
+  private setAllProtocolRowsVisible(id: string, visible: boolean): void {
+    const protocol = this.protocols.find((item) => item.id === id);
+    if (!protocol || !hasDecoderDefinition(protocol.decoder)) return;
+    const definition = decoderDefinition(protocol.decoder);
+    protocol.hiddenRows = visible ? undefined : definition.ui.rows.map((row, index) => protocolRowId(row, index));
+    if (visible && protocol.collapsed) protocol.collapsed = false;
+    if (protocol.id === this.selectedId) this.renderDecoderTracks();
+    this.saveProtocols();
+    this.renderer.schedule();
   }
   private setProtocolRowVisible(id: string, rowId: string, visible: boolean): void {
     const protocol = this.protocols.find((item) => item.id === id);
@@ -1290,6 +1150,92 @@ export class AnalyzerApp {
     }
     this.saveProtocols();
     this.renderer.schedule();
+  }
+  private scheduleProtocolDecode(protocol: ProtocolInstance): void {
+    this.saveProtocols();
+    if (this.state === 'loading' && !this.captureAbort) return;
+    if (this.decodeTimer) clearTimeout(this.decodeTimer);
+    const affected = [protocol, ...this.downstreamOf(protocol.id)];
+    if (this.captureAbort) this.cancelDecodeOnly();
+    else this.cancelDecodes();
+    for (const item of affected) this.clearProtocol(item);
+    this.setStatus('ready', 'status.updated');
+    this.decodeTimer = setTimeout(() => {
+      this.decodeTimer = null;
+      if (this.captureAbort) this.scheduleLiveDecode();
+      else void this.runProtocols(affected);
+    }, 180);
+  }
+  private configureProtocol(id: string): void {
+    const protocol = this.protocols.find((item) => item.id === id);
+    if (!protocol) return;
+    this.selectProtocol(id);
+    if (!hasDecoderDefinition(protocol.decoder)) return;
+    const definition = decoderDefinition(protocol.decoder);
+    const capture = this.capture;
+    openProtocolSettings({
+      protocol,
+      definition,
+      declarations: declarations(protocol.decoder),
+      count: this.mappingChannelCount(),
+      labels: capture?.labels,
+      selectedLogicChannels: this.deviceControls.selectedChannels('logic'),
+      downstreamIds: new Set(this.downstreamOf(protocol.id).map((item) => item.id)),
+      upstreamCandidates: this.upstreamCandidates(),
+      onIdentityChange: (name, color) => {
+        protocol.name = name || decoderName(protocol.decoder);
+        protocol.color = color;
+        if (this.selectedId === protocol.id) {
+          element<HTMLInputElement>('protocol-name').value = protocol.name;
+          element<HTMLInputElement>('protocol-color').value = protocol.color;
+          this.renderDecoderTracks();
+        }
+        this.renderProtocolList();
+        this.saveProtocols();
+        this.renderer.schedule();
+      },
+      onMappingChange: (key, value) => {
+        if (value === undefined) delete protocol.mapping[key];
+        else protocol.mapping[key] = value;
+        if (this.selectedId === protocol.id) {
+          const sidebarSelect = document.getElementById('mapping-' + key) as HTMLSelectElement | null;
+          if (sidebarSelect) {
+            sidebarSelect.value =
+              value === undefined ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+          }
+        }
+        this.scheduleProtocolDecode(protocol);
+      },
+      onOptionChange: (optId, value) => {
+        protocol.options[optId] = value;
+        if (this.selectedId === protocol.id) {
+          const sidebarInput = document.getElementById('option-' + optId) as
+            | HTMLInputElement
+            | HTMLSelectElement
+            | null;
+          if (sidebarInput) sidebarInput.value = value;
+        }
+        this.scheduleProtocolDecode(protocol);
+      },
+      onDecimalsChange: (decimals) => {
+        protocol.decimalPlaces = decimals;
+        if (this.selectedId === protocol.id) {
+          element<HTMLSelectElement>('decoder-decimals').value = String(decimals);
+        }
+        this.saveProtocols();
+        this.updateDecodeSummary();
+        this.renderer.schedule();
+      },
+      onToggleRow: (rowId, visible) => {
+        this.setProtocolRowVisible(protocol.id, rowId, visible);
+        return protocol.hiddenRows;
+      },
+      onSetAllRows: (visible) => {
+        this.setAllProtocolRowsVisible(protocol.id, visible);
+        return protocol.hiddenRows;
+      },
+      onRemove: () => this.removeProtocol(protocol.id),
+    });
   }
   private toggleProtocolCollapsed(id: string): void {
     const protocol = this.protocols.find((item) => item.id === id);

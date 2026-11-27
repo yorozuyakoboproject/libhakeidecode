@@ -18,16 +18,20 @@ export class ValuesLogicWindow implements LogicWindow {
   at(index: number): Pin {
     return valueAt(this.data, index);
   }
-  nextEdge(index: number): number {
+  nextEdge(index: number, limit = this.length): number {
     let cursor = Math.max(1, index);
-    if (cursor >= this.length) return this.length;
-    let previous = valueAt(this.data, cursor - 1);
-    for (; cursor < this.length; cursor++) {
-      const current = valueAt(this.data, cursor);
+    const end = limit < this.length ? limit : this.length;
+    if (cursor >= end) return end;
+    const data = this.data,
+      rawPrev = data[cursor - 1],
+      previous = rawPrev === 0 || rawPrev === 1 ? rawPrev : 255;
+    for (; cursor < end; cursor++) {
+      const raw = data[cursor];
+      if (raw === rawPrev) continue;
+      const current = raw === 0 || raw === 1 ? raw : 255;
       if (current !== previous) return cursor;
-      previous = current;
     }
-    return this.length;
+    return end;
   }
 }
 
@@ -37,6 +41,8 @@ export class PackedLogicWindow implements LogicWindow {
   readonly bit: number;
   readonly length: number;
   readonly sampleBytes: number;
+  private words32: Uint32Array | null | undefined = undefined;
+  private wordHead = 0;
   constructor(data: Uint8Array, bit: number, sampleBytes = 1) {
     if (!Number.isInteger(bit) || bit < 0 || bit >= sampleBytes * 8)
       throw new DecodeError('Packed logic bit is outside the sample width.');
@@ -48,32 +54,58 @@ export class PackedLogicWindow implements LogicWindow {
     this.length = data.length / sampleBytes;
   }
   at(index: number): Pin {
-    const offset = index * this.sampleBytes;
-    const value =
-      this.sampleBytes === 1
-        ? this.data[offset]!
-        : this.sampleBytes === 2
-          ? this.data[offset]! | (this.data[offset + 1]! << 8)
-          : this.sampleBytes === 3
-            ? this.data[offset]! | (this.data[offset + 1]! << 8) | (this.data[offset + 2]! << 16)
-            : (this.data[offset]! |
-                (this.data[offset + 1]! << 8) |
-                (this.data[offset + 2]! << 16) |
-                (this.data[offset + 3]! << 24)) >>>
-              0;
-    return ((value >>> this.bit) & 1) as LogicLevel;
+    const bytePos = index * this.sampleBytes + (this.bit >> 3);
+    return ((this.data[bytePos]! >>> (this.bit & 7)) & 1) as LogicLevel;
   }
-  nextEdge(index: number): number {
+  private ensureWords32(): Uint32Array | null {
+    if (this.words32 !== undefined) return this.words32;
+    if (this.sampleBytes !== 1 || this.data.length < 16) return (this.words32 = null);
+    const head = (4 - (this.data.byteOffset & 3)) & 3;
+    const wordCount = this.data.byteLength > head ? (this.data.byteLength - head) >>> 2 : 0;
+    this.wordHead = head;
+    return (this.words32 =
+      wordCount > 0 ? new Uint32Array(this.data.buffer, this.data.byteOffset + head, wordCount) : null);
+  }
+  nextEdge(index: number, limit = this.length): number {
     let cursor = Math.max(1, index);
-    if (cursor >= this.length) return this.length;
-    let previous = this.at(cursor - 1) as LogicLevel;
-    while (cursor < this.length) {
-      const next = this.at(cursor);
-      if (next !== previous) return cursor;
-      previous = next;
-      cursor++;
+    const end = limit < this.length ? limit : this.length;
+    if (cursor >= end) return end;
+    const data = this.data,
+      sampleBytes = this.sampleBytes,
+      bitByte = this.bit >> 3,
+      bitMask = 1 << (this.bit & 7),
+      prevMasked = data[(cursor - 1) * sampleBytes + bitByte]! & bitMask;
+    if (sampleBytes === 1) {
+      if (end - cursor >= 16) {
+        const words = this.ensureWords32();
+        if (words) {
+          const head = this.wordHead;
+          const alignStop =
+            cursor < head ? Math.min(end, head) : Math.min(end, cursor + ((4 - ((cursor - head) & 3)) & 3));
+          while (cursor < alignStop) {
+            if ((data[cursor]! & bitMask) !== prevMasked) return cursor;
+            cursor++;
+          }
+          if (cursor >= head && cursor + 4 <= end) {
+            const mask4 = (bitMask * 0x01010101) >>> 0;
+            const target4 = prevMasked ? mask4 : 0;
+            let wordIdx = (cursor - head) >>> 2;
+            const wordStop = Math.min(words.length, (end - head) >>> 2);
+            while (wordIdx < wordStop && (words[wordIdx]! & mask4) >>> 0 === target4) wordIdx++;
+            cursor = head + (wordIdx << 2);
+          }
+        }
+      }
+      while (cursor < end) {
+        if ((data[cursor]! & bitMask) !== prevMasked) return cursor;
+        cursor++;
+      }
+      return end;
     }
-    return this.length;
+    for (let bytePos = cursor * sampleBytes + bitByte; cursor < end; cursor++, bytePos += sampleBytes) {
+      if ((data[bytePos]! & bitMask) !== prevMasked) return cursor;
+    }
+    return end;
   }
 }
 
@@ -109,7 +141,8 @@ export class EdgesLogicWindow implements LogicWindow {
     }
     return (this.initial ^ (low & 1)) as LogicLevel;
   }
-  nextEdge(index: number): number {
+  nextEdge(index: number, limit = this.length): number {
+    const end = limit < this.length ? limit : this.length;
     let low = 0,
       high = this.positions.length;
     while (low < high) {
@@ -117,7 +150,9 @@ export class EdgesLogicWindow implements LogicWindow {
       if (this.positions[middle]! < index) low = middle + 1;
       else high = middle;
     }
-    return low < this.positions.length ? this.positions[low]! : this.length;
+    if (low >= this.positions.length) return end;
+    const pos = this.positions[low]!;
+    return pos < end ? pos : end;
   }
 }
 

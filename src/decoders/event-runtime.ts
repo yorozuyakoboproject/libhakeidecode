@@ -21,10 +21,15 @@ export interface EventRuntimeHandler<F extends DecodeFrame> {
   reset?(api: EventRuntimeApi<F>): void;
 }
 
+const MAX_RETAINED_ANNOTATIONS = 5_000_000;
+const MAX_RETAINED_FRAMES = 2_000_000;
+const MAX_RETAINED_BINARY_BYTES = 64 * 1024 * 1024;
+
 export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements DecodeRuntime, EventRuntimeApi<F> {
   private readonly engine: DecoderEngine<readonly OutputEvent[]>;
   private readonly host: DecodeRuntimeContext['host'];
   private readonly publish: DecodeRuntimeContext['publish'];
+  private readonly pagedMode: DecodeRuntimeContext['paged'];
   private readonly handler: EventRuntimeHandler<F>;
   private annotations: Annotation[] = [];
   private frames: F[] = [];
@@ -35,10 +40,13 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   private eventEnd = 0n;
   private retained = false;
   private retainedStart = 0n;
+  private truncated = false;
+  private binaryTruncated = false;
 
   constructor(plugin: DecoderPlugin<any, any>, context: DecodeRuntimeContext, handler: EventRuntimeHandler<F>) {
     this.host = context.host;
     this.publish = context.publish;
+    this.pagedMode = context.paged;
     this.handler = handler;
     const channels = Object.fromEntries(context.channels.map((channel) => [channel, channel]));
     this.engine = plugin.createEngine({
@@ -60,18 +68,32 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   }
   addFrame(frame: F): void {
     if (this.retained && frame.es <= this.retainedStart) return;
+    if (!this.retained && this.pagedMode === 'always' && this.framesCount >= MAX_RETAINED_FRAMES) {
+      this.truncated = true;
+      return;
+    }
     this.frames.push(frame);
     this.framesCount++;
   }
   addBinary(key: string, bytes: Uint8Array): void {
     if (this.retained && this.eventEnd <= this.retainedStart) return;
+    if (
+      !this.retained &&
+      this.pagedMode === 'always' &&
+      this.binaries.reservedBytes + bytes.byteLength > MAX_RETAINED_BINARY_BYTES
+    ) {
+      this.binaryTruncated = true;
+      return;
+    }
     this.binaries.append(key, bytes, this.retained ? this.eventEnd : undefined);
   }
   addValue(key: string, value: number): void {
     if (Number.isFinite(value)) this.values.set(key, value);
   }
-  async push(window: SignalWindow): Promise<void> {
+  async push(window: SignalWindow, progress: number): Promise<void> {
+    if (!this.retained && this.pagedMode === 'always' && this.truncated && !this.publish) return;
     await this.engine.push(window);
+    await this.flush(progress);
   }
   async flush(progress: number): Promise<void> {
     if (!this.annotations.length && !this.frames.length) return;
@@ -84,6 +106,8 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   reset(): void {
     this.handler.reset?.(this);
     this.engine.reset();
+    this.truncated = false;
+    this.binaryTruncated = false;
   }
   retain(startSample: bigint): void {
     this.retained = true;
@@ -103,16 +127,21 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
       values: { ...Object.fromEntries(this.values) },
       frames: this.framesCount,
       annotations: this.annotationsCount,
-      truncated: false,
-      binaryTruncated: false,
+      truncated: this.truncated,
+      binaryTruncated: this.binaryTruncated,
     };
   }
   private consume(events: readonly OutputEvent[]): void {
+    const bounded = !this.retained && this.pagedMode === 'always';
     for (const event of events) {
       this.publish?.(event);
       this.eventEnd = event.es;
       if (event.type === OUTPUT_ANN) {
         if (this.retained && event.es <= this.retainedStart) continue;
+        if (bounded && this.annotationsCount >= MAX_RETAINED_ANNOTATIONS) {
+          this.truncated = true;
+          continue;
+        }
         const data = event.data as readonly [number, readonly string[], number?];
         this.annotations.push({ ss: event.ss, es: event.es, classIndex: data[0], texts: data[1], value: data[2] });
         this.annotationsCount++;
