@@ -98,18 +98,28 @@ export class DecodeClient {
       pending.reject(new DOMException(t('error.cancelled'), 'AbortError'));
     this.pendingQueries.clear();
   }
+  queryAnnotationsRaw(
+    startAbs: bigint,
+    endAbs: bigint,
+    maxResults: number,
+    instanceId?: string,
+  ): Promise<Annotation[]> {
+    return this.query({
+      type: 'decode-query-annotations',
+      requestId: this.nextRequestId(),
+      ...(instanceId === undefined ? {} : { instanceId }),
+      start: startAbs,
+      end: endAbs,
+      maxResults,
+    }) as Promise<Annotation[]>;
+  }
   queryAnnotations(start: bigint, end: bigint, maxResults: number, instanceId?: string): Promise<Annotation[]> {
     const offset = this.sampleOffset;
-    return (
-      this.query({
-        type: 'decode-query-annotations',
-        requestId: this.nextRequestId(),
-        ...(instanceId === undefined ? {} : { instanceId }),
-        start: start + offset,
-        end: end + offset,
-        maxResults,
-      }) as Promise<Annotation[]>
-    ).then((records) => records.map((record) => ({ ...record, ss: record.ss - offset, es: record.es - offset })));
+    return this.queryAnnotationsRaw(start + offset, end + offset, maxResults, instanceId).then((records) =>
+      offset === 0n
+        ? records
+        : records.map((record) => ({ ...record, ss: record.ss - offset, es: record.es - offset })),
+    );
   }
   readFrames(offset: number, count: number, instanceId?: string): Promise<Frame[]> {
     const origin = this.sampleOffset;

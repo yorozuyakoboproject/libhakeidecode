@@ -207,6 +207,8 @@ export class AnalyzerApp {
   private importAbort: AbortController | null = null;
   private saveAbort: AbortController | null = null;
   private firstRunCapturePending = false;
+  private initialRevealPending = false;
+  private initialRevealTimer: ReturnType<typeof setTimeout> | null = null;
   private hasSavedProtocols = false;
   private draggedProtocolId: string | null = null;
   private readonly cachedRowOrders = new Map<string, SavedRowEntry[]>();
@@ -406,6 +408,11 @@ export class AnalyzerApp {
   }
 
   dispose(): void {
+    if (this.initialRevealTimer !== null) {
+      clearTimeout(this.initialRevealTimer);
+      this.initialRevealTimer = null;
+    }
+    this.initialRevealPending = false;
     this.cancelTask(false);
     this.releaseCapture(this.capture);
     this.capture = null;
@@ -491,7 +498,7 @@ export class AnalyzerApp {
       this.selectProtocol(pwm.id, false);
       this.saveProtocols();
     }
-    void this.startCapture();
+    void this.startCapture(true);
   }
   private restoreProtocols(): void {
     try {
@@ -1380,7 +1387,7 @@ export class AnalyzerApp {
     }
     this.setStatus('loading', 'device.stopping');
   }
-  async startCapture(): Promise<void> {
+  async startCapture(atomicReveal = false): Promise<void> {
     if (this.captureAbort) {
       this.stopCapture();
       return;
@@ -1417,6 +1424,22 @@ export class AnalyzerApp {
       mode = this.deviceControls.captureMode,
       deviceNameKey = `driver.${device.descriptor.id}.name`,
       nameKey = hasMessage(deviceNameKey) ? (deviceNameKey as MessageKey) : undefined;
+    const revealAtomic = atomicReveal && mode === 'single';
+    const releaseAtomicReveal = (): void => {
+      if (this.initialRevealTimer !== null) {
+        clearTimeout(this.initialRevealTimer);
+        this.initialRevealTimer = null;
+      }
+      if (!this.initialRevealPending) return;
+      this.initialRevealPending = false;
+      this.renderer.setRenderingEnabled(true);
+      this.syncEmptyState();
+    };
+    if (revealAtomic) {
+      this.initialRevealPending = true;
+      this.renderer.setRenderingEnabled(false);
+      this.initialRevealTimer = setTimeout(releaseAtomicReveal, 1500);
+    }
     this.clearCaptureForAcquisition();
     const heading = element('capture-name');
     if (nameKey) heading.dataset.i18n = nameKey;
@@ -1520,6 +1543,8 @@ export class AnalyzerApp {
             : errorLabel(error, 'error.capture'),
         true,
       );
+    } finally {
+      if (revealAtomic) releaseAtomicReveal();
     }
   }
   setCapture(capture: Capture, cancel = true, live = false, viewport?: readonly [bigint, bigint]): void {
@@ -1876,9 +1901,32 @@ export class AnalyzerApp {
       !this.captureAbort ||
       this.captureStop?.signal.aborted ||
       !capture ||
-      (!capture.store.length && !capture.sharedSource?.publishedSamples)
+      !this.protocols.length ||
+      (!capture.store.length && !capture.sharedSource)
     )
       return;
+    const allLive = this.protocols.every(
+      (protocol) => protocol.liveSession || (capture.acquisition?.mode === 'continuous' && protocol.state === 'error'),
+    );
+    if (allLive) {
+      const seen = new Set<LiveDecodeSession | LiveDecodeGraphSession>();
+      for (const protocol of this.protocols) {
+        const session = protocol.liveSession;
+        if (!session || seen.has(session)) continue;
+        seen.add(session);
+        void session.advance(capture).catch((error) => {
+          for (const item of this.protocols) {
+            if (item.liveSession !== session) continue;
+            item.liveSession = undefined;
+            item.state = 'error';
+            item.error = error instanceof UIError ? error : errorLabel(error);
+            this.showMessage(`${item.name}: ${errorLabel(error)}`, true);
+          }
+          this.updateDecodeSummary();
+        });
+      }
+      return;
+    }
     let started = false;
     let groups: ProtocolGraphGroup[];
     try {
@@ -2328,9 +2376,10 @@ export class AnalyzerApp {
   }
   private syncEmptyState(): void {
     const hasCapture = !!this.capture;
-    element('wave-empty').hidden = hasCapture;
+    const hideEmpty = hasCapture || this.firstRunCapturePending || this.initialRevealPending;
+    element('wave-empty').hidden = hideEmpty;
     element('time-axis').hidden = !hasCapture;
-    element('capture-heading').classList.toggle('is-empty', !hasCapture && !this.captureAbort);
+    element('capture-heading').classList.toggle('is-empty', !hideEmpty && !this.captureAbort);
     element('capture-metrics').hidden = !hasCapture;
   }
   private renderStatus(): void {
@@ -2438,38 +2487,72 @@ export class AnalyzerApp {
       }),
     ];
     const container = element('capture-streams');
-    container.replaceChildren();
-    for (const stream of streams) {
-      const metric = document.createElement('span');
-      metric.dataset.captureStream = stream.name;
-      const count = document.createElement('b');
-      count.textContent = t('capture.sampleCount', { count: formatSampleCount(stream.count) });
-      count.title = `${numberLabel(stream.count)} ${t('wave.samples')}`;
-      const label = document.createElement('span');
-      label.className = 'capture-stream-label';
-      label.textContent = t('capture.streamTiming', {
-        name: stream.name,
-        rate: formatRate(stream.rate),
-        duration: formatDuration(Number(stream.count) / stream.rate),
-      });
-      label.title = label.textContent;
-      metric.append(count, label);
-      container.append(metric);
+    const existing = container.children;
+    const reusable =
+      existing.length === streams.length &&
+      streams.every(
+        (stream, index) => (existing[index] as HTMLElement | undefined)?.dataset.captureStream === stream.name,
+      );
+    if (reusable) {
+      for (let i = 0; i < streams.length; i++) {
+        const stream = streams[i]!;
+        const metric = existing[i] as HTMLElement;
+        const count = metric.firstElementChild as HTMLElement;
+        const label = metric.lastElementChild as HTMLElement;
+        const countText = t('capture.sampleCount', { count: formatSampleCount(stream.count) });
+        if (count.textContent !== countText) {
+          count.textContent = countText;
+          count.title = `${numberLabel(stream.count)} ${t('wave.samples')}`;
+        }
+        const labelText = t('capture.streamTiming', {
+          name: stream.name,
+          rate: formatRate(stream.rate),
+          duration: formatDuration(Number(stream.count) / stream.rate),
+        });
+        if (label.textContent !== labelText) {
+          label.textContent = labelText;
+          label.title = labelText;
+        }
+      }
+    } else {
+      container.replaceChildren();
+      for (const stream of streams) {
+        const metric = document.createElement('span');
+        metric.dataset.captureStream = stream.name;
+        const count = document.createElement('b');
+        count.textContent = t('capture.sampleCount', { count: formatSampleCount(stream.count) });
+        count.title = `${numberLabel(stream.count)} ${t('wave.samples')}`;
+        const label = document.createElement('span');
+        label.className = 'capture-stream-label';
+        label.textContent = t('capture.streamTiming', {
+          name: stream.name,
+          rate: formatRate(stream.rate),
+          duration: formatDuration(Number(stream.count) / stream.rate),
+        });
+        label.title = label.textContent;
+        metric.append(count, label);
+        container.append(metric);
+      }
     }
     const memoryStatus = element('memory-status');
-    memoryStatus.textContent = t('status.memory', {
+    const memoryText = t('status.memory', {
       memory: (captureMemory(capture).totalBytes / 1048576).toFixed(2),
       ms: capture.loadedMs.toFixed(1),
     });
-    memoryStatus.title = memoryStatus.textContent;
-    for (const input of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
-      const tag = input.closest('.channel-chip')?.querySelector('strong')?.textContent ?? '';
-      input.setAttribute(
-        'aria-label',
-        t(this.selectingDeviceChannels || capture.deviceChannels ? 'channels.capture' : 'channels.display', {
-          channel: tag,
-        }),
-      );
+    if (memoryStatus.textContent !== memoryText) {
+      memoryStatus.textContent = memoryText;
+      memoryStatus.title = memoryText;
+    }
+    if (!reusable) {
+      for (const input of element('channel-list').querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
+        const tag = input.closest('.channel-chip')?.querySelector('strong')?.textContent ?? '';
+        input.setAttribute(
+          'aria-label',
+          t(this.selectingDeviceChannels || capture.deviceChannels ? 'channels.capture' : 'channels.display', {
+            channel: tag,
+          }),
+        );
+      }
     }
   }
   private retainedDataBytes(): number {

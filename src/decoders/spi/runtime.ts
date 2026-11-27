@@ -1,12 +1,12 @@
-import { generatorPlugin, OUTPUT_BINARY, OUTPUT_PROTOCOL } from '../../libhakeidecode/index.js';
+import { OUTPUT_BINARY, OUTPUT_PROTOCOL } from '../../libhakeidecode/index.js';
 import type { OutputEvent } from '../../libhakeidecode/index.js';
-import { SPIDecoder } from './index.js';
+import { spiPlugin } from './index.js';
 import type { SPIFrame, SPIProtocolPacket } from './index.js';
 import { EventRuntime } from '../event-runtime.js';
 import type { DecodeRuntime, DecodeRuntimeContext } from '../definition.js';
 
 export function createSPIRuntime(context: DecodeRuntimeContext): DecodeRuntime {
-  return new EventRuntime<SPIFrame>(generatorPlugin(SPIDecoder), context, {
+  return new EventRuntime<SPIFrame>(spiPlugin, context, {
     event(event: OutputEvent, runtime): void {
       if (event.type === OUTPUT_PROTOCOL) {
         const packet = event.data as SPIProtocolPacket;

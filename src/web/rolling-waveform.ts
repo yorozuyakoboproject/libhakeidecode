@@ -78,7 +78,7 @@ export class RollingWaveformReader {
       channels: this.channels,
       rate: this.rate,
     } satisfies WaveformRequest);
-    this.timer = setTimeout(() => this.abort(new DOMException('Waveform view timed out', 'AbortError')), 250);
+    this.timer = setTimeout(() => this.abort(new DOMException('Waveform view timed out', 'AbortError')), 1500);
   }
   private abort(error: Error): void {
     if (this.active) this.diagnostics.aborted++;

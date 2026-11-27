@@ -71,6 +71,12 @@ export class DecodeGraphRuntime {
     },
   ) {
     if (!nodes.length) throw new Error('Protocol graph requires at least one instance');
+    const hasChildren = new Set<string>();
+    for (const spec of nodes) {
+      for (const binding of Object.values(spec.inputs ?? {})) {
+        if (binding.instanceId) hasChildren.add(binding.instanceId);
+      }
+    }
     for (const spec of nodes) {
       if (!spec.id || this.nodes.has(spec.id)) throw new Error('Protocol graph contains duplicate instance IDs');
       const definition = decoderWorkerDefinition(spec.decoder);
@@ -109,7 +115,7 @@ export class DecodeGraphRuntime {
             return counts;
           },
         },
-        publish: (event) => this.dispatch(spec.id, event),
+        ...(hasChildren.has(spec.id) ? { publish: (event: OutputEvent) => this.dispatch(spec.id, event) } : {}),
       });
       this.nodes.set(spec.id, { spec, runtime, inputs });
     }

@@ -962,7 +962,7 @@ function answerEdges(s: ViewSession, request: Extract<ViewRequest, { type: 'edge
 async function consume(s: ViewSession): Promise<void> {
   try {
     while (true) {
-      const part = await s.reader.next(1_048_576);
+      const part = await s.reader.next(262_144);
       if (!part) {
         s.state = 'complete';
         break;

@@ -23,6 +23,7 @@ const ceilDiv = (value: bigint, divisor: bigint): bigint =>
 
 export class RollingSampleStore implements SampleStore {
   readonly channelCount: number;
+  readonly sampleBytes: 1 | 2 | 4;
   private readonly ring: SampleRing;
   private waveform?: RollingWaveformReader;
   private timeline = 0n;
@@ -33,7 +34,8 @@ export class RollingSampleStore implements SampleStore {
     private readonly budget: MemoryBudget,
   ) {
     this.channelCount = channelWidthForProbes(Math.max(1, logicChannelCount));
-    this.ring = new SampleRing(Number(capacity), true, budget);
+    this.sampleBytes = logicChannelCount <= 8 ? 1 : logicChannelCount <= 16 ? 2 : 4;
+    this.ring = new SampleRing(Number(capacity), true, budget, this.sampleBytes);
   }
   get length(): bigint {
     return minSample(this.capacity, this.timeline);
@@ -113,13 +115,11 @@ export class RollingSampleStore implements SampleStore {
     return this.ring.channelEdges(channel, Number(start), Number(end), limit);
   }
   packRange(start: bigint, end: bigint, channels: number): Uint8Array {
-    const width = Math.ceil(channels / 8),
-      output = new Uint8Array(Number(end - start) * width);
-    for (let i = 0; i < Number(end - start); i++) {
-      const value = this.ring.at(Number(start) + i);
-      for (let byte = 0; byte < width; byte++) output[i * width + byte] = value >>> (byte * 8);
-    }
-    return output;
+    const width = Math.ceil(channels / 8);
+    return this.ring.copyPacked(Number(start), Number(end), width);
+  }
+  copyPacked(start: bigint, end: bigint, sampleBytes = this.sampleBytes): Uint8Array {
+    return this.ring.copyPacked(Number(start), Number(end), sampleBytes);
   }
   query(channel: number, startInput: SampleInput, endInput: SampleInput, bins: number): ColumnView {
     const start = maxSample(0n, sampleIndex(startInput)),

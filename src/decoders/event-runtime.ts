@@ -68,7 +68,7 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   }
   addFrame(frame: F): void {
     if (this.retained && frame.es <= this.retainedStart) return;
-    if (!this.retained && this.pagedMode === 'always' && this.framesCount >= MAX_RETAINED_FRAMES) {
+    if (this.pagedMode === 'always' && this.framesCount >= MAX_RETAINED_FRAMES) {
       this.truncated = true;
       return;
     }
@@ -77,11 +77,7 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
   }
   addBinary(key: string, bytes: Uint8Array): void {
     if (this.retained && this.eventEnd <= this.retainedStart) return;
-    if (
-      !this.retained &&
-      this.pagedMode === 'always' &&
-      this.binaries.reservedBytes + bytes.byteLength > MAX_RETAINED_BINARY_BYTES
-    ) {
+    if (this.pagedMode === 'always' && this.binaries.reservedBytes + bytes.byteLength > MAX_RETAINED_BINARY_BYTES) {
       this.binaryTruncated = true;
       return;
     }
@@ -91,7 +87,7 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     if (Number.isFinite(value)) this.values.set(key, value);
   }
   async push(window: SignalWindow, progress: number): Promise<void> {
-    if (!this.retained && this.pagedMode === 'always' && this.truncated && !this.publish) return;
+    if (this.pagedMode === 'always' && this.truncated && !this.publish) return;
     await this.engine.push(window);
     await this.flush(progress);
   }
@@ -104,6 +100,8 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     await this.host.postBatch({ type: 'batch', progress, annotations, frames });
   }
   reset(): void {
+    this.annotations = [];
+    this.frames = [];
     this.handler.reset?.(this);
     this.engine.reset();
     this.truncated = false;
@@ -116,6 +114,8 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     if (!counts) throw new Error('Rolling result storage is unavailable');
     this.framesCount = counts.frames;
     this.annotationsCount = counts.annotations;
+    if (this.annotationsCount < MAX_RETAINED_ANNOTATIONS && this.framesCount < MAX_RETAINED_FRAMES)
+      this.truncated = false;
     this.binaries.discardBefore(startSample);
   }
   async finish(progress: number): Promise<DecodeRuntimeResult> {
@@ -132,7 +132,7 @@ export class EventRuntime<F extends DecodeFrame = DecodeFrame> implements Decode
     };
   }
   private consume(events: readonly OutputEvent[]): void {
-    const bounded = !this.retained && this.pagedMode === 'always';
+    const bounded = this.pagedMode === 'always';
     for (const event of events) {
       this.publish?.(event);
       this.eventEnd = event.es;

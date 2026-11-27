@@ -1,14 +1,28 @@
 import type { ColumnView } from './data/types.js';
 import type { MemoryBudget } from './memory.js';
-const PAGE_SAMPLES = 65536;
+const SMALL_PAGE_SAMPLES = 65536;
+const LARGE_PAGE_SAMPLES = 262144;
+const LARGE_RING_THRESHOLD = 4_194_304;
 const GROUP_SAMPLES = 256;
 const FANOUT = 16;
-type Values = Uint32Array | Float32Array;
+const MAX_VIEW_COW_BYTES = 64 * 1024 * 1024;
+const MAX_COW_POOL_PAGES = 16;
+type DigitalValues = Uint8Array | Uint16Array | Uint32Array;
+type Values = DigitalValues | Float32Array;
+type SummaryArray = Uint32Array | Float64Array;
 type Level = { step: number; count: number; offset: number };
-type Page = { values: Values; summary: Float64Array; levels: Level[]; version: number };
+type Page = { values: Values; words?: Uint32Array | null; summary: SummaryArray; levels: Level[]; version: number };
 export type IndexedPage = Page & { index: number };
-export type RingSnapshot = { capacity: number; digital: boolean; cursor: number; length: number; pages: IndexedPage[] };
-function summaryLevels(size: number): Level[] {
+export type RingSnapshot = {
+  capacity: number;
+  digital: boolean;
+  bytesPerSample: 1 | 2 | 4;
+  pageSamples: number;
+  cursor: number;
+  length: number;
+  pages: IndexedPage[];
+};
+function summaryLevels(size: number, stride: number): Level[] {
   const levels: Level[] = [];
   let step = GROUP_SAMPLES,
     count = Math.ceil(size / step),
@@ -16,14 +30,19 @@ function summaryLevels(size: number): Level[] {
   while (true) {
     levels.push({ step, count, offset });
     if (count === 1) return levels;
-    offset += count * 3;
+    offset += count * stride;
     step *= FANOUT;
     count = Math.ceil(count / FANOUT);
   }
 }
 export class SampleRing {
   readonly viewMetrics = { copiedBytes: 0, peakHeldBytes: 0 };
+  readonly pageSamples: number;
+  readonly bytesPerSample: 1 | 2 | 4;
+  private readonly summaryStride: 2 | 3;
   private readonly pages = new Map<number, Page>();
+  private readonly cowPool: Page[] = [];
+  private allocatedBytes = 0;
   private cursor = 0;
   private columns?: {
     revision: number;
@@ -44,27 +63,35 @@ export class SampleRing {
     readonly capacity: number,
     private readonly digital: boolean,
     private readonly budget?: MemoryBudget,
+    bytesPerSample: 1 | 2 | 4 = 4,
+    pageSamples?: number,
   ) {
     if (!Number.isSafeInteger(capacity) || capacity < 1) throw new RangeError('Invalid rolling window capacity');
+    this.bytesPerSample = digital ? bytesPerSample : 4;
+    this.summaryStride = digital ? 2 : 3;
+    this.pageSamples =
+      pageSamples ?? (digital && capacity > LARGE_RING_THRESHOLD ? LARGE_PAGE_SAMPLES : SMALL_PAGE_SAMPLES);
   }
   get offset(): bigint {
     return this.total - BigInt(this.length);
   }
   append(values: ArrayLike<number>): void {
     const count = values.length;
+    const pageSamples = this.pageSamples;
+    const stride = this.summaryStride;
     let offset = Math.max(0, count - this.capacity);
     this.cursor = (this.cursor + offset) % this.capacity;
     while (offset < count) {
-      const index = Math.floor(this.cursor / PAGE_SAMPLES),
-        local = this.cursor % PAGE_SAMPLES;
+      const index = Math.floor(this.cursor / pageSamples),
+        local = this.cursor % pageSamples;
       let page = this.pages.get(index);
       if (!page) {
-        page = this.allocate(Math.min(PAGE_SAMPLES, this.capacity - index * PAGE_SAMPLES));
+        page = this.allocate(Math.min(pageSamples, this.capacity - index * pageSamples));
         this.pages.set(index, page);
         this.changed.set(index, page);
       } else if (this.view && page.version !== this.view.id) {
         const bytes = page.values.byteLength + page.summary.byteLength;
-        if (this.view.bytes + bytes > 32 * 1024 * 1024) this.view.cancel();
+        if (this.view.bytes + bytes > MAX_VIEW_COW_BYTES) this.view.cancel();
         if (this.view) {
           const original = page;
           page = this.allocate(original.values.length);
@@ -85,38 +112,93 @@ export class SampleRing {
       const firstGroup = Math.floor(local / GROUP_SAMPLES),
         afterGroup = Math.ceil((local + take) / GROUP_SAMPLES);
       if (this.digital) {
-        const values = page.values as Uint32Array;
-        for (let group = firstGroup; group < afterGroup; group++) {
-          let low = -1,
-            high = 0;
-          const end = Math.min(values.length, (group + 1) * GROUP_SAMPLES);
-          for (let i = group * GROUP_SAMPLES; i < end; i++) {
-            const value = values[i]!;
-            low &= value;
-            high |= value;
+        const pageVals = page.values as DigitalValues;
+        const summary = page.summary as Uint32Array;
+        if (this.bytesPerSample === 1) {
+          const bytes = pageVals as Uint8Array;
+          const words = (page.words ??= new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2));
+          for (let group = firstGroup; group < afterGroup; group++) {
+            const start = group * GROUP_SAMPLES;
+            const end = Math.min(bytes.length, start + GROUP_SAMPLES);
+            let low32 = -1,
+              high32 = 0;
+            const wordStart = start >>> 2;
+            const wordEnd = end >>> 2;
+            for (let w = wordStart; w < wordEnd; w++) {
+              const v = words[w]!;
+              low32 &= v;
+              high32 |= v;
+            }
+            let low = low32 & (low32 >>> 8) & (low32 >>> 16) & (low32 >>> 24) & 0xff;
+            let high = (high32 | (high32 >>> 8) | (high32 >>> 16) | (high32 >>> 24)) & 0xff;
+            for (let i = wordEnd << 2; i < end; i++) {
+              const value = bytes[i]!;
+              low &= value;
+              high |= value;
+            }
+            const summaryOffset = group * 2;
+            summary[summaryOffset] = low >>> 0;
+            summary[summaryOffset + 1] = high >>> 0;
           }
-          const summaryOffset = group * 3;
-          page.summary[summaryOffset] = low >>> 0;
-          page.summary[summaryOffset + 1] = high >>> 0;
-          page.summary[summaryOffset + 2] = 0;
+        } else if (this.bytesPerSample === 2) {
+          const shorts = pageVals as Uint16Array;
+          const words = (page.words ??= new Uint32Array(shorts.buffer, shorts.byteOffset, shorts.length >>> 1));
+          for (let group = firstGroup; group < afterGroup; group++) {
+            const start = group * GROUP_SAMPLES;
+            const end = Math.min(shorts.length, start + GROUP_SAMPLES);
+            let low32 = -1,
+              high32 = 0;
+            const wordStart = start >>> 1;
+            const wordEnd = end >>> 1;
+            for (let w = wordStart; w < wordEnd; w++) {
+              const v = words[w]!;
+              low32 &= v;
+              high32 |= v;
+            }
+            let low = low32 & (low32 >>> 16) & 0xffff;
+            let high = (high32 | (high32 >>> 16)) & 0xffff;
+            for (let i = wordEnd << 1; i < end; i++) {
+              const value = shorts[i]!;
+              low &= value;
+              high |= value;
+            }
+            const summaryOffset = group * 2;
+            summary[summaryOffset] = low >>> 0;
+            summary[summaryOffset + 1] = high >>> 0;
+          }
+        } else {
+          for (let group = firstGroup; group < afterGroup; group++) {
+            let low = -1,
+              high = 0;
+            const end = Math.min(pageVals.length, (group + 1) * GROUP_SAMPLES);
+            for (let i = group * GROUP_SAMPLES; i < end; i++) {
+              const value = pageVals[i]!;
+              low &= value;
+              high |= value;
+            }
+            const summaryOffset = group * 2;
+            summary[summaryOffset] = low >>> 0;
+            summary[summaryOffset + 1] = high >>> 0;
+          }
         }
       } else {
-        const values = page.values as Float32Array;
+        const pageVals = page.values as Float32Array;
+        const summary = page.summary as Float64Array;
         for (let group = firstGroup; group < afterGroup; group++) {
           let low = Infinity,
             high = -Infinity,
             sum = 0;
-          const end = Math.min(values.length, (group + 1) * GROUP_SAMPLES);
+          const end = Math.min(pageVals.length, (group + 1) * GROUP_SAMPLES);
           for (let i = group * GROUP_SAMPLES; i < end; i++) {
-            const value = values[i]!;
+            const value = pageVals[i]!;
             low = Math.min(low, value);
             high = Math.max(high, value);
             sum += value;
           }
           const summaryOffset = group * 3;
-          page.summary[summaryOffset] = low;
-          page.summary[summaryOffset + 1] = high;
-          page.summary[summaryOffset + 2] = sum;
+          summary[summaryOffset] = low;
+          summary[summaryOffset + 1] = high;
+          summary[summaryOffset + 2] = sum;
         }
       }
       let first = Math.floor(local / GROUP_SAMPLES),
@@ -131,20 +213,20 @@ export class SampleRing {
             high = this.digital ? 0 : -Infinity,
             sum = 0;
           for (let child = group * FANOUT; child < Math.min(previous.count, (group + 1) * FANOUT); child++) {
-            const offset = previous.offset + child * 3;
+            const childOffset = previous.offset + child * stride;
             if (this.digital) {
-              low &= page.summary[offset]!;
-              high |= page.summary[offset + 1]!;
+              low &= page.summary[childOffset]!;
+              high |= page.summary[childOffset + 1]!;
             } else {
-              low = Math.min(low, page.summary[offset]!);
-              high = Math.max(high, page.summary[offset + 1]!);
-              sum += page.summary[offset + 2]!;
+              low = Math.min(low, page.summary[childOffset]!);
+              high = Math.max(high, page.summary[childOffset + 1]!);
+              sum += page.summary[childOffset + 2]!;
             }
           }
-          const offset = current.offset + group * 3;
-          page.summary[offset] = this.digital ? low >>> 0 : low;
-          page.summary[offset + 1] = this.digital ? high >>> 0 : high;
-          page.summary[offset + 2] = sum;
+          const targetOffset = current.offset + group * stride;
+          page.summary[targetOffset] = this.digital ? low >>> 0 : low;
+          page.summary[targetOffset + 1] = this.digital ? high >>> 0 : high;
+          if (!this.digital) page.summary[targetOffset + 2] = sum;
         }
       }
       this.cursor = (this.cursor + take) % this.capacity;
@@ -162,17 +244,19 @@ export class SampleRing {
     if (!Number.isSafeInteger(index) || index < 0 || index >= this.length)
       throw new RangeError('Sample outside rolling window');
     const position = this.position(index);
-    return this.pages.get(Math.floor(position / PAGE_SAMPLES))!.values[position % PAGE_SAMPLES]!;
+    return this.pages.get(Math.floor(position / this.pageSamples))!.values[position % this.pageSamples]!;
   }
   aggregate(start: number, end: number): [number, number, number] {
     if (start < 0 || end > this.length || start >= end) throw new RangeError('Invalid rolling sample range');
+    const pageSamples = this.pageSamples;
+    const stride = this.summaryStride;
     let low = this.digital ? 0xffffffff : Infinity,
       high = this.digital ? 0 : -Infinity,
       sum = 0;
     for (let index = start; index < end;) {
       const position = this.position(index),
-        page = this.pages.get(Math.floor(position / PAGE_SAMPLES))!,
-        local = position % PAGE_SAMPLES;
+        page = this.pages.get(Math.floor(position / pageSamples))!,
+        local = position % pageSamples;
       let a = this.digital ? 0xffffffff : Infinity,
         b = this.digital ? 0 : -Infinity,
         total = 0,
@@ -181,10 +265,10 @@ export class SampleRing {
         const summary = page.levels[level]!,
           count = Math.min(summary.step, page.values.length - local);
         if (local % summary.step === 0 && end - index >= count) {
-          const offset = summary.offset + Math.floor(local / summary.step) * 3;
+          const offset = summary.offset + Math.floor(local / summary.step) * stride;
           a = page.summary[offset]!;
           b = page.summary[offset + 1]!;
-          total = page.summary[offset + 2]!;
+          total = this.digital ? 0 : page.summary[offset + 2]!;
           take = count;
           break;
         }
@@ -260,23 +344,66 @@ export class SampleRing {
     return { channel, startSample: BigInt(start), endSample: BigInt(end), bins, low, high, edge, packed };
   }
   copy(start = 0, end = this.length): Values {
-    const output = this.digital ? new Uint32Array(end - start) : new Float32Array(end - start);
+    const count = end - start;
+    const output: Values = !this.digital
+      ? new Float32Array(count)
+      : this.bytesPerSample === 1
+        ? new Uint8Array(count)
+        : this.bytesPerSample === 2
+          ? new Uint16Array(count)
+          : new Uint32Array(count);
+    const pageSamples = this.pageSamples;
     for (let index = start; index < end;) {
       const position = this.position(index),
-        page = this.pages.get(Math.floor(position / PAGE_SAMPLES))!,
-        local = position % PAGE_SAMPLES,
+        page = this.pages.get(Math.floor(position / pageSamples))!,
+        local = position % pageSamples,
         take = Math.min(end - index, page.values.length - local);
       output.set(page.values.subarray(local, local + take), index - start);
       index += take;
     }
     return output;
   }
-  channelRange(channel: number, start: number, end: number): Uint8Array {
-    const output = new Uint8Array(end - start);
+  copyPacked(start: number, end: number, sampleBytes: number): Uint8Array {
+    const count = end - start;
+    const output = new Uint8Array(count * sampleBytes);
+    const pageSamples = this.pageSamples;
+    if (this.digital && sampleBytes === this.bytesPerSample) {
+      for (let index = start; index < end;) {
+        const position = this.position(index),
+          page = this.pages.get(Math.floor(position / pageSamples))!,
+          local = position % pageSamples,
+          take = Math.min(end - index, page.values.length - local);
+        const bytes = new Uint8Array(
+          page.values.buffer,
+          page.values.byteOffset + local * sampleBytes,
+          take * sampleBytes,
+        );
+        output.set(bytes, (index - start) * sampleBytes);
+        index += take;
+      }
+      return output;
+    }
     for (let index = start; index < end;) {
       const position = this.position(index),
-        page = this.pages.get(Math.floor(position / PAGE_SAMPLES))!,
-        local = position % PAGE_SAMPLES,
+        page = this.pages.get(Math.floor(position / pageSamples))!,
+        local = position % pageSamples,
+        take = Math.min(end - index, page.values.length - local);
+      let dst = (index - start) * sampleBytes;
+      for (let i = 0; i < take; i++) {
+        const value = page.values[local + i]!;
+        for (let b = 0; b < sampleBytes; b++) output[dst++] = (value >>> (b * 8)) & 0xff;
+      }
+      index += take;
+    }
+    return output;
+  }
+  channelRange(channel: number, start: number, end: number): Uint8Array {
+    const output = new Uint8Array(end - start);
+    const pageSamples = this.pageSamples;
+    for (let index = start; index < end;) {
+      const position = this.position(index),
+        page = this.pages.get(Math.floor(position / pageSamples))!,
+        local = position % pageSamples,
         take = Math.min(end - index, page.values.length - local);
       for (let i = 0; i < take; i++) output[index - start + i] = (page.values[local + i]! >>> channel) & 1;
       index += take;
@@ -285,17 +412,19 @@ export class SampleRing {
   }
   channelEdges(channel: number, start: number, end: number, limit: number): bigint[] | null {
     const edges: bigint[] = [],
-      mask = 1 << channel;
+      mask = 1 << channel,
+      pageSamples = this.pageSamples,
+      stride = this.summaryStride;
     let previous = this.at(start > 0 ? start - 1 : start) & mask;
     for (let index = start; index < end;) {
       const position = this.position(index),
-        page = this.pages.get(Math.floor(position / PAGE_SAMPLES))!,
-        local = position % PAGE_SAMPLES;
+        page = this.pages.get(Math.floor(position / pageSamples))!,
+        local = position % pageSamples;
       let take = Math.min(end - index, page.values.length - local, GROUP_SAMPLES - (local % GROUP_SAMPLES)),
         uniform: number | undefined;
       for (let level = page.levels.length - 1; level >= 0; level--) {
         const summary = page.levels[level]!,
-          offset = summary.offset + Math.floor(local / summary.step) * 3;
+          offset = summary.offset + Math.floor(local / summary.step) * stride;
         const low = page.summary[offset]! & mask,
           high = page.summary[offset + 1]! & mask;
         if (low === high) {
@@ -324,15 +453,31 @@ export class SampleRing {
   }
   private allocate(size: number): Page {
     if (!this.budget) throw new Error('Read-only sample ring');
+    if (size === this.pageSamples && this.cowPool.length) {
+      const reused = this.cowPool.pop()!;
+      reused.version = this.view?.id ?? 0;
+      return reused;
+    }
     const allocate = (bytes: number, label: string) =>
       this.digital ? this.budget!.allocateShared(bytes, label) : this.budget!.allocate(bytes, label);
-    const values = allocate(size * 4, 'rolling samples'),
-      levels = summaryLevels(size);
+    const values = allocate(size * this.bytesPerSample, 'rolling samples'),
+      levels = summaryLevels(size, this.summaryStride);
     try {
       const last = levels.at(-1)!;
-      const summary = new Float64Array(allocate((last.offset + last.count * 3) * 8, 'rolling summary'));
+      const summaryElements = last.offset + last.count * this.summaryStride;
+      const summary = this.digital
+        ? new Uint32Array(allocate(summaryElements * 4, 'rolling summary'))
+        : new Float64Array(allocate(summaryElements * 8, 'rolling summary'));
+      const typedValues: Values = !this.digital
+        ? new Float32Array(values)
+        : this.bytesPerSample === 1
+          ? new Uint8Array(values)
+          : this.bytesPerSample === 2
+            ? new Uint16Array(values)
+            : new Uint32Array(values);
+      this.allocatedBytes += typedValues.byteLength + summary.byteLength;
       return {
-        values: this.digital ? new Uint32Array(values) : new Float32Array(values),
+        values: typedValues,
         summary,
         levels,
         version: this.view?.id ?? 0,
@@ -342,8 +487,17 @@ export class SampleRing {
       throw error;
     }
   }
+  private releasePage(page: Page, pool = false): void {
+    if (pool && this.digital && page.values.length === this.pageSamples && this.cowPool.length < MAX_COW_POOL_PAGES) {
+      this.cowPool.push(page);
+      return;
+    }
+    this.allocatedBytes -= page.values.byteLength + page.summary.byteLength;
+    this.budget?.release(page.values.buffer);
+    this.budget?.release(page.summary.buffer);
+  }
   private changes(): IndexedPage[] {
-    const pages = [...this.changed].map(([index, page]) => ({ index, ...page }));
+    const pages = [...this.changed].map(([index, { words: _words, ...page }]) => ({ index, ...page }));
     this.changed.clear();
     return pages;
   }
@@ -353,16 +507,15 @@ export class SampleRing {
     return {
       capacity: this.capacity,
       digital: this.digital,
+      bytesPerSample: this.bytesPerSample,
+      pageSamples: this.pageSamples,
       cursor: this.cursor,
       length: this.length,
       pages: this.changes(),
     };
   }
   unpin(): IndexedPage[] {
-    for (const page of this.view?.held ?? []) {
-      this.budget?.release(page.values.buffer);
-      this.budget?.release(page.summary.buffer);
-    }
+    for (const page of this.view?.held ?? []) this.releasePage(page, true);
     this.view = undefined;
     return this.changes();
   }
@@ -379,18 +532,16 @@ export class SampleRing {
     for (const [index, page] of this.pages) this.changed.set(index, page);
   }
   memory(): number {
-    let bytes = 0;
-    for (const page of this.pages.values()) bytes += page.values.byteLength + page.summary.byteLength;
-    return bytes;
+    return this.allocatedBytes;
   }
   dispose(): void {
-    this.unpin();
-    for (const page of this.pages.values()) {
-      this.budget?.release(page.values.buffer);
-      this.budget?.release(page.summary.buffer);
-    }
+    for (const page of this.view?.held ?? []) this.releasePage(page, false);
+    this.view = undefined;
+    for (const page of this.cowPool.splice(0)) this.releasePage(page, false);
+    for (const page of this.pages.values()) this.releasePage(page, false);
     this.changed.clear();
     this.pages.clear();
+    this.allocatedBytes = 0;
     this.length = this.cursor = 0;
     this.total = 0n;
   }

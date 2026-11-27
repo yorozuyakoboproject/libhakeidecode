@@ -205,11 +205,7 @@ export class KernelRuntime {
   }
 
   async start(): Promise<void> {
-    const [packages, states, providers] = await Promise.all([
-      this.store.listPackages(),
-      this.store.listStates(),
-      this.store.getProviders(),
-    ]);
+    const { packages, states, providers } = await this.store.loadBootState();
     for (const pkg of packages) this.installed.set(pkg.id, pkg);
     for (const state of states) this.enabledOverrides.set(state.id, state.enabled);
     this.preferredProviders = providers;
@@ -229,6 +225,53 @@ export class KernelRuntime {
     this.notify();
   }
 
+  private activateBuiltinComponentSync(candidate: Candidate): boolean {
+    const manifest = candidate.manifest;
+    if (candidate.installed || !candidate.builtin || (manifest.kind !== 'decoder' && manifest.kind !== 'driver'))
+      return false;
+    const loaded = candidate.builtin.load();
+    if (loaded instanceof Promise) return false;
+    const mod = loaded as PluginModule;
+    if (typeof mod.setup === 'function') return false;
+    const registry = this.services.get('componentRegistry')?.value as ComponentRegistryHandle | undefined;
+    if (!registry) return false;
+    const injected: Record<string, unknown> = { componentRegistry: registry };
+    const cleanups: Array<() => void | Promise<void>> = [];
+    const ctx: PluginContext = {
+      manifest,
+      services: Object.freeze(injected),
+      data: this.store.pluginData(candidate.id),
+      assetUrl: () => {
+        throw new Error(`Plugin ${candidate.id} has no package assets`);
+      },
+      onCleanup: (fn) => {
+        cleanups.push(fn);
+      },
+    };
+    try {
+      if (manifest.kind === 'decoder' && isDecoderComponent(mod.component)) {
+        cleanups.push(registry.registerDecoder(normalizeComponentDefinition('decoder', mod.component)));
+      } else if (manifest.kind === 'driver' && isDriverComponent(mod.component)) {
+        cleanups.push(registry.registerDriver(normalizeComponentDefinition('driver', mod.component)));
+      } else {
+        return false;
+      }
+      this.active.set(candidate.id, {
+        id: candidate.id,
+        manifest,
+        module: mod,
+        ctx,
+        cleanups,
+        providedServices: [],
+      });
+      this.activeOrder.push(candidate.id);
+      this.errors.delete(candidate.id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async reconcileAll(): Promise<void> {
     const all = this.candidates();
     const enabledManifests = [...all.values()].filter((item) => this.isEnabled(item.id)).map((item) => item.manifest);
@@ -241,6 +284,7 @@ export class KernelRuntime {
       if (this.active.has(id)) continue;
       const candidate = all.get(id);
       if (!candidate) continue;
+      if (this.activateBuiltinComponentSync(candidate)) continue;
       await this.activateCandidate(candidate, plan.providers);
     }
   }

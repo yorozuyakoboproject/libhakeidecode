@@ -123,13 +123,32 @@ export async function generateComponents() {
       resolve(output, group.directory + '.ts'),
       `import type { ${group.definition} } from '../${group.directory}/definition.js';\n${imports}\n\nexport type ${group.kind === 'decoder' ? 'Decoder' : 'Driver'}MessageKey = ${keys};\nexport const ${group.kind}Definitions: readonly ${group.definition}[] = [${values}];\n`,
     );
-    const workerImports = names
-      .map((name, index) => `import { worker as worker${index} } from '../${group.directory}/${name}/worker.js';`)
+    const workerLoaders = names
+      .map(
+        (name) =>
+          `  ${JSON.stringify(name)}: async () => (await import('../${group.directory}/${name}/worker.js')).worker,`,
+      )
       .join('\n');
-    const workers = names.map((_, index) => `worker${index}`).join(', ');
+    const workerCap = group.kind === 'decoder' ? 'Decoder' : 'Driver';
     await writeGenerated(
       resolve(output, group.kind + '-workers.ts'),
-      `import type { ${group.workerDefinition} } from '../${group.directory}/definition.js';\n${workerImports}\n\nexport const ${group.kind}Workers: readonly ${group.workerDefinition}[] = [${workers}];\n`,
+      `import type { ${group.workerDefinition} } from '../${group.directory}/definition.js';
+
+const loaders: Record<string, () => Promise<${group.workerDefinition}>> = {
+${workerLoaders}
+};
+
+export const builtin${workerCap}WorkerIds = Object.freeze(${JSON.stringify(names)}) as readonly string[];
+
+export function hasBuiltin${workerCap}Worker(id: string): boolean {
+  return Object.hasOwn(loaders, id);
+}
+
+export async function loadBuiltin${workerCap}Worker(id: string): Promise<${group.workerDefinition} | undefined> {
+  const load = Object.hasOwn(loaders, id) ? loaders[id] : undefined;
+  return load ? load() : undefined;
+}
+`,
     );
   }
   const encoderNames = encoders.sort();

@@ -115,7 +115,7 @@ export class StandardRuntime implements DecodeRuntime {
     this.context.publish?.(event);
     this.updateRange(event.ss, event.es);
     if (this.retained && event.es <= this.retainedStart) return;
-    const bounded = !this.retained && this.context.paged === 'always';
+    const bounded = this.context.paged === 'always';
     if (event.type === OUTPUT_ANN) {
       if (bounded && this.annotationsCount >= MAX_RETAINED_ANNOTATIONS) {
         this.truncated = true;
@@ -160,7 +160,7 @@ export class StandardRuntime implements DecodeRuntime {
 
   async push(window: SignalWindow, progress: number): Promise<void> {
     if (this.mode !== 'logic' || !this.runner) throw new Error('Decoder node does not accept logic input');
-    if (!this.retained && this.context.paged === 'always' && this.truncated && !this.context.publish) return;
+    if (this.context.paged === 'always' && this.truncated && !this.context.publish) return;
     this.updateRange(window.startSample, window.endSample);
     this.runner.pushWindow(window);
     await this.flush(progress);
@@ -200,17 +200,17 @@ export class StandardRuntime implements DecodeRuntime {
     }
     this.annotations = [];
     this.frames = [];
-    this.binaries = new BinaryStore();
-    this.values.clear();
-    this.annotationsCount = 0;
-    this.framesCount = 0;
-    this.retained = false;
-    this.retainedStart = 0n;
+    if (!this.retained) {
+      this.binaries = new BinaryStore();
+      this.values.clear();
+      this.annotationsCount = 0;
+      this.framesCount = 0;
+      this.rangeStart = null;
+      this.rangeEnd = null;
+    }
     this.finished = false;
     this.truncated = false;
     this.binaryTruncated = false;
-    this.rangeStart = null;
-    this.rangeEnd = null;
   }
 
   retain(startSample: bigint): void {
@@ -220,6 +220,8 @@ export class StandardRuntime implements DecodeRuntime {
     if (!counts) throw new Error('Rolling result storage is unavailable');
     this.framesCount = counts.frames;
     this.annotationsCount = counts.annotations;
+    if (this.annotationsCount < MAX_RETAINED_ANNOTATIONS && this.framesCount < MAX_RETAINED_FRAMES)
+      this.truncated = false;
     this.binaries.discardBefore(startSample);
   }
 

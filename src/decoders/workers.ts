@@ -1,7 +1,8 @@
-import { decoderWorkers } from '../generated/decoder-workers.js';
+import { hasBuiltinDecoderWorker, loadBuiltinDecoderWorker } from '../generated/decoder-workers.js';
 import type { DecoderWorkerDefinition } from './definition.js';
 
-const builtins = new Map(decoderWorkers.map((definition) => [definition.id, definition]));
+const builtins = new Map<string, DecoderWorkerDefinition>();
+const builtinPending = new Map<string, Promise<DecoderWorkerDefinition | undefined>>();
 const dynamic = new Map<string, DecoderWorkerDefinition>();
 
 export function registerDecoderWorker(definition: DecoderWorkerDefinition): void {
@@ -13,7 +14,26 @@ export function unregisterDecoderWorker(id: string): void {
 }
 
 export function hasDecoderWorker(id: string): boolean {
-  return dynamic.has(id) || builtins.has(id);
+  return dynamic.has(id) || builtins.has(id) || hasBuiltinDecoderWorker(id);
+}
+
+export async function ensureBuiltinDecoderWorker(id: string): Promise<DecoderWorkerDefinition | undefined> {
+  const cached = builtins.get(id);
+  if (cached) return cached;
+  if (!hasBuiltinDecoderWorker(id)) return undefined;
+  let pending = builtinPending.get(id);
+  if (!pending) {
+    pending = loadBuiltinDecoderWorker(id)
+      .then((definition) => {
+        if (definition) builtins.set(id, definition);
+        return definition;
+      })
+      .finally(() => {
+        if (builtinPending.get(id) === pending) builtinPending.delete(id);
+      });
+    builtinPending.set(id, pending);
+  }
+  return pending;
 }
 
 export function decoderWorkerDefinition(id: string): DecoderWorkerDefinition {

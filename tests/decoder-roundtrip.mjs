@@ -40,11 +40,13 @@ async function runProtocol(protocol) {
     import(new URL('generator.js', directory)),
     import(new URL('encoder.js', directory)),
   ]);
-  const [{ DecodeGraphRuntime }, { decoderDefinition }, { createEdgesWindow }] = await Promise.all([
-    import(new URL('dist/src/decoders/graph-runtime.js', root)),
-    import(new URL('dist/src/decoders/index.js', root)),
-    import(new URL('dist/src/libhakeidecode/signal.js', root)),
-  ]);
+  const [{ DecodeGraphRuntime }, { decoderDefinition }, { ensureBuiltinDecoderWorker }, { createEdgesWindow }] =
+    await Promise.all([
+      import(new URL('dist/src/decoders/graph-runtime.js', root)),
+      import(new URL('dist/src/decoders/index.js', root)),
+      import(new URL('dist/src/decoders/workers.js', root)),
+      import(new URL('dist/src/libhakeidecode/signal.js', root)),
+    ]);
   let boundaries = 0,
     longCases = 0;
   for (const inputFormat of ['native', 'edges']) {
@@ -130,6 +132,7 @@ async function runProtocol(protocol) {
           throw new Error('Runtime unexpectedly switched to paged output');
         },
       };
+      await Promise.all(nodes.map((node) => ensureBuiltinDecoderWorker(node.decoder)));
       const graph = new DecodeGraphRuntime(nodes, {
         sampleRate: config.sampleRate,
         paged: 'never',
@@ -337,11 +340,13 @@ async function runBranchRoundtrip(emit) {
     import(new URL('generator.js', directory)),
     import(new URL('encoder.js', directory)),
   ]);
-  const [{ DecodeGraphRuntime }, { decoderDefinition }, { createEdgesWindow }] = await Promise.all([
-    import(new URL('dist/src/decoders/graph-runtime.js', root)),
-    import(new URL('dist/src/decoders/index.js', root)),
-    import(new URL('dist/src/libhakeidecode/signal.js', root)),
-  ]);
+  const [{ DecodeGraphRuntime }, { decoderDefinition }, { ensureBuiltinDecoderWorker }, { createEdgesWindow }] =
+    await Promise.all([
+      import(new URL('dist/src/decoders/graph-runtime.js', root)),
+      import(new URL('dist/src/decoders/index.js', root)),
+      import(new URL('dist/src/decoders/workers.js', root)),
+      import(new URL('dist/src/libhakeidecode/signal.js', root)),
+    ]);
   const testCase = [...cases({ minimumPayloadBits: 0 })].find((item) => item.kind === 'boundary' && item.chain?.length);
   if (!testCase) throw new Error('Branch test requires a downstream boundary case');
   const config = testCase;
@@ -372,6 +377,7 @@ async function runBranchRoundtrip(emit) {
       options: { ...config.options },
       inputs: bindInputs(leafDescriptor, parentId, parentOutputs),
     });
+  await Promise.all(nodes.map((node) => ensureBuiltinDecoderWorker(node.decoder)));
   for (const inputFormat of ['native', 'edges']) {
     const hostFrames = { 'branch-left': 0, 'branch-right': 0 };
     const hostAnnotations = { 'branch-left': 0, 'branch-right': 0 };

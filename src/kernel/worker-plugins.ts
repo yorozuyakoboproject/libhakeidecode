@@ -3,9 +3,9 @@ import { BinaryStore } from '../decoders/binary-store.js';
 import { resultMemory, type DecoderWorkerDefinition } from '../decoders/definition.js';
 import { EventRuntime } from '../decoders/event-runtime.js';
 import { createStandardWorker } from '../decoders/standard-worker.js';
-import { registerDecoderWorker, unregisterDecoderWorker } from '../decoders/workers.js';
+import { ensureBuiltinDecoderWorker, registerDecoderWorker, unregisterDecoderWorker } from '../decoders/workers.js';
 import type { DriverWorkerDefinition } from '../drivers/definition.js';
-import { registerDriverWorker, unregisterDriverWorker } from '../drivers/workers.js';
+import { ensureBuiltinDriverWorker, registerDriverWorker, unregisterDriverWorker } from '../drivers/workers.js';
 import {
   defaultDeviceConfiguration,
   deviceChannelIndices,
@@ -151,6 +151,34 @@ async function loadWorkerPackage(pkg: InstalledPackageRecord): Promise<LoadedWor
 }
 
 async function syncKind(kind: Extract<PluginKind, 'decoder' | 'driver'>, targetId: string): Promise<void> {
+  const directId = `${kind}.${targetId}`;
+  const otherPrefix = kind === 'decoder' ? 'driver.' : 'decoder.';
+  const builtinPromise =
+    kind === 'decoder' ? ensureBuiltinDecoderWorker(targetId) : ensureBuiltinDriverWorker(targetId);
+  const [{ pkg: directPkg, state: directState, packageIds }, builtin] = await Promise.all([
+    store.loadWorkerTarget(directId),
+    builtinPromise,
+  ]);
+  if (directPkg && directPkg.manifest.kind === kind && directPkg.manifest.workerEntry) {
+    if (directState?.enabled === false) {
+      unloadPackage(directPkg.id);
+      throw new Error(`Plugin is disabled: ${directPkg.id}`);
+    }
+    await loadWorkerPackage(directPkg);
+    return;
+  }
+  if (directState?.enabled === false) throw new Error(`Plugin is disabled: ${directId}`);
+
+  const candidateIds = packageIds.filter((pkgId) => pkgId !== directId && !pkgId.startsWith(otherPrefix));
+  if (!candidateIds.length) {
+    const presentIds = new Set(packageIds);
+    for (const [pkgId, loaded] of [...loadedByPackage]) {
+      if (loaded.kind === kind && !presentIds.has(pkgId)) unloadPackage(pkgId);
+    }
+    if (builtin) return;
+    return;
+  }
+
   const [packages, states] = await Promise.all([store.listPackages(), store.listStates()]);
   const enabledMap = new Map(states.map((item) => [item.id, item.enabled]));
   const isEnabled = (id: string): boolean => enabledMap.get(id) !== false;
@@ -162,20 +190,13 @@ async function syncKind(kind: Extract<PluginKind, 'decoder' | 'driver'>, targetI
   }
 
   const kindPackages = packages.filter((pkg) => pkg.manifest.kind === kind && pkg.manifest.workerEntry);
-  const direct = kindPackages.find((pkg) => pkg.id === `${kind}.${targetId}`);
-  if (direct) {
-    if (!isEnabled(direct.id)) throw new Error(`Plugin is disabled: ${direct.id}`);
-    await loadWorkerPackage(direct);
-    return;
-  }
-
   for (const pkg of kindPackages) {
     if (!isEnabled(pkg.id)) continue;
     const loaded = await loadWorkerPackage(pkg);
     if (loaded?.componentId === targetId) return;
   }
 
-  if (!isEnabled(`${kind}.${targetId}`)) throw new Error(`Plugin is disabled: ${kind}.${targetId}`);
+  if (!isEnabled(directId)) throw new Error(`Plugin is disabled: ${directId}`);
 }
 
 export function ensureWorkerDecoder(id: string): Promise<void> {

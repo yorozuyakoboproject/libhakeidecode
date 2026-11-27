@@ -94,23 +94,30 @@ export function protocolTrackHue(baseColor: string, rowIndex: number, classOffse
   return Math.round((h + 24 * rowIndex + 40 * classOffset) % 360);
 }
 
+const trackColorCache = new Map<string, TrackColorStyle>();
+
 export function protocolTrackColor(
   baseColor: string,
   rowIndex: number,
   classOffset: number,
   darkTheme: boolean,
 ): TrackColorStyle {
+  const key = `${baseColor}:${rowIndex}:${classOffset}:${darkTheme ? 1 : 0}`;
+  const cached = trackColorCache.get(key);
+  if (cached) return cached;
   const hue = protocolTrackHue(baseColor, rowIndex, classOffset);
-  if (darkTheme) {
-    return {
-      fill: `hsl(${hue} 62% 38%)`,
-      border: `hsl(${hue} 74% 58%)`,
-      text: '#f8fafc',
-    };
-  }
-  return {
-    fill: `hsl(${hue} 72% 72%)`,
-    border: `hsl(${hue} 58% 40%)`,
-    text: '#0f172a',
-  };
+  const style: TrackColorStyle = darkTheme
+    ? {
+        fill: `hsl(${hue} 62% 38%)`,
+        border: `hsl(${hue} 74% 58%)`,
+        text: '#f8fafc',
+      }
+    : {
+        fill: `hsl(${hue} 72% 72%)`,
+        border: `hsl(${hue} 58% 40%)`,
+        text: '#0f172a',
+      };
+  if (trackColorCache.size >= 1024) trackColorCache.clear();
+  trackColorCache.set(key, style);
+  return style;
 }

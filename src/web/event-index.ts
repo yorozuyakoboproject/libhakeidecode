@@ -3,8 +3,23 @@ import type { Annotation } from './protocol.js';
 import { SampleColumn } from './sample-column.js';
 
 const PAGE_SIZE = 65_536;
+const PENDING_FLUSH_SIZE = 4096;
+const TAIL_SPLICE_LIMIT = 8192;
 function textsCacheKey(texts: readonly string[]): string {
   return texts.length === 1 ? '\u0001' + texts[0]! : JSON.stringify(texts);
+}
+function compareAnnotation(a: Annotation, b: Annotation): number {
+  return compareSamples(a.ss, b.ss) || compareSamples(a.es, b.es);
+}
+function comparePair(ssA: bigint, esA: bigint, ssB: bigint, esB: bigint): number {
+  return compareSamples(ssA, ssB) || compareSamples(esA, esB);
+}
+function annotationBytes(record: Annotation): number {
+  const texts = record.texts;
+  if (texts.length === 1) return 42 + texts[0]!.length * 2;
+  let bytes = 40;
+  for (let i = 0; i < texts.length; i++) bytes += 2 + texts[i]!.length * 2;
+  return bytes;
 }
 type AnnotationPage = {
   ss: SampleColumn;
@@ -30,7 +45,10 @@ export class AnnotationIndex {
   private count = 0;
   private head = 0;
   private pending: Annotation[] = [];
-  private ordered = true;
+  private overflow: Annotation[] = [];
+  private overflowMaxEnd: bigint[] = [];
+  private overflowDirty = false;
+  private overflowBytes = 0;
   private lastSs = -1n;
   private lastEs = -1n;
   private maximumEnd = -1n;
@@ -44,6 +62,7 @@ export class AnnotationIndex {
   get reservedBytes(): number {
     return (
       this.pendingBytes +
+      this.overflowBytes +
       this.textBytes +
       this.pages.reduce(
         (sum, page) =>
@@ -60,7 +79,19 @@ export class AnnotationIndex {
     );
   }
   get length(): number {
-    return this.count - this.head + this.pending.length;
+    return this.count - this.head + this.overflow.length + this.pending.length;
+  }
+
+  sampleAtFraction(fraction: number): bigint | null {
+    this.finalize();
+    const total = this.count - this.head;
+    if (total <= 0) {
+      if (!this.overflow.length) return null;
+      const idx = Math.min(this.overflow.length - 1, Math.max(0, Math.floor(this.overflow.length * fraction)));
+      return this.overflow[idx]!.es;
+    }
+    const idx = this.head + Math.min(total - 1, Math.max(0, Math.floor(total * fraction)));
+    return this.part(idx, 'es');
   }
 
   append(records: Annotation[]): void {
@@ -69,20 +100,20 @@ export class AnnotationIndex {
         typeof input.ss === 'bigint' && typeof input.es === 'bigint'
           ? input
           : { ...input, ss: samplePosition(input.ss), es: samplePosition(input.es) };
-      if (record.ss < this.lastSs || (record.ss === this.lastSs && record.es < this.lastEs)) this.ordered = false;
       this.pending.push(record);
-      this.lastSs = record.ss;
-      this.lastEs = record.es;
-      this.pendingBytes += 40 + record.texts.reduce((bytes, text) => bytes + 2 + text.length * 2, 0);
+      this.pendingBytes += annotationBytes(record);
     }
-    if (this.pending.length >= 1024) this.flushPending();
+    if (this.pending.length >= PENDING_FLUSH_SIZE) this.flushPending();
   }
 
   clear(): void {
     this.pages = [];
     this.count = this.head = 0;
     this.pending = [];
-    this.ordered = true;
+    this.overflow = [];
+    this.overflowMaxEnd = [];
+    this.overflowDirty = false;
+    this.overflowBytes = 0;
     this.lastSs = -1n;
     this.lastEs = -1n;
     this.maximumEnd = -1n;
@@ -95,24 +126,36 @@ export class AnnotationIndex {
 
   discardBefore(start: bigint): void {
     this.finalize();
-    const after = this.lowerBoundEnd(start + 1n);
-    for (let index = this.head; index < after; index++) {
-      const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
-        id = page.textIds[index % PAGE_SIZE]!;
-      if (--this.textUses[id]! === 0) {
-        const texts = this.textPool[id]!,
-          key = textsCacheKey(texts);
-        this.textIds.delete(key);
-        this.textBytes -= key.length * 2 + texts.length * 8 + texts.reduce((bytes, text) => bytes + text.length * 2, 0);
-        this.textPool[id] = undefined;
-        this.freeTextIds.push(id);
+    if (this.head < this.count && this.part(this.head, 'end') <= start) {
+      const after = this.lowerBoundEnd(start + 1n);
+      this.releaseTextRange(this.head, after);
+      this.head = after;
+      while (this.head >= PAGE_SIZE) {
+        this.pages.shift();
+        this.head -= PAGE_SIZE;
+        this.count -= PAGE_SIZE;
+      }
+      if (this.head === this.count) {
+        this.pages = [];
+        this.head = this.count = 0;
+        this.lastSs = -1n;
+        this.lastEs = -1n;
+        this.maximumEnd = -1n;
       }
     }
-    this.head = after;
-    while (this.head >= PAGE_SIZE) {
-      this.pages.shift();
-      this.head -= PAGE_SIZE;
-      this.count -= PAGE_SIZE;
+    if (this.overflow.length && this.overflowMaxEnd[0]! <= start) {
+      const cut = this.overflowLowerBoundEnd(start + 1n);
+      if (cut > 0) {
+        if (cut >= this.overflow.length) {
+          this.overflow = [];
+          this.overflowMaxEnd = [];
+          this.overflowBytes = 0;
+        } else {
+          for (let i = 0; i < cut; i++) this.overflowBytes -= annotationBytes(this.overflow[i]!);
+          this.overflow = this.overflow.slice(cut);
+          this.overflowMaxEnd = this.overflowMaxEnd.slice(cut);
+        }
+      }
     }
   }
   async prepareView(_start: SampleInput, _end: SampleInput, _maxResults: number): Promise<void> {}
@@ -126,10 +169,67 @@ export class AnnotationIndex {
     let low = this.lowerBoundEnd(start),
       after = this.upperBoundStart(end);
     if (after < low) after = low;
-    const count = after - low,
-      stride = count > maxResults ? count / maxResults : 1;
+    const mainCount = after - low;
+
+    if (!this.overflow.length) {
+      return this.sampleMain(low, mainCount, start, maxResults);
+    }
+
+    let oLow = this.overflowLowerBoundEnd(start),
+      oAfter = this.overflowUpperBoundStart(end);
+    if (oAfter < oLow) oAfter = oLow;
+    const overCount = oAfter - oLow;
+
+    if (!overCount) return this.sampleMain(low, mainCount, start, maxResults);
+    if (!mainCount) return this.sampleOverflow(oLow, overCount, start, maxResults);
+
+    const total = mainCount + overCount;
+    if (total <= maxResults) {
+      const out: Annotation[] = [];
+      let mi = low,
+        oi = oLow;
+      let mRec: Annotation | null = null;
+      while (mi < after && oi < oAfter) {
+        mRec ??= this.recordAt(mi);
+        const oRec = this.overflow[oi]!;
+        if (compareAnnotation(mRec, oRec) <= 0) {
+          if (mRec.es >= start) out.push(mRec);
+          mi++;
+          mRec = null;
+        } else {
+          if (oRec.es >= start) out.push(oRec);
+          oi++;
+        }
+      }
+      while (mi < after) {
+        mRec ??= this.recordAt(mi);
+        if (mRec.es >= start) out.push(mRec);
+        mi++;
+        mRec = null;
+      }
+      while (oi < oAfter) {
+        const oRec = this.overflow[oi++]!;
+        if (oRec.es >= start) out.push(oRec);
+      }
+      return out;
+    }
+
+    const overCap = Math.max(1, Math.min(overCount, Math.round((maxResults * overCount) / total)));
+    const mainCap = Math.max(1, maxResults - overCap);
+    const merged = [
+      ...this.sampleMain(low, mainCount, start, mainCap),
+      ...this.sampleOverflow(oLow, overCount, start, overCap),
+    ];
+    merged.sort(compareAnnotation);
+    return merged.length > maxResults ? merged.slice(0, maxResults) : merged;
+  }
+
+  private sampleMain(low: number, count: number, start: bigint, maxResults: number): Annotation[] {
+    if (count <= 0) return [];
+    const stride = count > maxResults ? count / maxResults : 1;
+    const limit = Math.min(count, maxResults);
     const out: Annotation[] = [];
-    for (let bucket = 0; bucket < Math.min(count, maxResults); bucket++) {
+    for (let bucket = 0; bucket < limit; bucket++) {
       const index = low + (count > maxResults ? Math.floor((bucket + 0.5) * stride) : bucket);
       const record = this.recordAt(index);
       if (record.es >= start) out.push(record);
@@ -137,17 +237,127 @@ export class AnnotationIndex {
     return out;
   }
 
+  private sampleOverflow(low: number, count: number, start: bigint, maxResults: number): Annotation[] {
+    if (count <= 0) return [];
+    const stride = count > maxResults ? count / maxResults : 1;
+    const limit = Math.min(count, maxResults);
+    const out: Annotation[] = [];
+    for (let bucket = 0; bucket < limit; bucket++) {
+      const index = low + (count > maxResults ? Math.floor((bucket + 0.5) * stride) : bucket);
+      const record = this.overflow[index]!;
+      if (record.es >= start) out.push(record);
+    }
+    return out;
+  }
+
+  private releaseTextRange(from: number, to: number): void {
+    for (let index = from; index < to; index++) {
+      const page = this.pages[Math.floor(index / PAGE_SIZE)]!,
+        id = page.textIds[index % PAGE_SIZE]!;
+      if (--this.textUses[id]! === 0) {
+        const texts = this.textPool[id]!,
+          key = textsCacheKey(texts);
+        this.textIds.delete(key);
+        this.textBytes -= key.length * 2 + texts.length * 8 + texts.reduce((bytes, text) => bytes + text.length * 2, 0);
+        this.textPool[id] = undefined;
+        this.freeTextIds.push(id);
+      }
+    }
+  }
+
   private flushPending(): void {
     if (!this.pending.length) return;
     const pending = this.pending;
     this.pending = [];
-    for (const record of pending) this.write(record);
     this.pendingBytes = 0;
+
+    let sorted = true;
+    for (let i = 1; i < pending.length; i++) {
+      if (compareAnnotation(pending[i - 1]!, pending[i]!) > 0) {
+        sorted = false;
+        break;
+      }
+    }
+    if (!sorted) pending.sort(compareAnnotation);
+
+    const first = pending[0]!;
+    if (this.count === this.head || comparePair(first.ss, first.es, this.lastSs, this.lastEs) >= 0) {
+      for (let i = 0; i < pending.length; i++) this.write(pending[i]!);
+      return;
+    }
+
+    const floorIndex = Math.max(this.head, this.count - TAIL_SPLICE_LIMIT);
+    const floorSs = this.part(floorIndex, 'ss'),
+      floorEs = this.part(floorIndex, 'es');
+    let nearStart = 0;
+    while (
+      nearStart < pending.length &&
+      comparePair(pending[nearStart]!.ss, pending[nearStart]!.es, floorSs, floorEs) < 0
+    ) {
+      const item = pending[nearStart++]!;
+      this.overflow.push(item);
+      this.overflowBytes += annotationBytes(item);
+      this.overflowDirty = true;
+    }
+    if (nearStart >= pending.length) return;
+
+    const firstNear = pending[nearStart]!;
+    if (comparePair(firstNear.ss, firstNear.es, this.lastSs, this.lastEs) >= 0) {
+      for (let i = nearStart; i < pending.length; i++) this.write(pending[i]!);
+      return;
+    }
+
+    const spliceAt = this.lowerBoundPair(floorIndex, this.count, firstNear.ss, firstNear.es);
+    const tailLen = this.count - spliceAt;
+    const tail: Annotation[] = new Array(tailLen);
+    for (let i = 0; i < tailLen; i++) tail[i] = this.recordAt(spliceAt + i);
+    this.releaseTextRange(spliceAt, this.count);
+    this.count = spliceAt;
+    const neededPages = Math.ceil(this.count / PAGE_SIZE);
+    if (this.pages.length > neededPages) this.pages.length = neededPages;
+    if (this.count > this.head) {
+      this.lastSs = this.part(this.count - 1, 'ss');
+      this.lastEs = this.part(this.count - 1, 'es');
+      this.maximumEnd = this.part(this.count - 1, 'end');
+    } else {
+      this.lastSs = -1n;
+      this.lastEs = -1n;
+      this.maximumEnd = -1n;
+    }
+
+    let ti = 0,
+      pi = nearStart;
+    while (ti < tailLen && pi < pending.length) {
+      const tRec = tail[ti]!,
+        pRec = pending[pi]!;
+      if (compareAnnotation(tRec, pRec) <= 0) {
+        this.write(tRec);
+        ti++;
+      } else {
+        this.write(pRec);
+        pi++;
+      }
+    }
+    while (ti < tailLen) this.write(tail[ti++]!);
+    while (pi < pending.length) this.write(pending[pi++]!);
+  }
+
+  private syncOverflow(): void {
+    if (!this.overflowDirty) return;
+    this.overflow.sort(compareAnnotation);
+    this.overflowMaxEnd = new Array(this.overflow.length);
+    let maxEnd = -1n;
+    for (let i = 0; i < this.overflow.length; i++) {
+      const es = this.overflow[i]!.es;
+      if (es > maxEnd) maxEnd = es;
+      this.overflowMaxEnd[i] = maxEnd;
+    }
+    this.overflowDirty = false;
   }
 
   finalize(): void {
     this.flushPending();
-    if (!this.ordered) this.rebuildOrdered();
+    this.syncOverflow();
   }
 
   private write(record: Annotation): void {
@@ -158,6 +368,8 @@ export class AnnotationIndex {
     if (!page) page = this.pages[pageIndex] = emptyPage(record.ss);
     const end = maxSample(this.maximumEnd, record.es);
     this.maximumEnd = end;
+    this.lastSs = record.ss;
+    this.lastEs = record.es;
     page.ss.set(offset, record.ss);
     page.es.set(offset, record.es);
     page.end.set(offset, end);
@@ -168,6 +380,8 @@ export class AnnotationIndex {
       page.hasValue ??= new Uint8Array(PAGE_SIZE / 8);
       page.values[offset] = record.value;
       page.hasValue[offset >>> 3] |= 1 << (offset & 7);
+    } else if (page.hasValue) {
+      page.hasValue[offset >>> 3] &= ~(1 << (offset & 7));
     }
   }
 
@@ -205,6 +419,17 @@ export class AnnotationIndex {
     return record;
   }
 
+  private lowerBoundPair(lowStart: number, highEnd: number, ss: bigint, es: bigint): number {
+    let low = lowStart,
+      high = highEnd;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (comparePair(this.part(mid, 'ss'), this.part(mid, 'es'), ss, es) < 0) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  }
+
   private lowerBoundEnd(value: bigint): number {
     let low = this.head,
       high = this.count;
@@ -227,23 +452,25 @@ export class AnnotationIndex {
     return low;
   }
 
-  private rebuildOrdered(): void {
-    const records: Annotation[] = [];
-    for (let index = this.head; index < this.count; index++) records.push(this.recordAt(index));
-    records.sort((a, b) => compareSamples(a.ss, b.ss) || compareSamples(a.es, b.es));
-    this.pages = [];
-    this.count = this.head = 0;
-    this.textPool.length = this.textUses.length = this.freeTextIds.length = 0;
-    this.textIds.clear();
-    this.textBytes = 0;
-    this.maximumEnd = -1n;
-    this.ordered = true;
-    this.lastSs = -1n;
-    this.lastEs = -1n;
-    for (const record of records) {
-      this.lastSs = record.ss;
-      this.lastEs = record.es;
-      this.write(record);
+  private overflowLowerBoundEnd(value: bigint): number {
+    let low = 0,
+      high = this.overflowMaxEnd.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (this.overflowMaxEnd[mid]! < value) low = mid + 1;
+      else high = mid;
     }
+    return low;
+  }
+
+  private overflowUpperBoundStart(value: bigint): number {
+    let low = 0,
+      high = this.overflow.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (this.overflow[mid]!.ss <= value) low = mid + 1;
+      else high = mid;
+    }
+    return low;
   }
 }

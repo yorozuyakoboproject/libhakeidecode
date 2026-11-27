@@ -52,6 +52,38 @@ export class PluginPackageStore {
     return this.dbPromise;
   }
 
+  async loadBootState(): Promise<{
+    packages: InstalledPackageRecord[];
+    states: PluginStateRecord[];
+    providers: Record<string, string>;
+  }> {
+    const db = await this.open();
+    if (!db) {
+      const value = this.memData.get(PROVIDERS_KEY) as Record<string, string> | undefined;
+      return {
+        packages: [...this.memPackages.values()],
+        states: [...this.memStates.values()],
+        providers: value && typeof value === 'object' ? { ...value } : {},
+      };
+    }
+    const tx = db.transaction([PACKAGES_STORE, STATES_STORE, DATA_STORE], 'readonly');
+    const [packages, states, providerRow] = await Promise.all([
+      requestPromise(tx.objectStore(PACKAGES_STORE).getAll() as IDBRequest<InstalledPackageRecord[]>),
+      requestPromise(tx.objectStore(STATES_STORE).getAll() as IDBRequest<PluginStateRecord[]>),
+      requestPromise(
+        tx.objectStore(DATA_STORE).get(PROVIDERS_KEY) as IDBRequest<
+          { key: string; value: Record<string, string> } | undefined
+        >,
+      ),
+    ]);
+    const value = providerRow?.value;
+    return {
+      packages,
+      states,
+      providers: value && typeof value === 'object' ? { ...value } : {},
+    };
+  }
+
   async listPackages(): Promise<InstalledPackageRecord[]> {
     const db = await this.open();
     if (!db) return [...this.memPackages.values()];
@@ -64,6 +96,28 @@ export class PluginPackageStore {
     if (!db) return this.memPackages.get(id);
     const tx = db.transaction(PACKAGES_STORE, 'readonly');
     return requestPromise(tx.objectStore(PACKAGES_STORE).get(id) as IDBRequest<InstalledPackageRecord | undefined>);
+  }
+
+  async loadWorkerTarget(
+    id: string,
+  ): Promise<{ pkg: InstalledPackageRecord | undefined; state: PluginStateRecord | undefined; packageIds: string[] }> {
+    const db = await this.open();
+    if (!db) {
+      return {
+        pkg: this.memPackages.get(id),
+        state: this.memStates.get(id),
+        packageIds: [...this.memPackages.keys()],
+      };
+    }
+    const tx = db.transaction([PACKAGES_STORE, STATES_STORE], 'readonly');
+    const packagesStore = tx.objectStore(PACKAGES_STORE);
+    const [pkg, state, rawKeys] = await Promise.all([
+      requestPromise(packagesStore.get(id) as IDBRequest<InstalledPackageRecord | undefined>),
+      requestPromise(tx.objectStore(STATES_STORE).get(id) as IDBRequest<PluginStateRecord | undefined>),
+      requestPromise(packagesStore.getAllKeys() as IDBRequest<IDBValidKey[]>),
+    ]);
+    const packageIds = rawKeys.filter((key): key is string => typeof key === 'string');
+    return { pkg, state, packageIds };
   }
 
   async putPackage(record: InstalledPackageRecord): Promise<void> {

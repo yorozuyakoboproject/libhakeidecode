@@ -1,6 +1,13 @@
 import type { DriverDefinition } from '../drivers/definition.js';
 import { restoreComponentError } from '../components.js';
-import type { DeviceConfiguration, DeviceConfigurationState, DeviceDescriptor } from '../libhakei/device.js';
+import {
+  resolveDeviceConfiguration,
+  validateDeviceConfiguration,
+  type DeviceConfiguration,
+  type DeviceConfigurationState,
+  type DeviceDescriptor,
+  type SampleDevice,
+} from '../libhakei/device.js';
 import type {
   DeviceCommand,
   DeviceControl,
@@ -57,12 +64,38 @@ export class DeviceClient implements DeviceControl {
   async setTransport(mode?: string, port?: number): Promise<void> {
     await this.request({ type: 'transport', mode, ...(port === undefined ? {} : { port }) });
   }
+  private get isLocalDemo(): boolean {
+    return this.descriptor.id === 'demo' && !this.definition.connection && !this.definition.descriptor.transport;
+  }
+  private localDemoDevice(): SampleDevice {
+    const descriptor = this.descriptor;
+    return {
+      layout: 'multi-rate',
+      descriptor,
+      getCapabilities: () => descriptor.capabilities,
+      getAcquisitionDescription: (configuration: DeviceConfiguration) => ({
+        layout: configuration.analogChannels ? ('multi-rate' as const) : ('packed-logic' as const),
+        logicSampleBytes: configuration.logicChannels
+          ? (Math.ceil(configuration.logicChannels / 8) as 1 | 2 | 3 | 4)
+          : (1 as const),
+        analogSampleBytes: 4 as const,
+        chunkSamples: 65_536,
+      }),
+    } as unknown as SampleDevice;
+  }
   async configure(configuration: DeviceConfiguration): Promise<DeviceConfigurationState> {
+    if (this.isLocalDemo) return resolveDeviceConfiguration(this.localDemoDevice(), configuration);
     const result = await this.request({ type: 'configure', configuration });
     if (!result.settings) throw new Error('Device Worker returned no configuration');
     return result.settings;
   }
   async prepare(configuration: DeviceConfiguration): Promise<WorkerAcquisitionDescription> {
+    if (this.isLocalDemo) {
+      const device = this.localDemoDevice();
+      validateDeviceConfiguration(device, configuration);
+      const acquisition = device.getAcquisitionDescription(configuration);
+      return { ...acquisition, worker: { driverId: this.descriptor.id, initialization: undefined } };
+    }
     const result = await this.request({ type: 'prepare', configuration });
     if (!result.description) throw new Error('Device Worker returned no acquisition description');
     return result.description;

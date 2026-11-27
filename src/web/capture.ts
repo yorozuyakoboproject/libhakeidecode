@@ -119,12 +119,16 @@ function capturePlan(
   options: CaptureOptions,
 ) {
   if (typeof Worker === 'undefined') throw new UIError('error.worker');
+  const singlePackedChunk = Math.min(
+    description.chunkSamples,
+    Math.max(16_384, Math.min(262_144, Math.ceil((configuration.sampleRate * 0.01) / 16_384) * 16_384)),
+  );
   const chunkSamples =
     options.chunkSamples ??
     (options.mode === 'continuous'
       ? Math.min(description.chunkSamples, 65536)
       : description.layout === 'packed-logic' && configuration.sampleCount >= 262_144
-        ? description.chunkSamples
+        ? singlePackedChunk
         : Math.min(description.chunkSamples, configuration.sampleCount < 262_144 ? 16_384 : 65_536));
   if (!Number.isSafeInteger(chunkSamples) || chunkSamples < 1 || chunkSamples > 2 ** 26)
     throw new RangeError('Invalid acquisition block size');

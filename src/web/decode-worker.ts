@@ -74,6 +74,7 @@ interface Session {
   >;
   finishRequested: boolean;
   finalLength: bigint;
+  wakeReader: (() => void) | null;
   stages: {
     sharedUnpackMs: number;
     decoderPushMs: number;
@@ -215,6 +216,7 @@ function start(request: DecodeStartRequest): void {
     workerPending: new Map(),
     finishRequested: false,
     finalLength: request.length,
+    wakeReader: null,
     stages: {
       sharedUnpackMs: 0,
       decoderPushMs: 0,
@@ -283,6 +285,7 @@ function startGraph(request: DecodeGraphStartRequest): void {
     workerPending: new Map(),
     finishRequested: false,
     finalLength: request.length,
+    wakeReader: null,
     stages: {
       sharedUnpackMs: 0,
       decoderPushMs: 0,
@@ -338,6 +341,7 @@ function startGraph(request: DecodeGraphStartRequest): void {
 }
 function queryAnnotations(request: DecodeQueryAnnotationsRequest): void {
   const s = session;
+  if (s && !s.completed && s.wakeReader && request.end > s.processed) wakeWorkerReader(s);
   let annotations: Annotation[] = [];
   if (s) {
     const instance = resolveInstance(s, request.instanceId);
@@ -419,6 +423,10 @@ function startShared(s: Session, request: DecodeSharedStartRequest): void {
   const reader = new SharedChunkReader(request.port, request.bytesPerSample);
   s.sharedReader = reader;
   s.sharedTask = consumeShared(s, reader, request.channels, request.bytesPerSample);
+  void s.sharedTask.catch((error) => {
+    if (session === s) session = null;
+    scope.postMessage({ type: 'error', ...componentFailure(error) });
+  });
 }
 function startPackedReader(s: Session, request: DecodePackedReaderStartRequest): void {
   if (!Number.isInteger(request.channelCount) || request.channelCount < 1 || request.channelCount > 32)
@@ -546,22 +554,80 @@ function requestWorkerRead(
     });
   });
 }
+const MAX_ROLLING_ANNOTATIONS = 600_000;
+const MAX_ROLLING_FRAMES = 250_000;
+const MAX_ROLLING_FINAL_ANNOTATIONS = 1_500_000;
+const MAX_ROLLING_FINAL_FRAMES = 500_000;
+const LIVE_MAX_LAG_SAMPLES = 48_000_000n;
+const LIVE_SATURATED_LAG_SAMPLES = 4_194_304n;
+const LIVE_HEAD_RUNWAY = 2_097_152n;
+const MIN_DECODE_STEP = 16_384n;
+const MAX_DECODE_STEP = 131_072n;
+
+function trimRollingResults(s: Session, floorStart: bigint, maxAnnotations: number, maxFrames: number): bigint | null {
+  if (s.runtime.annotationCount <= maxAnnotations && s.runtime.frameCount <= maxFrames) return null;
+  let cut: bigint | null = null;
+  if (s.instances) {
+    for (const instance of s.instances.values()) {
+      const candidate = instance.results.annotations.sampleAtFraction(0.35);
+      if (candidate !== null && (cut === null || candidate < cut)) cut = candidate;
+    }
+  } else {
+    cut = s.results.annotations.sampleAtFraction(0.35);
+  }
+  if (cut === null || cut <= floorStart) return null;
+  return cut;
+}
+
+function wakeWorkerReader(s: Session | null): void {
+  if (!s?.wakeReader) return;
+  const wake = s.wakeReader;
+  s.wakeReader = null;
+  wake();
+}
+function sleepWorkerReader(s: Session, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const wake = (): void => {
+      clearTimeout(timer);
+      if (s.wakeReader === wake) s.wakeReader = null;
+      resolve();
+    };
+    const timer = setTimeout(wake, ms);
+    s.wakeReader = wake;
+  });
+}
+
 async function consumeWorkerReader(s: Session, edgeInput: string | undefined, edgeLimit: number): Promise<void> {
   let cursor = s.processed;
+  let step = 65_536n;
+  let lastYield = performance.now();
+  let waitStreak = 0;
+  let retainedInitialized = false;
+  let lastRetainedStart = -1n;
+  const syncRetain = (): void => {
+    if (!s.rolling) return;
+    if (!retainedInitialized || s.retainedStart > lastRetainedStart) {
+      retainedInitialized = true;
+      lastRetainedStart = s.retainedStart;
+      s.runtime.retain?.(s.retainedStart);
+    }
+  };
   while (true) {
     const limit = s.finishRequested ? s.finalLength : s.length;
     if (cursor >= limit && (!s.rolling || s.finishRequested)) {
       if (s.finishRequested) break;
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      const delay = waitStreak < 5 ? 4 : waitStreak < 10 ? 10 : 20;
+      waitStreak++;
+      await sleepWorkerReader(s, delay);
       continue;
     }
-    const end =
-      s.rolling && !s.finishRequested ? cursor + 1_048_576n : cursor + 1_048_576n < limit ? cursor + 1_048_576n : limit;
+    const end = s.rolling && !s.finishRequested ? cursor + step : cursor + step < limit ? cursor + step : limit;
     const response = await requestWorkerRead(s, cursor, end, edgeInput, edgeLimit);
     if (s.rolling) {
       if (response.availableEnd !== undefined) s.length = response.availableEnd;
-      s.retainedStart = response.availableStart ?? 0n;
-      s.runtime.retain?.(s.retainedStart);
+      const availableStart = response.availableStart ?? 0n;
+      if (availableStart > s.retainedStart) s.retainedStart = availableStart;
+      syncRetain();
     }
     if (response.kind === 'wait') {
       if (s.rolling && response.startSample > s.processed) {
@@ -570,16 +636,36 @@ async function consumeWorkerReader(s: Session, edgeInput: string | undefined, ed
       }
       if (s.finishRequested && response.availableEnd <= cursor) break;
       maybePostProgress(s);
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      const delay = waitStreak < 5 ? 4 : waitStreak < 10 ? 10 : 20;
+      waitStreak++;
+      await sleepWorkerReader(s, delay);
       continue;
     }
+    waitStreak = 0;
     if (s.rolling && response.startSample > s.processed) {
       if (s.decodedSamples > 0n) resetAtGap(s);
+      const availableEnd = response.availableEnd ?? response.endSample;
+      const availableStart = response.availableStart ?? response.startSample;
+      const availableSpan = availableEnd > availableStart ? availableEnd - availableStart : 0n;
+      // If continuous capture overtook decode-worker, jump near the live head instead of thrashing on expiring oldest samples.
+      if (!s.finishRequested && availableSpan > 2_097_152n && availableEnd - response.startSample > 2_097_152n) {
+        const runway = availableSpan > 8_388_608n ? 2_097_152n : availableSpan / 4n;
+        s.processed = cursor = availableEnd - runway;
+        maybePostProgress(s);
+        await yieldWorkerTask();
+        lastYield = performance.now();
+        continue;
+      }
       s.processed = response.startSample;
     } else if (s.rolling && s.decodedSamples === 0n) {
       s.processed = response.startSample;
     }
-    if (response.kind === 'edges') {
+    const chunkStarted = performance.now();
+    if (response.kind === 'packed') {
+      if (response.startSample !== s.processed || response.endSample > s.length)
+        throw new Error('Decode stream is not contiguous');
+      await pushPacked(s, response.startSample, response.data, s.workerChannels!, response.sampleBytes);
+    } else if (response.kind === 'edges') {
       if (response.startSample !== s.processed || response.endSample > s.length)
         throw new Error('Decode stream is not contiguous');
       const started = performance.now(),
@@ -611,9 +697,38 @@ async function consumeWorkerReader(s: Session, edgeInput: string | undefined, ed
         edgeInput,
       );
     }
+    const chunkElapsed = performance.now() - chunkStarted;
+    if (chunkElapsed > 10 && step > MIN_DECODE_STEP) step >>= 1n;
+    else if (chunkElapsed < 3 && step < MAX_DECODE_STEP) step <<= 1n;
     cursor = response.endSample;
-    if (s.rolling) s.runtime.retain?.(s.retainedStart);
+    if (s.rolling) {
+      const trimCut = trimRollingResults(
+        s,
+        s.retainedStart,
+        s.finishRequested ? MAX_ROLLING_FINAL_ANNOTATIONS : MAX_ROLLING_ANNOTATIONS,
+        s.finishRequested ? MAX_ROLLING_FINAL_FRAMES : MAX_ROLLING_FRAMES,
+      );
+      if (trimCut !== null) s.retainedStart = trimCut;
+      if (!s.finishRequested) {
+        const lag = s.length > cursor ? s.length - cursor : 0n;
+        if ((trimCut !== null && lag > LIVE_SATURATED_LAG_SAMPLES) || lag > LIVE_MAX_LAG_SAMPLES) {
+          const jumpTo = s.length > LIVE_HEAD_RUNWAY ? s.length - LIVE_HEAD_RUNWAY : cursor;
+          if (jumpTo > cursor) {
+            if (s.decodedSamples > 0n) resetAtGap(s);
+            s.processed = cursor = jumpTo;
+          }
+        }
+      }
+    }
+    syncRetain();
     maybePostProgress(s);
+    if (performance.now() - lastYield >= 8) {
+      const yieldStarted = performance.now();
+      await yieldWorkerTask();
+      s.stages.cooperativeYieldMs += performance.now() - yieldStarted;
+      s.stages.cooperativeYieldCount++;
+      lastYield = performance.now();
+    }
   }
 }
 async function consumeShared(
@@ -630,11 +745,16 @@ async function consumeShared(
         throw new Error('Invalid shared decode channel');
       picked[channel] = bit!;
     }
+    let sliceSamples = 65_536;
     let lastYield = performance.now();
     while (true) {
-      const part = await reader.next(131_072);
+      const part = await reader.next(sliceSamples);
       if (!part) break;
+      const chunkStarted = performance.now();
       await pushPacked(s, part.startSample, part.data, picked, sampleBytes);
+      const chunkElapsed = performance.now() - chunkStarted;
+      if (chunkElapsed > 10 && sliceSamples > 16_384) sliceSamples >>>= 1;
+      else if (chunkElapsed < 3 && sliceSamples < 131_072) sliceSamples <<= 1;
       maybePostProgress(s);
       if (performance.now() - lastYield >= 8) {
         const yieldStarted = performance.now();
@@ -684,8 +804,9 @@ async function pushChunk(s: Session, request: DecodeChunkRequest): Promise<void>
     throw new Error('Decode chunk channel layout changed');
   const parts = gapParts(s, request),
     outputWindow = 65_536n,
-    yieldWindow = 1_048_576n;
+    yieldWindow = 262_144n;
   let yieldSamples = 0n;
+  let lastYield = performance.now();
   for (const part of parts) {
     if (part.reset) resetAtGap(s);
     for (let cursor = part.start; cursor < part.end;) {
@@ -705,12 +826,13 @@ async function pushChunk(s: Session, request: DecodeChunkRequest): Promise<void>
       cursor = end;
       yieldSamples += span;
       maybePostProgress(s);
-      if (yieldSamples >= yieldWindow) {
+      if (yieldSamples >= yieldWindow || performance.now() - lastYield >= 8) {
         const yieldStarted = performance.now();
         await yieldWorkerTask();
         s.stages.cooperativeYieldMs += performance.now() - yieldStarted;
         s.stages.cooperativeYieldCount++;
         yieldSamples = 0n;
+        lastYield = performance.now();
       }
     }
   }
@@ -749,6 +871,7 @@ async function pushEdgeChunk(s: Session, request: DecodeEdgeChunkRequest, edgeIn
 }
 async function finish(s: Session, request: DecodeFinishRequest): Promise<void> {
   s.finishRequested = true;
+  wakeWorkerReader(s);
   s.finalLength = s.rolling
     ? (request.length ?? s.length)
     : request.length !== undefined && request.length < s.length
@@ -787,6 +910,7 @@ async function finishGraph(s: Session, request: DecodeFinishRequest): Promise<vo
   const stores = s.instances;
   if (!graph || !stores) throw new Error('Protocol graph is unavailable');
   s.finishRequested = true;
+  wakeWorkerReader(s);
   s.finalLength = s.rolling
     ? (request.length ?? s.length)
     : request.length !== undefined && request.length < s.length

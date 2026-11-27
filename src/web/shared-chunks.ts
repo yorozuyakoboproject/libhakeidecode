@@ -235,7 +235,7 @@ export class SharedChunkProducer {
       if (
         !this.notified ||
         nextCommitted === chunk.capacitySamples ||
-        (this.published - this.notified) * BigInt(this.bytesPerSample) >= 1048576n
+        (this.published - this.notified) * BigInt(this.bytesPerSample) >= 262144n
       )
         this.flushCommit();
       else if (!this.commitTimer) this.commitTimer = setTimeout(() => this.flushCommit(), 2);

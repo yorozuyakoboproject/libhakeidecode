@@ -95,6 +95,7 @@ export interface TimelineLayoutRow {
 export interface ProtocolTrace extends ProtocolSettings {
   annotations: AnnotationIndex;
   readonly frameCount?: number;
+  readonly state?: string;
 }
 export class WaveformRenderer {
   decoder: DecoderId = decoderDefinitions[0]?.descriptor.id ?? '';
@@ -136,6 +137,8 @@ export class WaveformRenderer {
   private pending = false;
   private viewRefresh: Promise<void> | null = null;
   private viewRefreshDirty = false;
+  private viewRefreshFailures = 0;
+  private viewRefreshRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private viewReady = true;
   private viewGeneration = 0;
   private renderingEnabled = true;
@@ -170,6 +173,8 @@ export class WaveformRenderer {
   private readonly frameCanvas = document.createElement('canvas');
   private readonly frameContext = this.frameCanvas.getContext('2d')!;
   private presentedViewport: readonly [bigint, bigint] | null = null;
+  private presentedSamples = 0n;
+  private lastRefreshViewport: readonly [bigint, bigint] | null = null;
   private hoverX: number | null = null;
   private hoverSample: bigint | null = null;
   private hoverResult: { capture: Capture; sample: bigint; length: bigint; values: readonly (number | null)[] } | null =
@@ -336,6 +341,11 @@ export class WaveformRenderer {
   }
   setCapture(capture: Capture, viewport?: readonly [SampleInput, SampleInput]): void {
     this.clearHover();
+    this.viewRefreshFailures = 0;
+    if (this.viewRefreshRetryTimer !== null) {
+      clearTimeout(this.viewRefreshRetryTimer);
+      this.viewRefreshRetryTimer = null;
+    }
     this.capture = capture;
     this.channels = Array.from({ length: capture.logicChannelCount ?? capture.store.channelCount }, (_, i) => i);
     this.digitalHeights = this.channels.map((id) => capture.workspace?.digitalHeights?.[id] ?? 22);
@@ -370,6 +380,11 @@ export class WaveformRenderer {
   }
   clearCapture(): void {
     this.clearHover();
+    this.viewRefreshFailures = 0;
+    if (this.viewRefreshRetryTimer !== null) {
+      clearTimeout(this.viewRefreshRetryTimer);
+      this.viewRefreshRetryTimer = null;
+    }
     this.capture = null;
     this.channels = [];
     this.digitalHeights = [];
@@ -498,6 +513,9 @@ export class WaveformRenderer {
   }
   private protocolRows(protocol: ProtocolTrace): number {
     return this.visibleRowsFor(protocol).length;
+  }
+  private annotationQueryBudget(bins: number, rows: number): number {
+    return Math.min(4_000, Math.max(512, Math.floor(bins * Math.min(Math.max(1, rows), 3))));
   }
   private protocolHeight(protocol: ProtocolTrace): number {
     return 28 + this.protocolRows(protocol) * 28 + 4;
@@ -883,17 +901,34 @@ export class WaveformRenderer {
       }
     }
     const protocolTasks: Promise<void>[] = [];
-    for (const protocol of this.protocols)
-      protocolTasks.push(
-        protocol.annotations.prepareView(start, end, Math.max(1, Math.floor(bins * this.protocolRows(protocol) * 3))),
-      );
+    for (const protocol of this.protocols) {
+      const rows = this.protocolRows(protocol);
+      if (rows > 0)
+        protocolTasks.push(protocol.annotations.prepareView(start, end, this.annotationQueryBudget(bins, rows)));
+    }
     if (!tasks.length && !protocolTasks.length) {
       this.viewReady = true;
       this.drawNow();
       return;
     }
+    const viewportChanged =
+      this.lastRefreshViewport !== null &&
+      (this.lastRefreshViewport[0] !== start || this.lastRefreshViewport[1] !== end);
+    this.lastRefreshViewport = [start, end];
     const waitProtocols = (): Promise<void> => {
       if (!protocolTasks.length) return Promise.resolve();
+      const decodingActive = this.protocols.some((protocol) => protocol.state === 'decoding');
+      const liveContinuous = capture.acquisition?.mode === 'continuous' && decodingActive;
+      // On the very first non-empty paint while live decoding is active, or while actively
+      // zooming/panning during live continuous decoding, never stall digital waveform rendering.
+      if (
+        tasks.length &&
+        capture.store.length > 0n &&
+        ((this.presentedSamples === 0n && decodingActive) || (liveContinuous && viewportChanged))
+      ) {
+        void Promise.allSettled(protocolTasks);
+        return Promise.resolve();
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([
         Promise.all(protocolTasks).then(
@@ -901,7 +936,7 @@ export class WaveformRenderer {
           () => undefined,
         ),
         new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, 32);
+          timer = setTimeout(resolve, liveContinuous ? 16 : 24);
         }),
       ]).finally(() => {
         if (timer !== undefined) clearTimeout(timer);
@@ -910,19 +945,38 @@ export class WaveformRenderer {
     this.viewRefreshDirty = false;
     const task = Promise.all([...tasks, waitProtocols()])
       .then(
-        () => true,
-        () => false,
+        () => ({ ready: true as const, error: null as unknown }),
+        (error: unknown) => ({ ready: false as const, error }),
       )
-      .then((ready) => {
+      .then(({ ready, error }) => {
         if (this.viewRefresh === task) this.viewRefresh = null;
         if (!this.renderingEnabled || this.capture !== capture) return;
-        if (!ready) return;
+        const current = generation === this.viewGeneration && start === this.start && end === this.end;
+        if (!ready) {
+          const message = error instanceof Error ? error.message : String(error ?? '');
+          const transient =
+            (error instanceof Error && error.name === 'AbortError') ||
+            /Superseded|timed out|page budget/i.test(message);
+          if (!current || this.viewRefreshDirty || transient) {
+            if (!current) this.viewRefreshFailures = 0;
+            this.viewRefreshFailures++;
+            if (!current || this.viewRefreshFailures <= 3) this.schedule();
+            else if (this.viewRefreshRetryTimer === null) {
+              const delay = Math.min(200, 40 * Math.min(this.viewRefreshFailures - 2, 5));
+              this.viewRefreshRetryTimer = setTimeout(() => {
+                this.viewRefreshRetryTimer = null;
+                if (this.renderingEnabled && this.capture === capture) this.schedule();
+              }, delay);
+            }
+          }
+          return;
+        }
+        this.viewRefreshFailures = 0;
         const currentWidth = Math.max(300, Math.floor(this.canvas.parentElement?.clientWidth || 1000));
         if (Math.max(1, currentWidth - this.gutter - 16) !== bins) {
           this.schedule();
           return;
         }
-        const current = generation === this.viewGeneration && start === this.start && end === this.end;
         if (current) {
           this.viewReady = true;
           this.drawNow();
@@ -1043,6 +1097,7 @@ export class WaveformRenderer {
     this.drawAxis(capture, dpr);
     this.drawOverview(capture, dpr);
     this.presentedViewport = [this.start, this.end];
+    if (capture.store.length > 0n) this.presentedSamples = capture.store.length;
     this.refreshHover();
     this.presentFrame();
     const animating = [...this.rowMotions.values()].some((motion) => now - motion.started < this.motionDuration);
@@ -1072,6 +1127,8 @@ export class WaveformRenderer {
     this.hoverSample = null;
     this.hoverResult = null;
     this.presentedViewport = null;
+    this.presentedSamples = 0n;
+    this.lastRefreshViewport = null;
   }
   private moveHover(x: number | null): void {
     this.hoverX = x !== null && x >= this.gutter && x <= this.width - 16 ? x : null;
@@ -1741,7 +1798,8 @@ export class WaveformRenderer {
     ctx.rect(this.gutter, annY + mainHeight, plotWidth, totalHeight - mainHeight - 2);
     ctx.clip();
     const queryStarted = performance.now();
-    const visible = protocol.annotations.query(this.start, this.end, Math.max(1, Math.floor(plotWidth * rows * 3)));
+    const budget = this.annotationQueryBudget(plotWidth, rows);
+    const visible = protocol.annotations.query(this.start, this.end, budget);
     this.recordQuery?.(performance.now() - queryStarted);
     const rowOfClass = new Map<number, { row: number; rowIndex: number; classOffset: number }>();
     visibleRows.forEach((visibleRow, index) => {
@@ -1751,8 +1809,13 @@ export class WaveformRenderer {
         }
       });
     });
-    const dense = visible.length > plotWidth * rows * 3;
-    const occupied = Array.from({ length: rows }, () => new Set<number>());
+    const viewStart = this.start,
+      viewSpan = this.end - viewStart,
+      fastScale = viewSpan > 0n && viewSpan <= BigInt(Number.MAX_SAFE_INTEGER) ? plotWidth / Number(viewSpan) : 0,
+      gutter = this.gutter,
+      maxX = this.width - 16;
+    const fastToX = fastScale ? (sample: bigint): number => gutter + Number(sample - viewStart) * fastScale : toX;
+    const dense = visible.length >= Math.min(budget, Math.floor(plotWidth * rows));
     const merged = new Map<
       string,
       {
@@ -1774,25 +1837,26 @@ export class WaveformRenderer {
       right: number;
       merged: boolean;
     }> = [];
-    for (const annotation of visible) {
+    const mergeWidth = dense ? 12 : 5;
+    for (let i = 0; i < visible.length; i++) {
+      const annotation = visible[i]!;
       const mapping = rowOfClass.get(annotation.classIndex);
       if (mapping === undefined) continue;
-      const rawX = toX(annotation.ss),
-        rawRight = toX(annotation.es),
+      const rawX = fastToX(annotation.ss),
+        rawRight = fastToX(annotation.es),
         instant = annotation.ss === annotation.es;
-      const x = Math.max(this.gutter, Math.min(this.width - 16, rawX)),
-        right = Math.max(x, Math.min(this.width - 16, rawRight));
-      const w = instant ? 18 : Math.max(2, right - x),
-        cell = Math.floor(x);
-      if (!dense && w < 8 && occupied[mapping.row]!.has(cell)) continue;
-      if (!dense) occupied[mapping.row]!.add(cell);
-      if (dense && w < 12) {
+      const x = rawX < gutter ? gutter : rawX > maxX ? maxX : rawX,
+        right = rawRight < x ? x : rawRight > maxX ? maxX : rawRight;
+      const w = instant ? 18 : right - x;
+      if (!instant && w < mergeWidth) {
         const error = definition.ui.isErrorClass?.(annotation.classIndex) ?? false;
+        const cell = Math.floor(x);
         const key = `${mapping.row}:${cell}:${error ? 1 : 0}`;
         const previous = merged.get(key);
+        const effRight = right > x + 2 ? right : x + 2;
         if (previous) {
-          previous.x = Math.min(previous.x, x);
-          previous.right = Math.max(previous.right, right);
+          if (x < previous.x) previous.x = x;
+          if (effRight > previous.right) previous.right = effRight;
         } else {
           merged.set(key, {
             annotation,
@@ -1800,7 +1864,7 @@ export class WaveformRenderer {
             rowIndex: mapping.rowIndex,
             classOffset: mapping.classOffset,
             x,
-            right,
+            right: effRight,
             error,
           });
         }
@@ -1825,19 +1889,41 @@ export class WaveformRenderer {
       right: number;
       error: boolean;
     }> = [];
-    for (const block of [...merged.values()].sort((a, b) => a.row - b.row || a.x - b.x)) {
-      const previous = compact.at(-1);
-      if (previous && previous.row === block.row && previous.error === block.error && block.x <= previous.right + 1.5)
-        previous.right = Math.max(previous.right, block.right);
-      else compact.push({ ...block });
+    if (merged.size) {
+      const sortedMerged = [...merged.values()].sort((a, b) => a.row - b.row || a.x - b.x);
+      for (let i = 0; i < sortedMerged.length; i++) {
+        const block = sortedMerged[i]!;
+        const previous = compact.at(-1);
+        if (previous && previous.row === block.row && previous.error === block.error && block.x <= previous.right + 1.5)
+          previous.right = Math.max(previous.right, block.right);
+        else compact.push(block);
+      }
     }
-    for (const block of compact) blocks.push({ ...block, merged: true });
     const sampleRate = this.capture!.store.samplerate,
-      decimals = protocol.decimalPlaces ?? 3;
-    for (const block of blocks) {
+      decimals = protocol.decimalPlaces ?? 3,
+      blockHeight = Math.max(6, rowHeight - 6),
+      alpha = protocol.id === this.selectedProtocolId ? 0.95 : 0.85;
+    if (compact.length) {
+      ctx.globalAlpha = alpha;
+      for (let i = 0; i < compact.length; i++) {
+        const block = compact[i]!;
+        const y = annY + mainHeight + block.row * rowHeight + 2;
+        const style = block.error
+          ? {
+              fill: this.palette['annotation-error'] ?? '#ef4444',
+              border: darkTheme ? '#fca5a5' : '#b91c1c',
+              text: '#ffffff',
+            }
+          : protocolTrackColor(protocol.color, block.rowIndex, block.classOffset, darkTheme);
+        ctx.fillStyle = style.fill;
+        ctx.fillRect(block.x, y, Math.max(2, block.right - block.x), blockHeight);
+      }
+      ctx.globalAlpha = 1;
+    }
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i]!;
       const { annotation, row, rowIndex, classOffset, x, right } = block;
-      const blockHeight = Math.max(6, rowHeight - 6),
-        y = annY + mainHeight + row * rowHeight + 2,
+      const y = annY + mainHeight + row * rowHeight + 2,
         middle = y + blockHeight / 2,
         error = definition.ui.isErrorClass?.(annotation.classIndex) ?? false;
       const style = error
@@ -1847,16 +1933,15 @@ export class WaveformRenderer {
             text: '#ffffff',
           }
         : protocolTrackColor(protocol.color, rowIndex, classOffset, darkTheme);
-      const texts = !block.merged
-        ? (definition.ui.annotationTexts?.(annotation, {
-            sampleRate,
-            decimals,
-            text: (key, fallback) => (hasMessage(key) ? t(key) : fallback),
-          }) ?? annotation.texts)
-        : [];
+      const texts =
+        definition.ui.annotationTexts?.(annotation, {
+          sampleRate,
+          decimals,
+          text: (key, fallback) => (hasMessage(key) ? t(key) : fallback),
+        }) ?? annotation.texts;
 
-      ctx.globalAlpha = protocol.id === this.selectedProtocolId ? 0.95 : 0.85;
-      if (!block.merged && annotation.ss === annotation.es) {
+      ctx.globalAlpha = alpha;
+      if (annotation.ss === annotation.es) {
         // PulseView draw_instant: centered rounded pill (START, Repeated START, STOP)
         ctx.font = '11px system-ui, sans-serif';
         const label = texts.at(-1) ?? texts[0] ?? '';
@@ -1900,7 +1985,7 @@ export class WaveformRenderer {
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
-      if (!block.merged && w > 8) {
+      if (w > 8) {
         ctx.fillStyle = style.text;
         ctx.font = '11px system-ui, sans-serif';
         const available = Math.max(8, w - 6),

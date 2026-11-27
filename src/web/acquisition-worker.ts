@@ -272,10 +272,23 @@ scope.onmessage = ({ data }) => {
       });
     };
     try {
+      const driverReady = ensureWorkerDriver(data.driverId);
       if (data.sharedSampleCount !== undefined) {
-        const [{ SharedChunkProducer, SharedChunkReader, normalizePackedSamples }, { SharedChunkAllocator }] =
-          await Promise.all([import('./shared-chunks.js'), import('./shared-chunk-allocator.js')]);
-        allocator = new SharedChunkAllocator();
+        const { SharedChunkProducer, SharedChunkReader, normalizePackedSamples } = await import('./shared-chunks.js');
+        let allocatorModulePromise: Promise<typeof import('./shared-chunk-allocator.js')> | null = null;
+        let allocatedFirst = false;
+        const allocateShared = async (byteLength: number): Promise<SharedArrayBuffer> => {
+          if (!allocatedFirst) {
+            allocatedFirst = true;
+            return new SharedArrayBuffer(byteLength);
+          }
+          if (!allocator) {
+            allocatorModulePromise ??= import('./shared-chunk-allocator.js');
+            const { SharedChunkAllocator } = await allocatorModulePromise;
+            allocator = new SharedChunkAllocator();
+          }
+          return allocator.allocate(byteLength);
+        };
         let lastProgressAt = -Infinity,
           lastReportedSamples = 0n;
         const reportSharedProgress = (
@@ -306,11 +319,11 @@ scope.onmessage = ({ data }) => {
           sampleCount: data.sharedSampleCount,
           chunkBytes: data.sharedChunkBytes,
           bytesPerSample: data.sharedSampleBytes,
-          allocate: (byteLength) => allocator!.allocate(byteLength),
+          allocate: allocateShared,
           onProgress: (bytes, samples, publisher) => reportSharedProgress(bytes, samples, publisher),
         });
         for (const port of pendingConsumers.splice(0)) producer.addConsumer(port);
-        await producer.prepare();
+        await Promise.all([producer.prepare(), driverReady]);
         if (data.store) {
           const channel = new MessageChannel();
           producer.addConsumer(channel.port1);
@@ -330,9 +343,10 @@ scope.onmessage = ({ data }) => {
           };
         }
         reportSharedProgress(producer.allocatedBytes, producer.length, producer.publisherMetrics, true);
+      } else {
+        await driverReady;
       }
       controller.signal.throwIfAborted();
-      await ensureWorkerDriver(data.driverId);
       const device = createDriverDevice(data.driverId, data.initialization);
       validateDeviceConfiguration(device, data.configuration);
       let configuration = data.configuration;
@@ -422,7 +436,14 @@ scope.onmessage = ({ data }) => {
           await producer.append(result.value.data.subarray(0, bytes));
         } else if (data.store) {
           appendChunk(result.value);
-          reportLocal();
+          const deferForAnalog =
+            !!rolling &&
+            rolling.logicChannelCount > 0 &&
+            rolling.analogChannels.length > 0 &&
+            'format' in result.value &&
+            result.value.format === 'packed-logic' &&
+            performance.now() - lastProgressAt < 150;
+          if (!deferForAnalog) reportLocal();
         }
         const buffer = borrowed;
         borrowed = null;

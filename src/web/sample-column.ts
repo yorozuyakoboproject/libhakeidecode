@@ -18,6 +18,11 @@ export class SampleColumn {
   }
 
   set(index: number, value: bigint): void {
+    const prevWide = this.wide.get(index);
+    if (prevWide !== undefined) {
+      this.wide.delete(index);
+      this.wideBytes -= 4 + Math.ceil(prevWide.toString(16).length / 2);
+    }
     const relative = value - this.base;
     if (relative < 0n || relative > MAX_OFFSET) {
       this.wide.set(index, value);
@@ -28,6 +33,8 @@ export class SampleColumn {
     if (relative > 0xffff_ffffn) {
       this.high ??= new Uint32Array(this.capacity);
       this.high[index] = Number(relative >> 32n);
+    } else if (this.high) {
+      this.high[index] = 0;
     }
   }
 

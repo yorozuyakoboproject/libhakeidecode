@@ -132,6 +132,18 @@ export type DecodeReadResponse =
   | {
       type: 'decode-read-result';
       id: number;
+      kind: 'packed';
+      startSample: bigint;
+      endSample: bigint;
+      sampleRate: number;
+      sampleBytes: 1 | 2 | 3 | 4;
+      data: Uint8Array;
+      availableStart?: bigint;
+      availableEnd?: bigint;
+    }
+  | {
+      type: 'decode-read-result';
+      id: number;
       kind: 'channels';
       startSample: bigint;
       endSample: bigint;
@@ -577,6 +589,13 @@ export class WorkerAnalogStore implements AnalogStore {
       this.cache.view.startSample === start &&
       this.cache.view.endSample === end &&
       this.cache.view.bins === bins
+    )
+      return this.cache.view;
+    if (
+      this.cache &&
+      this.cache.view.startSample === start &&
+      this.cache.view.endSample > start &&
+      this.cache.view.endSample <= end
     )
       return this.cache.view;
     return { startSample: start, endSample: end, bins, low: new Float32Array(bins), high: new Float32Array(bins) };

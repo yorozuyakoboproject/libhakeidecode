@@ -406,6 +406,33 @@ export class WorkerStoreServer {
     }
     if (availableEnd - start > BigInt(MAX_CHUNK)) throw new RangeError('Decode read range is too large');
     const edgeIndex = request.edgeInput === undefined ? undefined : request.channels[request.edgeInput];
+    if (
+      edgeIndex === undefined &&
+      'copyPacked' in store &&
+      store.gaps().length === 0 &&
+      Object.keys(request.channels).length > 1
+    ) {
+      const sampleBytes = store.sampleBytes;
+      if (Object.values(request.channels).every((channel) => channel < sampleBytes * 8)) {
+        const data = store.copyPacked(start, availableEnd, sampleBytes);
+        port.postMessage(
+          {
+            type: 'decode-read-result',
+            id: request.id,
+            kind: 'packed',
+            startSample: absoluteStart,
+            endSample: availableEnd + offset,
+            availableStart: offset,
+            availableEnd: sourceEnd,
+            sampleRate: store.samplerate,
+            sampleBytes,
+            data,
+          } satisfies DecodeReadResponse,
+          [data.buffer],
+        );
+        return;
+      }
+    }
     if (edgeIndex === undefined && 'decodeEdges' in store && store.gaps().length === 0) {
       const channels: Record<string, { initial: 0 | 1; edges: bigint[] }> = {};
       let remaining = DECODE_EDGE_WINDOW_LIMIT,

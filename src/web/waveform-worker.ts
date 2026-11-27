@@ -15,7 +15,13 @@ scope.onmessage = ({ data }) => {
     return;
   }
   try {
-    ring ??= new SampleRing(data.snapshot.capacity, true);
+    ring ??= new SampleRing(
+      data.snapshot.capacity,
+      true,
+      undefined,
+      data.snapshot.bytesPerSample,
+      data.snapshot.pageSamples,
+    );
     ring.accept(data.snapshot);
     const reader = ring;
     const store: SampleStore & { channelRange(channel: number, start: bigint, end: bigint): Uint8Array } = {
